@@ -149,20 +149,19 @@ release gate behind `--release`) to `imprint-dev`, and the hook that measures ho
 subagent ran. Released 2026-09-26, without behavioural skill evals; those are the next build
 step.
 
-**0.6.0** (prepared 2026-09-27; ships when the owner merges it) adds the card line that puts
-pictures before prose for anything a person reads (#5), a table crossing all 12 card lines
-against their long form and their `docs/core-card-and-checks.md` enforcement classification —
-which check `g` now also reads, alongside the skills under `skills/` (#8) — a fix for two
-CodeQL alerts (`go/incorrect-integer-conversion`, high severity) in `imprint-dev`'s YAML
-unicode escape decoding (#11), a `claude plugin eval` suite covering all four skills under
-`evals/` (27 cases; #7), check `e` extended so it fails if `SubagentStop` is registered but no
-hook command in it actually names `log-subagent.sh` — closing a gap where an empty or
-unrelated hook group would have passed (#13), N16 wired into `.github/workflows/check.yml` so
-a `go test` run with zero tests, or one that leaves the working tree changed, counts as red
-(#13), and documentation corrections to stale hook and merge-owner claims left over from
-0.5.0's measuring hook (#13). It also adds `tools/arrival-test.sh`, a release-time check that
-a fresh session actually receives the card this release ships — see [Core card and
-checks](#core-card-and-checks). **Not in 0.6.0:** the update watcher (PR #12); it ships later.
+**0.6.0** (2026-09-27; ships when the owner merges it):
+
+- Card line: pictures first for anything a person reads (#5).
+- Table of all 12 card lines against their enforcement; check `g` reads it too (#8).
+- Fix for two CodeQL alerts in `imprint-dev` (#11).
+- `claude plugin eval` suite for all four skills, under `evals/` (#7).
+- Check `e` now requires `SubagentStop` to actually run the measuring hook (#13).
+- CI fails on zero tests or a dirty working tree (N16, #13).
+- Doc fixes (#13).
+- `tools/arrival-test.sh`: a release-time check that a fresh session actually receives the
+  card this release ships — see [Core card and checks](#core-card-and-checks).
+
+Not included: the update watcher (PR #12).
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
