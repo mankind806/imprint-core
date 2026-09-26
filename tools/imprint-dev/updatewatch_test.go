@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,7 +19,10 @@ import (
 
 var updateWatchScript = filepath.Join("..", "..", "hooks", "update-watch.sh")
 
-const versionFile = "claude-code-version"
+const (
+	versionFile = "claude-code-version"
+	historyFile = "claude-code-version-history"
+)
 
 // fakeClaude writes an executable claude into a new directory that prints
 // output for --version and exits with code, and returns the directory.
@@ -76,6 +80,30 @@ func recordedVersion(t *testing.T, dataDir string) string {
 	return string(raw)
 }
 
+// history returns the versions in the history file, without their dates, and
+// fails the test on a line that is not a date and a version.
+func history(t *testing.T, dataDir string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dataDir, historyFile))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var versions []string
+	for _, l := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		day, v, ok := strings.Cut(l, " ")
+		if !ok || !dayShape.MatchString(day) {
+			t.Fatalf("history line %q is not a UTC date and a version", l)
+		}
+		versions = append(versions, v)
+	}
+	return versions
+}
+
+var dayShape = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
 func record(t *testing.T, dataDir, v string) {
 	t.Helper()
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -132,11 +160,26 @@ func TestUpdateWatchSpeaksOnceAfterAChange(t *testing.T) {
 		t.Errorf("recorded %q, want the new version", got)
 	}
 
+	if got := history(t, dir); len(got) != 1 || got[0] != "2.1.283" {
+		t.Errorf("history %v, want [2.1.283]", got)
+	}
+
 	if out := runUpdateWatch(t, bin, dir, startupInput); out != "" {
 		t.Fatalf("the second run must be silent, printed %q", out)
 	}
 	if got := recordedVersion(t, dir); got != "2.1.283\n" {
 		t.Errorf("recorded %q after the second run", got)
+	}
+	if got := history(t, dir); len(got) != 1 {
+		t.Errorf("history %v after the second run; an unchanged version adds no line", got)
+	}
+
+	// The next update keeps the earlier version findable.
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.284 (Claude Code)", 0), dir, startupInput); !strings.Contains(out, "from 2.1.283 to 2.1.284") {
+		t.Fatalf("the next update must speak again, printed %q", out)
+	}
+	if got := history(t, dir); len(got) != 2 || got[0] != "2.1.283" || got[1] != "2.1.284" {
+		t.Errorf("history %v, want [2.1.283 2.1.284]", got)
 	}
 }
 
@@ -148,6 +191,31 @@ func TestUpdateWatchFirstRunOnlyRecords(t *testing.T) {
 	}
 	if got := recordedVersion(t, dir); got != "2.1.283\n" {
 		t.Errorf("recorded %q, want 2.1.283", got)
+	}
+	if got := history(t, dir); len(got) != 1 || got[0] != "2.1.283" {
+		t.Errorf("history %v, want [2.1.283]", got)
+	}
+}
+
+func TestUpdateWatchLeavesAnUnreadableRecordAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, so a file cannot be made unreadable here")
+	}
+	dir := t.TempDir()
+	record(t, dir, "2.1.282\n")
+	f := filepath.Join(dir, versionFile)
+	if err := os.Chmod(f, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f, 0o644) })
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
+		t.Fatalf("printed %q", out)
+	}
+	if err := os.Chmod(f, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := recordedVersion(t, dir); got != "2.1.282\n" {
+		t.Errorf("recorded %q; an unreadable record must not be overwritten", got)
 	}
 }
 

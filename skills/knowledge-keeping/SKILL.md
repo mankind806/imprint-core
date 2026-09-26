@@ -146,14 +146,18 @@ unclear.
 This plugin ships nothing that runs when knowledge is written or read. *First measured
 2026-09-15; measured again 2026-09-26 by listing this repository and reading `hooks/hooks.json`,
 the checks table in `tools/imprint-dev/checks.go` and the header of `.githooks/pre-push`. The
-tree ships two start hooks, SessionStart and SubagentStart, which print the core card; the check
-tool `tools/imprint-dev`, which checks the plugin's own files; a workflow file under
+tree ships the core card hooks on SessionStart and SubagentStart; the measuring hook on
+SubagentStart and SubagentStop; the update watch on SessionStart, which records the Claude Code
+version; the check tool `tools/imprint-dev`, which checks the plugin's own files; a workflow file under
 `.github/workflows/` that runs it with the tests wherever CI is enabled; and `.githooks/pre-push`,
 active only in a clone that points `core.hooksPath` at it, which checks commit identity and
 personal-data shapes before a push. None of them reads a knowledge page, a register or an entry,
 so every "enforceable" row in `references/` is unbuilt. This replaces the note "the only script
 this repository ships is a pre-push hook", which was true when it was written and stopped being
-true when the hooks and the check tool landed later the same day. Re-check by 2026-12-26.*
+true when the hooks and the check tool landed later the same day. The hook list was corrected
+2026-09-26, when the update watch was added, from "two start hooks, SessionStart and
+SubagentStart, which print the core card", which left out the measuring hook. Re-check by
+2026-12-26.*
 
 ## Before you write a fact down
 

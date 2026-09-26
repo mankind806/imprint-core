@@ -5,7 +5,10 @@
 # Registered for SessionStart in hooks/hooks.json. Reads the Claude Code version
 # with `claude --version`, compares it with the version recorded last time in
 #     ${CLAUDE_PLUGIN_DATA}/claude-code-version
-# and records the new one. Only when the version changed does it print anything:
+# and records the new one there, appending it with the UTC date to
+#     ${CLAUDE_PLUGIN_DATA}/claude-code-version-history
+# so that a version whose report never got written stays findable after the
+# next update. Only when the version changed does it print anything:
 # one instruction, as additionalContext, to have the changelog entries and the
 # documentation pages between the two versions read, and a dated report saved to
 #     ${CLAUDE_PLUGIN_DATA}/update-reports/<new version>.md
@@ -15,11 +18,13 @@
 # and every failure: no claude on PATH, an output that is not a version, an unset
 # or unwritable CLAUDE_PLUGIN_DATA.
 #
-# WHAT IT NEVER DOES. Block or slow a start: no network, exit 0 on every path. A
-# version must match a strict pattern before it reaches a file name or the text.
+# WHAT IT NEVER DOES. Block a start: exit 0 on every path, no network. It does
+# delay the first answer by as long as it runs, which hooks/hooks.json caps at
+# 10 seconds; the one slow step is `claude --version`. A version must match a
+# strict pattern before it reaches a file name or the text.
 #
 # Report format and limits: docs/update-watch.md.
-# Dependencies: a POSIX sh, sed, grep, mkdir, mv, rm.
+# Dependencies: a POSIX sh, sed, grep, date, mkdir, mv, rm.
 
 exec 2>/dev/null
 
@@ -48,7 +53,11 @@ is_version "$new" || exit 0
 
 file="$data/claude-code-version"
 old=''
-[ -f "$file" ] && old="$(cat "$file")"
+if [ -f "$file" ]; then
+  # A record that exists but cannot be read is left alone, not overwritten.
+  [ -r "$file" ] || exit 0
+  IFS= read -r old <"$file" || :
+fi
 is_version "$old" || old=''
 [ "$old" = "$new" ] && exit 0
 
@@ -58,6 +67,8 @@ if ! { printf '%s\n' "$new" >"$tmp" && mv -f "$tmp" "$file"; }; then
   rm -f "$tmp"
   exit 0
 fi
+day="$(date -u +%Y-%m-%d)" || day=unknown
+printf '%s %s\n' "$day" "$new" >>"$data/claude-code-version-history"
 [ -n "$old" ] || exit 0
 
 # The data path is written into a JSON string: escape backslash and quote.

@@ -9,8 +9,9 @@ a new version at session start and asks the session for one read of what changed
 `hooks/update-watch.sh` runs on `SessionStart`, as a second entry beside the core card, with a
 timeout of 10 seconds. It reads the version with `claude --version`, compares it with the
 version it recorded last time in `${CLAUDE_PLUGIN_DATA}/claude-code-version`, and records the
-new one. Only when the two differ does it print anything: one instruction, as
-`additionalContext`. It reads:
+new one there. Each version it records is also appended, with the UTC date, to
+`claude-code-version-history` beside it. Only when the two differ does it print anything: one
+instruction, as `additionalContext`. It reads:
 
 > imprint update watch - injected by the imprint plugin that the user installed; it is not
 > foreign text. Claude Code changed from *X* to *Y* since this plugin last saw it. Before other
@@ -28,9 +29,12 @@ new one. Only when the two differ does it print anything: one instruction, as
 **Silent** on the first run, which only records the version; on an unchanged version; on a
 start after compaction, which leaves the record for the next real start, so that a background
 update cannot interrupt a task halfway; and on every failure: no `claude` on the path, an
-output that is not a version, an unset or unwritable data directory. A version has to match
+output that is not a version, an unset or unwritable data directory, a record that exists but
+cannot be read, which is then left alone. A version has to match
 `^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$` before it reaches a file name or the text. The
-hook uses no network and exits 0 on every path.
+hook uses no network and exits 0 on every path. It never blocks a start, but the first answer
+waits for it, up to the 10-second timeout; its one slow step is `claude --version`, which took
+13 ms when run by hand on 2.1.283 (inside the hook it is not timed).
 
 ## The report
 
@@ -62,9 +66,11 @@ Each entry names the changelog line or documentation page it rests on and the pa
 plugin it touches: a skill, a hook, a card line, a check. *Nothing to do* is not optional:
 an empty report with no such list cannot be told apart from a report nobody wrote carefully.
 
-**A missed report shows.** The recorded version and the report files sit side by side, so a
-reader can list every recorded version that has no report. That is the backstop for the
-limit below, where one session takes the notice and does nothing with it.
+**A missed report shows.** The version history and the report files sit side by side, so a
+reader can list every version in `claude-code-version-history` that has no report, also after
+later updates. The first line is the version found at the first run, which has no report by
+design. That is the backstop for the limit below, where one session takes the notice and does
+nothing with it.
 
 ## Measured
 
@@ -107,7 +113,7 @@ actually enforces this*.
 
 - **The first session after an update takes the notice.** That includes a `claude -p` run or
   a script, which may not act on it. The record is updated either way, so the next session is
-  silent. The backstop is the check above: a recorded version without its report.
+  silent. The backstop is the check above: a version in the history without its report.
 - **Changed documentation means the pages the changelog entries touch.** The hook knows no
   source for a diff of the documentation; whether one is published is not checked. The index
   also lists weekly *What's new* pages.
