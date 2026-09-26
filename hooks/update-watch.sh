@@ -69,6 +69,8 @@ is_version "$new" || exit 0
 
 file="$data/claude-code-version"
 old=''
+# Something at the record's path that is not a plain file is left alone.
+if [ -e "$file" ] || [ -L "$file" ]; then [ -f "$file" ] || exit 0; fi
 if [ -f "$file" ]; then
   # A record that exists but cannot be read is left alone, not overwritten.
   [ -r "$file" ] || exit 0
