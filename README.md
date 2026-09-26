@@ -235,6 +235,10 @@ Measured once on one Linux setup with `claude -p`, date not recorded: both the `
 and the `SubagentStart` payload arrive as additional context. Native Windows is **not
 measured**; treat the card's arrival there as unknown.
 
+Measured 2026-09-26 with `imprint-dev check` on `main`: the card holds 1421 characters and 12
+non-empty lines, which is the line limit, so a new rule can join it only by replacing or
+merging an existing line.
+
 ### Measuring subagents
 
 `hooks/log-subagent.sh` writes one line per subagent start and stop; `imprint-dev measure`

@@ -3,9 +3,10 @@
 The detail behind [Core card and checks](../README.md#core-card-and-checks) in the README,
 where the measurement of the card's arrival is recorded.
 
-`hooks/kernkarte.md` is the plugin's core card: a short, plain-text summary of the
-foundation layer — who leads, one writer per worktree, review before anything ships, measure
-before asserting, and the rest of the handful of lines the skills argue for at length. Two
+`hooks/kernkarte.md` is the plugin's core card: a short, plain-text summary of the rules —
+who leads, one writer per worktree, review before anything ships, measure before asserting,
+a picture first and short prose for anything a person reads, and the rest of a handful of
+lines, most of which the skills argue for at length. Two
 plugin hooks put it in front of the model before a skill has had a chance to load:
 `SessionStart` (registered with no matcher, so it is wired up for every start source) and
 `SubagentStart` (so a dispatched subagent gets the same card its parent did). Both are
