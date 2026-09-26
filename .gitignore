@@ -10,3 +10,6 @@ desktop.ini
 *.bak
 .idea/
 .vscode/
+
+# Eval run output (claude plugin eval)
+evals/results/

@@ -160,20 +160,23 @@ like every other one here rather than a single sentence that writes all of it of
 | Claude Code's changelog and the documentation it touches are read after every upgrade (a higher `major.minor.patch` than last recorded), and a dated report says what this plugin should use, adapt or drop | **Enforced** that the upgrade is noticed and the read requested: `hooks/update-watch.sh` compares the version at every session start and, when it went up, puts one instruction in front of the session; a first run, a downgrade and a suffix-only change are only recorded. **Behaviour rule** that the read happens and the report is written; the session can ignore the notice, and an upgrade in the version history without its report is how a later reader sees that. That the subagent only reads is a behaviour rule as well: the instruction asks for it, and nothing restricts its tools; `foreign-material-reviewer`, whose tools are restricted, has no tool to fetch the sources. Details in the repository's `docs/update-watch.md`. |
 
 *First measured 2026-09-15; measured again 2026-09-26 by listing this repository and reading
-`hooks/hooks.json`, the checks table in `tools/imprint-dev/checks.go` and the header of
-`.githooks/pre-push`: nothing in this repository executes any of the enforceable rows. The tree
-ships the core card hooks on SessionStart and SubagentStart; the measuring hook on SubagentStart
-and SubagentStop; the update watch on SessionStart, which enforces the row above it; the check tool
-`tools/imprint-dev`, which checks the plugin's own files — description lengths, the card and its
-generated payloads, references to removed skills, the hooks file, the version; a workflow file
-under `.github/workflows/` that runs it with the tests on push and pull request wherever CI is
-enabled; and `.githooks/pre-push`, active only in a clone that points `core.hooksPath` at it,
-which checks commit identity and personal-data shapes before a push. This replaces a note that
-read "confirmed unchanged 2026-09-26 … The one script it ships runs at push time". Its finding
-that nothing executes the enforceable rows held; its inventory was already false in the commit
-that recorded it, which also carried the hooks, the check tool and the workflow. The hook list
-was corrected 2026-09-26, when the update watch was added, from "two start hooks,
-SessionStart and SubagentStart, which print the core card", which left out the measuring hook.
+`hooks/hooks.json` and the checks table in `tools/imprint-dev/checks.go`: nothing in this
+repository executes any of the enforceable rows. `SessionStart` and `SubagentStart` print the
+core card; since 0.5.0, `SubagentStart` and `SubagentStop` each also run a hook that only
+appends one measurement line — time, agent id, type, effort, and on a stop the transcript
+path — to a log file, measuring that a subagent started or returned and enforcing nothing. Since
+the update watch, `SessionStart` also runs a hook that enforces the noticing half of the last
+row above. The
+check tool `tools/imprint-dev` checks the plugin's own files — description lengths, the card
+and its generated payloads, references to removed skills, the hooks file's shape, the plugin
+version, that every enforcement-table row carries a known classification, and (with
+`--release`) that no dated re-check is overdue; a workflow file under `.github/workflows/` runs
+it with the tests on push and pull request wherever CI is enabled; and `.githooks/pre-push`,
+active only in a clone that points `core.hooksPath` at it, checks commit identity and
+personal-data shapes before a push. This replaces a note, measured 2026-09-26, that read "ships
+two start hooks, SessionStart and SubagentStart" without the SubagentStop measuring hook that
+had landed in 0.5.0 (PR #3) the same day. That earlier note's finding — that nothing executes
+the enforceable rows — still held; only its inventory of what the tree ships was already stale.
 Re-check by 2026-12-26.*
 
 ## A cheap check before you assert

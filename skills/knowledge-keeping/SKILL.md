@@ -144,20 +144,23 @@ unclear.
 ## What enforces this, measured
 
 This plugin ships nothing that runs when knowledge is written or read. *First measured
-2026-09-15; measured again 2026-09-26 by listing this repository and reading `hooks/hooks.json`,
-the checks table in `tools/imprint-dev/checks.go` and the header of `.githooks/pre-push`. The
-tree ships the core card hooks on SessionStart and SubagentStart; the measuring hook on
-SubagentStart and SubagentStop; the update watch on SessionStart, which records the Claude Code
-version; the check tool `tools/imprint-dev`, which checks the plugin's own files; a workflow file under
-`.github/workflows/` that runs it with the tests wherever CI is enabled; and `.githooks/pre-push`,
-active only in a clone that points `core.hooksPath` at it, which checks commit identity and
-personal-data shapes before a push. None of them reads a knowledge page, a register or an entry,
-so every "enforceable" row in `references/` is unbuilt. This replaces the note "the only script
-this repository ships is a pre-push hook", which was true when it was written and stopped being
-true when the hooks and the check tool landed later the same day. The hook list was corrected
-2026-09-26, when the update watch was added, from "two start hooks, SessionStart and
-SubagentStart, which print the core card", which left out the measuring hook. Re-check by
-2026-12-26.*
+2026-09-15; measured again 2026-09-26 by listing this repository and reading `hooks/hooks.json`
+and the checks table in `tools/imprint-dev/checks.go`. `SessionStart` and `SubagentStart` print
+the core card; since 0.5.0, `SubagentStart` and `SubagentStop` each also run a hook that only
+appends one measurement line — time, agent id, type, effort, and on a stop the transcript
+path — to a log file, measuring that a subagent started or returned without enforcing anything;
+since the update watch, `SessionStart` also runs a hook that records the Claude Code version
+and, on an upgrade, asks the session to read the changelog;
+the check tool `tools/imprint-dev` checks the plugin's own files, including that every
+enforcement-table row carries a known classification and (with `--release`) that no dated
+re-check is overdue; a workflow file under `.github/workflows/` runs it with the tests wherever
+CI is enabled; and `.githooks/pre-push`, active only in a clone that points `core.hooksPath` at
+it, checks commit identity and personal-data shapes before a push. None of them reads a
+knowledge page, a register or an entry, so every "enforceable" row in `references/` is unbuilt.
+This replaces two earlier notes: "the only script this repository ships is a pre-push hook"
+(true when written, false the same day once the hooks and the check tool landed) and, measured
+2026-09-26, "ships two start hooks, SessionStart and SubagentStart" without the SubagentStop
+measuring hook that had landed in 0.5.0 (PR #3) that same day. Re-check by 2026-12-26.*
 
 ## Before you write a fact down
 

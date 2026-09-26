@@ -55,7 +55,7 @@ var checks = []check{
 	{"b", "card-size", "hooks/kernkarte.md is at most 4000 characters and 12 non-empty lines.", checkCardSize},
 	{"c", "card-generated", "hooks/session-start.json and hooks/subagent-start.json are byte-identical to what gen produces from hooks/kernkarte.md.", checkCardGenerated},
 	{"d", "removed-skill-reference", "No reference to a removed skill, except on a line that says formerly or merged.", checkRemovedSkills},
-	{"e", "hooks-json", "hooks/hooks.json registers SessionStart without a matcher and SubagentStart, and every ${CLAUDE_PLUGIN_ROOT} sits inside double quotes.", checkHooksJSON},
+	{"e", "hooks-json", "hooks/hooks.json registers SessionStart without a matcher, SubagentStart, and SubagentStop, and every ${CLAUDE_PLUGIN_ROOT} sits inside double quotes.", checkHooksJSON},
 	{"f", "plugin-version", ".claude-plugin/plugin.json carries a semver version.", checkPluginVersion},
 	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/, and in docs/core-card-and-checks.md, carries at least one known classification, none unknown: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
 	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
@@ -325,6 +325,21 @@ type hookGroup struct {
 	} `json:"hooks"`
 }
 
+// eventRunsCommandContaining reports whether any hook command across any group
+// of the event contains substr. A group with an empty Hooks list, or one whose
+// commands name something else, does not count — check e must not pass on the
+// registration's shape alone while the measuring command itself is missing.
+func eventRunsCommandContaining(groups []hookGroup, substr string) bool {
+	for _, g := range groups {
+		for _, h := range g.Hooks {
+			if strings.Contains(h.Command, substr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func checkHooksJSON(e *env) (checkResult, error) {
 	const rule = "hooks-json"
 	bad := func(msg string) finding { return finding{rule, violation, hooksPath, 0, msg} }
@@ -333,7 +348,7 @@ func checkHooksJSON(e *env) (checkResult, error) {
 		return checkResult{}, err
 	}
 	if !found {
-		return checkResult{Findings: []finding{bad("missing: SessionStart and SubagentStart must be registered here")}}, nil
+		return checkResult{Findings: []finding{bad("missing: SessionStart, SubagentStart and SubagentStop must be registered here")}}, nil
 	}
 	var doc struct {
 		Hooks map[string][]hookGroup `json:"hooks"`
@@ -345,10 +360,14 @@ func checkHooksJSON(e *env) (checkResult, error) {
 		return checkResult{Findings: []finding{bad(`no "hooks" object`)}}, nil
 	}
 	var res checkResult
-	for _, ev := range []string{"SessionStart", "SubagentStart"} {
+	for _, ev := range []string{"SessionStart", "SubagentStart", "SubagentStop"} {
 		if len(doc.Hooks[ev]) == 0 {
 			res.Findings = append(res.Findings, bad(ev+" is not registered"))
 		}
+	}
+	if len(doc.Hooks["SubagentStop"]) > 0 && !eventRunsCommandContaining(doc.Hooks["SubagentStop"], "log-subagent.sh") {
+		res.Findings = append(res.Findings, bad(
+			"SubagentStop is registered but no hook command names log-subagent.sh; an empty or unrelated group would otherwise pass"))
 	}
 	for i, g := range doc.Hooks["SessionStart"] {
 		if g.Matcher != nil && *g.Matcher != "" {

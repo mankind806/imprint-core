@@ -5,8 +5,9 @@ The detail behind [What's in the box](../README.md#whats-in-the-box) in the READ
 ## The four states
 
 Four skills and one agent, in the two layers described below, plus two plugin hooks that
-inject a summary of them at session start (see [Core card and checks](core-card-and-checks.md))
-and one that records how long each subagent ran (see [Measuring subagents](measuring-subagents.md)). Each skill carries a section
+inject a summary of them at session and subagent start (see [Core card and
+checks](core-card-and-checks.md)) and a hook that records how long each subagent ran (see
+[Measuring subagents](measuring-subagents.md)). Each skill carries a section
 on what actually enforces it, and sorts every rule it holds into one of four states:
 **enforced** by something that really stops you, **enforceable, not enforced** where a
 mechanism is possible and nobody has built it, **reserved to a person** where the rule's
@@ -56,6 +57,13 @@ writing code.
   holding the pen.
 
 **What changed in 0.4.0:** `one-canonical-place`, `provenance-on-entry`, `supersede-dont-delete` and `knowledge-ages` merged into one skill, `knowledge-keeping`, below; `blind-first-pass` had already merged into `delegation-contract` above.
+
+**What changed in 0.5.0:** a measuring hook now also runs at `SubagentStart`, alongside the
+card hook already there, and at the new `SubagentStop`; it only appends a measurement line
+per event — see [Measuring subagents](measuring-subagents.md). Two `imprint-dev check` rules
+were added: that every Enforcement-table row carries a known classification, and that no
+dated re-check
+is overdue when run with `--release`.
 
 One skill follows: `knowledge-keeping`, the knowledge layer. The read order the four merged
 rules were written in still holds inside it — each part assumes the one before it, and the
