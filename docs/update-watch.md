@@ -33,7 +33,8 @@ start after compaction, which leaves the record for the next real start, so that
 update cannot interrupt a task halfway; and on every failure: no `claude` on the path, an
 output that is not a version, an unset or unwritable data directory, a record that exists but
 cannot be read, which is then left alone. A version has to match
-`^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$` before it reaches a file name or the text. The
+`^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}([-+][0-9A-Za-z.-]+)?$` before it reaches a file name or
+the text; nine digits keep every number within what the shell can compare. The
 hook uses no network and exits 0 on every path. It never blocks a start, but the first answer
 waits for it, up to the 10-second timeout; its one slow step is `claude --version`, which took
 13 ms when run by hand on 2.1.283 (inside the hook it is not timed).

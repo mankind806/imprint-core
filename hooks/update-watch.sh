@@ -41,9 +41,10 @@ source="$(printf '%s\n' "$input" | sed -n \
 [ "$source" = compact ] && exit 0
 
 # is_version S - true if S is one line shaped like 2.1.283 or 2.1.283-beta.1.
+# Each number has at most 9 digits, so that test -gt can compare it anywhere.
 is_version() {
   case "$1" in '' | *[[:cntrl:]]*) return 1 ;; esac
-  printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'
+  printf '%s\n' "$1" | grep -Eq '^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}([-+][0-9A-Za-z.-]+)?$'
 }
 
 # is_newer A B - true if version A has a higher major.minor.patch than B. Both

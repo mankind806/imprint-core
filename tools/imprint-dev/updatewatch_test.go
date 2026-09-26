@@ -317,6 +317,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		"a path instead of a version":  {"../x (Claude Code)", 0},
 		"a quote inside the version":   {`2.1.283"x (Claude Code)`, 0},
 		"a version with a slash after": {"2.1.283/../x", 0},
+		"a number too long to compare": {"2.1.9999999999999999999999 (Claude Code)", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
