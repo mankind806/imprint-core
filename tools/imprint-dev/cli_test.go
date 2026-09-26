@@ -199,3 +199,69 @@ func TestRunSARIFUnwritableIsAnError(t *testing.T) {
 		t.Fatalf("exit %d, want %d", code, exitError)
 	}
 }
+
+func TestRunOverdueRecheck(t *testing.T) {
+	root := newTree(t, func(f map[string]string) { f["README.md"] = "# fixture\n\n*Re-check by 2026-06-14.*\n" })
+	tests := []struct {
+		name string
+		args []string
+		code int
+		want []string // in stderr
+	}{
+		{"normal run warns", []string{"--today", "2026-06-15"}, exitOK,
+			[]string{"WARN   h overdue-recheck", "README.md:3: re-check was due by 2026-06-14", "0 violation(s)", "1 warning(s) (exit 0)"}},
+		{"release run fails", []string{"--today", "2026-06-15", "--release"}, exitViolation,
+			[]string{"FAIL   h overdue-recheck", "1 violation(s)", "0 warning(s) (exit 1)"}},
+		{"not yet due", []string{"--today", "2026-06-14", "--release"}, exitOK,
+			[]string{"ok     h overdue-recheck", "1 re-check date(s), none before 2026-06-14"}},
+		{"bad --today", []string{"--today", "15.06.2026"}, exitError, []string{"not a date in the form YYYY-MM-DD"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, _, stderr := runCLI(t, append([]string{"check", "--root", root}, tc.args...)...)
+			if code != tc.code {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", code, tc.code, stderr)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(stderr, w) {
+					t.Errorf("stderr does not contain %q:\n%s", w, stderr)
+				}
+			}
+		})
+	}
+}
+
+func TestRunSARIFLevelOfAnOverdueRecheck(t *testing.T) {
+	root := newTree(t, func(f map[string]string) { f["README.md"] = "# fixture\n\n*Re-check by 2026-06-14.*\n" })
+	for _, tc := range []struct {
+		release bool
+		level   string
+	}{{false, "warning"}, {true, "error"}} {
+		out := filepath.Join(t.TempDir(), "out.sarif")
+		args := []string{"check", "--root", root, "--today", "2026-06-15", "--sarif", out}
+		if tc.release {
+			args = append(args, "--release")
+		}
+		runCLI(t, args...)
+		raw, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var log struct {
+			Runs []struct {
+				Results []struct {
+					RuleID string `json:"ruleId"`
+					Kind   string `json:"kind"`
+					Level  string `json:"level"`
+				} `json:"results"`
+			} `json:"runs"`
+		}
+		if err := json.Unmarshal(raw, &log); err != nil {
+			t.Fatal(err)
+		}
+		res := log.Runs[0].Results
+		if len(res) != 1 || res[0].RuleID != "overdue-recheck" || res[0].Kind != "fail" || res[0].Level != tc.level {
+			t.Errorf("release=%v: results %+v, want one overdue-recheck at level %s", tc.release, res, tc.level)
+		}
+	}
+}

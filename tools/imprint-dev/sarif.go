@@ -106,9 +106,12 @@ func buildSARIF(r report) sarifLog {
 				Level:     "error",
 				Message:   sarifText{Text: f.Message},
 			}
-			if f.Kind == notCheckable {
+			switch f.Kind {
+			case notCheckable:
 				// SARIF allows a level other than "none" only on kind "fail".
 				res.Kind, res.Level = "notApplicable", "none"
+			case warning:
+				res.Level = "warning"
 			}
 			if f.Path != "" {
 				loc := sarifLocation{PhysicalLocation: sarifPhysicalLocation{
