@@ -22,6 +22,22 @@ jobs:
           cache: false
       - name: go test
         working-directory: tools/imprint-dev
-        run: go test ./...
+        run: |
+          # N16: a run with zero tests counts as red.
+          n=$(go test -list '.*' ./... | grep -c '^Test' || true)
+          echo "Tests found: $n"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::go test found zero tests; that counts as red (N16)"
+            exit 1
+          fi
+          go test ./...
       - name: imprint-dev check
-        run: go run ./tools/imprint-dev check --root . --sarif imprint-dev.sarif
+        run: go run ./tools/imprint-dev check --root . --sarif "$RUNNER_TEMP/imprint-dev.sarif"
+      - name: working tree unchanged
+        # N16: CI compares the file list before and after the run.
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            git status --porcelain --untracked-files=all
+            echo "::error::Tests or the check wrote or changed files in the repository"
+            exit 1
+          fi

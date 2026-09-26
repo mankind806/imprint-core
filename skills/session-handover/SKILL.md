@@ -145,28 +145,37 @@ afterwards by any amount of reading the repository.
 
 | Rule | Enforcement |
 |---|---|
-| Runnable work is committed before the session ends | **Enforceable, not enforced** here. Nothing this plugin ships looks at the working tree when a session ends: its two hooks fire at a session's and a subagent's start and only print the core card, and its other checks run before a push or against the plugin's own files. The mechanism is ordinary to build — a check at the end of a turn, or at the next start, that refuses on a dirty tree. Where one is built, the finding to look for is its coverage rather than its existence: a gate that watched a fixed list of tooling and configuration paths would say nothing about the knowledge a session actually produced, and a gate built for one repository would not protect its siblings. |
+| Runnable work is committed before the session ends | **Enforceable, not enforced** here. Nothing this plugin ships looks at the working tree when a session ends: `SessionStart` prints the core card; `SubagentStart` prints the core card and, since 0.5.0, also appends a measurement line; `SubagentStop`, added in 0.5.0, only appends a measurement line (time, agent id, type, effort, transcript path) — none of the three looks at the working tree. Its other checks run before a push or against the plugin's own files. The mechanism is ordinary to build — a check at the end of a turn, or at the next start, that refuses on a dirty tree. Where one is built, the finding to look for is its coverage rather than its existence: a gate that watched a fixed list of tooling and configuration paths would say nothing about the knowledge a session actually produced, and a gate built for one repository would not protect its siblings. |
 | Every fact is at its canonical place rather than in a note — work in git, decisions and operating-state changes with their way back in the decision register, open questions and measurements at theirs | **Behaviour rule** for whether each fact reached its place. The parts with a mechanical half have rows of their own — the commit row above and the operating-state row below — and the decisions row below says why nothing can tell that a decision is missing. Looked for: `hooks/hooks.json` registers no hook at a session's end, and `imprint-dev check` reads the plugin's own files, never a register. |
 | The next session measures the state, and the next step with its reason stays in the closing message | **Enforceable, not enforced** for the measuring; **Behaviour rule** for the closing message. Something at the next start could list branches, worktrees and entries marked open; the session-start hook this plugin ships injects the core card and measures nothing. Whether the closing message names a next step and gives its reason no mechanism reaches. |
 | The operating state is restored, or named where it cannot be | **Enforceable, not enforced**, and this row read "no mechanism anywhere in sight" until somebody looked. The mechanism is a ledger: every suspension of a check or a schedule is entered with a path or a name **and an expiry**, and the close reads the ledger back. A ledger of this shape is buildable — it could hold each entry with its expiry and report it back at the turn's end with the time the exemption runs out. This plugin ships none; the decision register, where each suspension is entered with its way back and its date, is the place such a ledger would read. What stays unenforced even with a ledger is the entering: a suspension made without going through the ledger is invisible to it, the same shape a write path has when a file is opened in an editor instead. |
 | Decisions that exist only in the conversation are written down | **Behaviour rule**. Nothing can tell that a decision was taken, so nothing can tell that one is missing. An absent record and a session in which nothing was decided are the same text. Unlike the two rows this round corrected, this one has been looked for and there is genuinely nothing. |
-| The close triggers on the signal rather than on a phrase | **Enforceable, not enforced** for the observable signals; **Behaviour rule** for the judgement inside them. This row was wrong in the more dangerous direction. An explicit stop, a context window near its limit, a delegated task returning, and a session ending are events a harness can name: the runtime measured below names events for an end of turn, an imminent compaction, a subagent's return and a session's end, which bracket the observables the section above lists. A check that fires on the *event* rather than on a word neither narrows the reading nor needs a phrase list. This plugin registers hooks only at a session's and a subagent's start, so none of these events is handled here. What no mechanism reaches is only the judgement inside the observable: is this the end? The original objection — that a phrase trigger would establish the narrow reading — is true of a phrase trigger and was wrongly generalised to every mechanism. |
+| The close triggers on the signal rather than on a phrase | **Enforceable, not enforced** for the observable signals; **Behaviour rule** for the judgement inside them. This row was wrong in the more dangerous direction. An explicit stop, a context window near its limit, a delegated task returning, and a session ending are events a harness can name: the runtime measured below names events for an end of turn, an imminent compaction, a subagent's return and a session's end, which bracket the observables the section above lists. A check that fires on the *event* rather than on a word neither narrows the reading nor needs a phrase list. This plugin registers hooks at a session's start, a subagent's start and (since 0.5.0) a subagent's stop, and the hook at the last two also appends a measurement line, but none of the three runs a close-triggering check, so none of these events causes a handover check here. What no mechanism reaches is only the judgement inside the observable: is this the end? The original objection — that a phrase trigger would establish the narrow reading — is true of a phrase trigger and was wrongly generalised to every mechanism. |
 | Commands left for a person are shown singly | **Behaviour rule**. |
 
-*Measured 2026-09-26 by listing this repository and reading `hooks/hooks.json`, the checks
-table in `tools/imprint-dev/checks.go` and the header of `.githooks/pre-push`: nothing here
-observes a session ending. The plugin's two hooks are registered for SessionStart and
-SubagentStart and print the core card; none is registered for an end of turn, a compaction, a
-subagent's return or a session's end. `tools/imprint-dev` checks the plugin's own files —
-description lengths, the card and its generated payloads, references to removed skills, the
-hooks file, the version — and a workflow file under `.github/workflows/` runs it with the tests
-on push and pull request wherever CI is enabled. `.githooks/pre-push`, active only in a clone
-that points `core.hooksPath` at it, checks commit identity and personal-data shapes before a
-push. None of them has sessions as its subject. Separately, measured 2026-09-15, the harness
-running this: its hook events include an end of turn, an imminent context compaction, a
-subagent's return and a session's end — read as event names in the binary of the version in
-use, not executed, so what is established is that such events are named and not what a
-handler may do in them. Re-check by 2026-12-15.*
+*Measured again 2026-09-26 by listing this repository and reading `hooks/hooks.json` and the
+checks table in `tools/imprint-dev/checks.go`: nothing here observes a session ending.
+`SessionStart` and `SubagentStart` print the core card; since 0.5.0, `SubagentStart` and
+`SubagentStop` each also run `hooks/log-subagent.sh`, which appends one measurement line — time,
+agent id, type, effort, and on a stop the transcript path, no response text — to a log file.
+That measuring hook records that a subagent started or returned; it runs no check and enforces
+no handover. None of the hooks looks at whether the returning session committed, restored state
+or wrote down a decision, and none is registered for an end of turn, a compaction or a session's
+end. `tools/imprint-dev` checks the plugin's own files — description lengths, the card and its
+generated payloads, references to removed skills, the hooks file's shape, the plugin version,
+that every enforcement-table row carries a known classification, and (with `--release`) that no
+dated re-check is overdue — and a workflow file under `.github/workflows/` runs it with the
+tests on push and pull request wherever CI is enabled. `.githooks/pre-push`, active only in a
+clone that points `core.hooksPath` at it, checks commit identity and personal-data shapes before
+a push. None of them has sessions as its subject. This replaces a note, measured 2026-09-26,
+that read "The plugin's two hooks are registered for SessionStart and SubagentStart and print
+the core card; none is registered for … a subagent's return" — true of the 0.4.0 tree it was
+written against, and already false the same day once the SubagentStop measuring hook (0.5.0,
+PR #3) landed. Separately, measured 2026-09-15, the harness running this: its hook events
+include an end of turn, an imminent context compaction, a subagent's return and a session's
+end — read as event names in the binary of the version in use, not executed, so what is
+established is that such events are named and not what a handler may do in them.
+Re-check by 2026-12-15.*
 
 **Two rows in this table said a mechanism was impossible or harmful, and both were wrong in
 the direction that never gets audited.** An assurance that something cannot be built only ever

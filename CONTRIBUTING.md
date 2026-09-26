@@ -1,7 +1,10 @@
 # Contributing
 
-Changes arrive as pull requests. Only the owner, `mankind806`, merges, and every pull
-request lands on `main` as a squash merge.
+Changes arrive as pull requests, and every pull request lands on `main` as a squash merge.
+Every pull request not opened by Claude on the owner's own behalf — including one from a
+human contributor, Copilot, Dependabot or another agent — is merged only by the owner,
+`mankind806`, by hand. Claude's own pull requests are merged by a Claude subagent once the
+required `check` is green, formally through the owner's own account.
 
 ## How
 
@@ -40,6 +43,16 @@ employer's policies allow it.
 If an AI tool helped, say so in the commit message or the pull request with one line,
 `Assisted-by: <tool or model>`, naming the tool or model and never an address. This applies
 to everyone, the owner included.
+
+`main` only takes squash merges with the commit message left blank, so a line written only in
+the pull request body never reaches the merge commit. A maintainer merging such a pull request
+carries the line over explicitly, with a real blank line before it so it lands as its own line
+rather than run into the summary — a literal `\n` inside a shell double-quoted string does not
+produce one:
+
+    gh pr merge <n> --squash --body "$(printf '%s\n\n%s' '<title or summary>' 'Assisted-by: <tool or model>')"
+
+so the merged commit still carries the line.
 
 Commit messages carry no addresses: no `Signed-off-by` or `Co-authored-by` lines with one,
 and no other line that holds one. The pre-push hook, `.githooks/pre-push`, refuses a push

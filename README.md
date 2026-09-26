@@ -162,8 +162,8 @@ rows of `delegation-contract` (see [Measuring subagents](#measuring-subagents)).
 - **Whether any limit truncates a skill description.** No longer as open as it was: this
   release's own tooling checks (see [Core card and checks](#core-card-and-checks)) that each
   skill description stays at or under 400 characters and all of them together at or under
-  3000, and CI runs it wherever GitHub Actions is enabled. Measured locally 2026-09-26: four
-  skills at 1573 characters combined, none near the cap. Still unmeasured is whether the
+  3000, and CI runs it wherever GitHub Actions is enabled. Measured locally 2026-09-26 with
+  `imprint-dev check`: four skills at 1572 characters combined, none near the cap. Still unmeasured is whether the
   *host*, Claude Code itself, imposes any separate limit of its own; no specification for one
   has been located either way. *Re-check by 2026-12-15.*
 - **The remaining rows that say no mechanism exists have not been re-searched.** The most
@@ -208,9 +208,12 @@ guards both, among other things the skill descriptions, the hook wiring, the plu
 the enforcement tables and overdue re-check dates. What each check enforces:
 [docs/core-card-and-checks.md](docs/core-card-and-checks.md).
 
-Measured once on one Linux setup with `claude -p`, date not recorded: both the `SessionStart`
-and the `SubagentStart` payload arrive as additional context. Native Windows is **not
-measured**; treat the card's arrival there as unknown.
+Measured 2026-09-26 on one Linux setup, Claude Code 2.1.283, with `claude -p --plugin-dir` in a
+fresh session against this repository's working tree: both the `SessionStart` and the
+`SubagentStart` payload arrive as additional context. That is a measurement of this working
+tree, not of an installed copy from the marketplace; the two can differ whenever an installed
+plugin has not picked up a `main` change. Native Windows is **not measured**; treat the card's
+arrival there as unknown.
 
 Measured 2026-09-26 with `imprint-dev check` on `main`: the card holds 1421 characters and 12
 non-empty lines, which is the line limit, so a new rule can join it only by replacing or
