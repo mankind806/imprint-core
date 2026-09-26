@@ -51,6 +51,15 @@ claude plugin eval . --tag trigger --tag negative --max-cost-usd <CAP>
 claude plugin eval . --tag behavior --judge-model sonnet --max-cost-usd <CAP>
 ```
 
+Only 3 of the 4 `-behavior` cases have an `llm` grader —
+`delegation-contract-behavior`, `knowledge-keeping-behavior`, and
+`session-handover-behavior`; `measure-before-asserting-behavior` uses only
+`tool_used` and `regex`, so `--judge-model` has no effect on it. As of this
+README, only `delegation-contract-behavior` has actually been re-run with
+Sonnet (run 3, below); `knowledge-keeping-behavior` and
+`session-handover-behavior` are still scored from run 2 under the default
+Haiku judge.
+
 Per the docs (checked 2026-09-26): if the account's usage limit or an API
 rate limit is hit partway through a run, every later run ends with that
 error and is graded on what it produced — usually 0 — with no warning and
@@ -84,7 +93,8 @@ votes.
 
 ## Actual runs so far
 
-Both runs used Claude Code 2.1.283, judge model haiku (the default), `--runs 3`, both arms.
+All three runs used Claude Code 2.1.283, `--runs 3`, both arms. Runs 1 and 2
+used the default judge model (haiku); run 3 used `--judge-model sonnet`.
 
 **Run 1 — full suite, 2026-09-26.** `--max-cost-usd` not hit, $11.16, 396s. Overall
 83.3% with the plugin loaded vs. 29.9% without; the without-arm never loaded a
@@ -106,8 +116,8 @@ $3.01 + $0.64 for one follow-up fix = **$3.65 total**, 125s + 41s:
 | `measure-before-asserting-trigger-de-2` | Rewritten to tempt an answer from notes/memory | 3/3 | 0/3 | +1.0 |
 | `measure-before-asserting-trigger-en-2` | Same, English | 3/3 | 0/3 | +1.0 |
 | `session-handover-trigger-en-2` | Replaced with a clear "that's it for today" close | 3/3 | 0/3 | +1.0 |
-| `knowledge-keeping-behavior` | Prompt now asks to correct an earlier decision with a due date, so source/date/due-date/supersede must show up | 0.33 | 0 | +0.33 |
-| `delegation-contract-behavior` | Prompt sharpened once more mid-run to `Delegate this to subagents: ...` after the first rewrite dropped every delegation cue and never fired the skill | 0/3 (skill fired 3/3, judge still voted FAIL FAIL FAIL) | 0.33/3 | -0.33 |
+| `knowledge-keeping-behavior` | Prompt now asks to correct an earlier decision with a due date, so source/date/due-date/supersede must show up | 1/3 | 0/3 | +0.33 |
+| `delegation-contract-behavior` | Prompt sharpened once more mid-run to `Delegate this to subagents: ...` after the first rewrite dropped every delegation cue and never fired the skill | 0/3 (skill fired 3/3, judge still voted FAIL FAIL FAIL) | 1/3 | -0.33 |
 
 `delegation-contract-trigger-de-2` still never fires the skill even with a
 concrete proposal in it. Per this run, "zweite Meinung" (second opinion) on a
@@ -131,11 +141,29 @@ which it did not before.
 
 **Run 3 — all six `delegation-contract-*` cases, 2026-09-26.**
 `--tag delegation-contract --judge-model sonnet`, cap $4, actual **$3.18**,
-149s. Change under test: `skills/delegation-contract/SKILL.md`'s
-`description` now triggers on "second opinion from another agent" /
-"zweite Meinung von anderen Agenten" instead of the bare, ambiguous
-"second opinion" / "zweite Meinung"; the judge for all `llm` graders in
-this run was Sonnet instead of the default Haiku.
+149s. Two things changed at once, so the two effects below are not cleanly
+separated: `skills/delegation-contract/SKILL.md`'s `description` now
+triggers on "second opinion from another agent" / "zweite Meinung von
+anderen Agenten" instead of the bare "second opinion" / "zweite Meinung",
+and the judge for all `llm` graders in this run was Sonnet instead of the
+default Haiku.
+
+> **Deviation from the chosen wording.** The option the user picked named
+> the new trigger as *"unabhängige zweite Einschätzung von einem anderen
+> Agenten" / "independent second reviewer"*. What actually shipped instead
+> rewords the *existing* "second opinion" / "zweite Meinung" triggers to
+> "second opinion from another agent" / "zweite Meinung von anderen
+> Agenten", because the description was already at 399 of the 400-character
+> limit (`imprint-dev check`, rule `skill-description-length`) and adding
+> the chosen phrase alongside the old one, unshortened, measured 557
+> characters. The lead-in "Use when delegating, reviewing or choosing a
+> model:" was also cut to "Triggers:" (matching the wording other skills in
+> this plugin already use) to make room. No case in this suite tests a bare
+> "second opinion" prompt without a proposal, so whether dropping the old,
+> unqualified trigger loses something is unmeasured. This sits only on the
+> unmerged `feat/evals` branch; the user's exact chosen wording was not
+> used, so it should be confirmed or corrected before anyone treats this
+> description as final.
 
 | Case | With | Without | Δ |
 | :--- | :--: | :--: | :--: |
@@ -146,16 +174,31 @@ this run was Sonnet instead of the default Haiku.
 | `delegation-contract-negative` | pass | pass | 0 (expected — `arm: both`) |
 | `delegation-contract-behavior` | 1.0 | 0 | +1.0 |
 
-The Sonnet judge fixed `delegation-contract-behavior` outright (Δ 0 → +1.0):
-the same kind of role/boundary/return plan that Haiku voted FAIL on 3/3
-times in run 2 now scores 1.0. `delegation-contract-trigger-de-2` still never
-fires the skill (0/3), unchanged from run 2, even with the sharper
-description. On inspection this looks like a prompt problem, not a
-description problem: the prompt itself ("Ich brauche eine zweite Meinung zu
-diesem Vorschlag...") never says the second opinion should come from
-*another agent* — that framing lives only in the description now, and the
-prompt still reads as an ordinary request for Claude's own feedback. Fixing
-it would mean rewording the trigger case's prompt itself (out of scope for
-a description-only change), for example to something like "Ich möchte eine
-unabhängige zweite Einschätzung von einem anderen Agenten, bevor ich diesen
-Vorschlag umsetze: ...".
+`delegation-contract-behavior` went from Δ 0 to Δ +1.0: the same kind of
+role/boundary/return plan that Haiku voted FAIL on 3/3 times in run 2 now
+scores 1.0. Since the description and the judge model both changed here,
+this is *likely* the Sonnet judge correcting run 2's misjudged verdict
+(consistent with the skill firing 3/3 in both run 2b and run 3, unchanged),
+but it was not isolated by re-running with the old description or the old
+judge, so it is not proven.
+
+`delegation-contract-trigger-de-2` still never fires the skill (0/3, all 6
+runs), unchanged from run 2, even with the sharper description. This looks
+like a prompt problem, not a description problem: the prompt itself ("Ich
+brauche eine zweite Meinung zu diesem Vorschlag...") never says the second
+opinion should come from *another agent* — that framing lives only in the
+description now, and the prompt still reads as an ordinary request for
+Claude's own feedback, which is arguably not something the delegation
+skill should be firing on at all.
+
+**Recommendation (untested, needs a rerun before it counts):** turn this
+prompt into a second `delegation-contract-negative` case, since the data
+already shows it does not fire the skill either way — and add a fresh
+`delegation-contract-trigger-de-2` prompt that explicitly asks for another
+agent's independent assessment, e.g. "Ich möchte eine unabhängige zweite
+Einschätzung von einem anderen Agenten, bevor ich diesen Vorschlag
+umsetze: ...". Both new/changed cases would use only free graders, so a
+rerun (about 12 agent sessions) should stay well under $1. Alternative:
+reword only this one case's prompt the same way, without adding a second
+negative case. Either way, the merge gate on this case stays unmet until a
+rerun confirms it.
