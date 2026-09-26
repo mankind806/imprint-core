@@ -205,7 +205,7 @@ func TestCheckHooksJSON(t *testing.T) {
 	}
 	const sub = `"SubagentStart": [{"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/x\""}]}]`
 	const sess = `"SessionStart": [{"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/x\""}]}]`
-	const stop = `"SubagentStop": [{"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/x\""}]}]`
+	const stop = `"SubagentStop": [{"hooks": [{"type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/log-subagent.sh\""}]}]`
 	tests := []struct {
 		name   string
 		mutate func(map[string]string)
@@ -223,6 +223,13 @@ func TestCheckHooksJSON(t *testing.T) {
 		// protects the two start hooks — the measuring hook added in 0.5.0 is guarded
 		// against being dropped, not just accepted when present.
 		{"SubagentStop missing", hooks(`{"hooks": {` + sess + `, ` + sub + `}}`), 1, []string{"SubagentStop is not registered"}},
+		// A Copilot review on this same change found that an empty or unrelated
+		// SubagentStop group satisfied the registration check above while the
+		// measuring command itself was gone. These two cases pin that down.
+		{"SubagentStop registered with no hooks", hooks(`{"hooks": {` + sess + `, ` + sub + `, "SubagentStop": [{"hooks": []}]}}`), 1,
+			[]string{"no hook command names log-subagent.sh"}},
+		{"SubagentStop registered with an unrelated command", hooks(`{"hooks": {` + sess + `, ` + sub + `, "SubagentStop": [{"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/x\""}]}]}}`), 1,
+			[]string{"no hook command names log-subagent.sh"}},
 		{"SessionStart empty list", hooks(`{"hooks": {"SessionStart": [], ` + sub + `, ` + stop + `}}`), 1, []string{"SessionStart is not registered"}},
 		{"SessionStart with a matcher", hooks(`{"hooks": {"SessionStart": [{"matcher": "startup", "hooks": []}], ` + sub + `, ` + stop + `}}`), 1,
 			[]string{`SessionStart entry 1 has the matcher "startup"`}},

@@ -325,6 +325,21 @@ type hookGroup struct {
 	} `json:"hooks"`
 }
 
+// eventRunsCommandContaining reports whether any hook command across any group
+// of the event contains substr. A group with an empty Hooks list, or one whose
+// commands name something else, does not count — check e must not pass on the
+// registration's shape alone while the measuring command itself is missing.
+func eventRunsCommandContaining(groups []hookGroup, substr string) bool {
+	for _, g := range groups {
+		for _, h := range g.Hooks {
+			if strings.Contains(h.Command, substr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func checkHooksJSON(e *env) (checkResult, error) {
 	const rule = "hooks-json"
 	bad := func(msg string) finding { return finding{rule, violation, hooksPath, 0, msg} }
@@ -349,6 +364,10 @@ func checkHooksJSON(e *env) (checkResult, error) {
 		if len(doc.Hooks[ev]) == 0 {
 			res.Findings = append(res.Findings, bad(ev+" is not registered"))
 		}
+	}
+	if len(doc.Hooks["SubagentStop"]) > 0 && !eventRunsCommandContaining(doc.Hooks["SubagentStop"], "log-subagent.sh") {
+		res.Findings = append(res.Findings, bad(
+			"SubagentStop is registered but no hook command names log-subagent.sh; an empty or unrelated group would otherwise pass"))
 	}
 	for i, g := range doc.Hooks["SessionStart"] {
 		if g.Matcher != nil && *g.Matcher != "" {

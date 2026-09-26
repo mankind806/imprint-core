@@ -144,7 +144,7 @@ unclear.
 ## What enforces this, measured
 
 This plugin ships nothing that runs when knowledge is written or read. *First measured
-2026-09-15; measured again 2026-09-27 by listing this repository and reading `hooks/hooks.json`
+2026-09-15; measured again 2026-09-26 by listing this repository and reading `hooks/hooks.json`
 and the checks table in `tools/imprint-dev/checks.go`. `SessionStart` and `SubagentStart` print
 the core card; since 0.5.0, `SubagentStart` and `SubagentStop` each also run a hook that only
 appends one measurement line — time, agent id, type, effort, and on a stop the transcript

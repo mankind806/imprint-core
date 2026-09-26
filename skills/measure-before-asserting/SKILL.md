@@ -158,7 +158,7 @@ like every other one here rather than a single sentence that writes all of it of
 | An assurance says what it does **not** cover | **Behaviour rule**. Whether a stated limit is the real one is a judgement about meaning. A checker can see that a sentence about coverage exists; it cannot see that it is honest. |
 | An unmeasurable thing is reported as unmeasured rather than guessed cautiously | **Behaviour rule**, and the one this skill exists for. A cautious-sounding wrong answer and a measured right one are the same shape on the page, which is why the over-cautious assurance is the dangerous class — nothing ever makes it fail. |
 
-*First measured 2026-09-15; measured again 2026-09-27 by listing this repository and reading
+*First measured 2026-09-15; measured again 2026-09-26 by listing this repository and reading
 `hooks/hooks.json` and the checks table in `tools/imprint-dev/checks.go`: nothing in this
 repository executes any of the enforceable rows. `SessionStart` and `SubagentStart` print the
 core card; since 0.5.0, `SubagentStart` and `SubagentStop` each also run a hook that only

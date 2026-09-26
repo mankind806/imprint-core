@@ -162,7 +162,7 @@ rows of `delegation-contract` (see [Measuring subagents](#measuring-subagents)).
 - **Whether any limit truncates a skill description.** No longer as open as it was: this
   release's own tooling checks (see [Core card and checks](#core-card-and-checks)) that each
   skill description stays at or under 400 characters and all of them together at or under
-  3000, and CI runs it wherever GitHub Actions is enabled. Measured locally 2026-09-27 with
+  3000, and CI runs it wherever GitHub Actions is enabled. Measured locally 2026-09-26 with
   `imprint-dev check`: four skills at 1572 characters combined, none near the cap. Still unmeasured is whether the
   *host*, Claude Code itself, imposes any separate limit of its own; no specification for one
   has been located either way. *Re-check by 2026-12-15.*

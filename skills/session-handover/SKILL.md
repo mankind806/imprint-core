@@ -153,7 +153,7 @@ afterwards by any amount of reading the repository.
 | The close triggers on the signal rather than on a phrase | **Enforceable, not enforced** for the observable signals; **Behaviour rule** for the judgement inside them. This row was wrong in the more dangerous direction. An explicit stop, a context window near its limit, a delegated task returning, and a session ending are events a harness can name: the runtime measured below names events for an end of turn, an imminent compaction, a subagent's return and a session's end, which bracket the observables the section above lists. A check that fires on the *event* rather than on a word neither narrows the reading nor needs a phrase list. This plugin registers hooks at a session's start, a subagent's start and (since 0.5.0) a subagent's stop, and the hook at the last two also appends a measurement line, but none of the three runs a close-triggering check, so none of these events causes a handover check here. What no mechanism reaches is only the judgement inside the observable: is this the end? The original objection — that a phrase trigger would establish the narrow reading — is true of a phrase trigger and was wrongly generalised to every mechanism. |
 | Commands left for a person are shown singly | **Behaviour rule**. |
 
-*Measured again 2026-09-27 by listing this repository and reading `hooks/hooks.json` and the
+*Measured again 2026-09-26 by listing this repository and reading `hooks/hooks.json` and the
 checks table in `tools/imprint-dev/checks.go`: nothing here observes a session ending.
 `SessionStart` and `SubagentStart` print the core card; since 0.5.0, `SubagentStart` and
 `SubagentStop` each also run `hooks/log-subagent.sh`, which appends one measurement line — time,
