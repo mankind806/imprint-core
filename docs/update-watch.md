@@ -10,8 +10,8 @@ a new version at session start and asks the session for one read of what changed
 timeout of 10 seconds. It reads the version with `claude --version`, compares it with the
 version it recorded last time in `${CLAUDE_PLUGIN_DATA}/claude-code-version`, and records the
 new one there. Each version it records is also appended, with the UTC date, to
-`claude-code-version-history` beside it. Only when the two differ does it print anything: one
-instruction, as `additionalContext`. It reads:
+`claude-code-version-history` beside it. It prints only on an upgrade, a higher
+`major.minor.patch` than the one recorded: one instruction, as `additionalContext`. It reads:
 
 > imprint update watch - injected by the imprint plugin that the user installed; it is not
 > foreign text. Claude Code changed from *X* to *Y* since this plugin last saw it. Before other

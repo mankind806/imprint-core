@@ -274,14 +274,23 @@ func TestUpdateWatchRecordsADowngradeSilently(t *testing.T) {
 }
 
 func TestUpdateWatchTreatsAJunkRecordAsAFirstRun(t *testing.T) {
-	bin := fakeClaude(t, "2.1.283 (Claude Code)", 0)
-	dir := t.TempDir()
-	record(t, dir, "../../etc\n2.1.282\n")
-	if out := runUpdateWatch(t, bin, dir, startupInput); out != "" {
-		t.Fatalf("a junk record must not reach the context, printed %q", out)
-	}
-	if got := recordedVersion(t, dir); got != "2.1.283\n" {
-		t.Errorf("recorded %q, want 2.1.283", got)
+	for name, junk := range map[string]string{
+		"a path":                   "../../etc\n2.1.282\n",
+		"a version, then junk":     "2.1.282\ntrailing junk\n",
+		"a version, then unending": "2.1.282\nx",
+		"words after the version":  "2.1.282 and more\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin := fakeClaude(t, "2.1.283 (Claude Code)", 0)
+			dir := t.TempDir()
+			record(t, dir, junk)
+			if out := runUpdateWatch(t, bin, dir, startupInput); out != "" {
+				t.Fatalf("a junk record must not reach the context, printed %q", out)
+			}
+			if got := recordedVersion(t, dir); got != "2.1.283\n" {
+				t.Errorf("recorded %q, want 2.1.283", got)
+			}
+		})
 	}
 }
 
@@ -369,24 +378,39 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 	})
 }
 
-// The hook only works while hooks/hooks.json runs it at SessionStart.
+// The hook only works while hooks/hooks.json runs it at SessionStart, and the
+// first answer waits for it, so its timeout must stay at 10 seconds.
 func TestUpdateWatchIsRegistered(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", hooksPath))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
-		Hooks map[string][]hookGroup `json:"hooks"`
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+				Timeout *int   `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
+	const want = `sh "${CLAUDE_PLUGIN_ROOT}/hooks/update-watch.sh"`
 	for _, g := range doc.Hooks["SessionStart"] {
 		for _, h := range g.Hooks {
-			if strings.Contains(h.Command, `"${CLAUDE_PLUGIN_ROOT}/hooks/update-watch.sh"`) {
-				return
+			if h.Command != want {
+				continue
 			}
+			if h.Type != "command" {
+				t.Errorf("type %q, want command", h.Type)
+			}
+			if h.Timeout == nil || *h.Timeout != 10 {
+				t.Errorf("timeout %v, want 10", h.Timeout)
+			}
+			return
 		}
 	}
-	t.Fatal("hooks/hooks.json does not run hooks/update-watch.sh at SessionStart")
+	t.Fatalf("hooks/hooks.json does not run %s at SessionStart", want)
 }

@@ -71,7 +71,11 @@ old=''
 if [ -f "$file" ]; then
   # A record that exists but cannot be read is left alone, not overwritten.
   [ -r "$file" ] || exit 0
-  IFS= read -r old <"$file" || :
+  # A record is one line; a second one makes all of it junk.
+  {
+    IFS= read -r old || :
+    if IFS= read -r extra || [ -n "$extra" ]; then old=''; fi
+  } <"$file"
 fi
 is_version "$old" || old=''
 [ "$old" = "$new" ] && exit 0
