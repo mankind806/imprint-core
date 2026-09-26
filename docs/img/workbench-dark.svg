@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 552" width="600" height="552" role="img" aria-labelledby="t d">
+  <title id="t">One workbench, one pen per worktree</title>
+  <desc id="d">The lead session hands out the work and writes nothing. Readers look in parallel and report back. Writer A and writer B each work alone in their own worktree with one pen. Their results reach main one at a time: merge A, then the tests; merge B, then the tests.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; fill: #e6edf3; }
+    .t { font-size: 22px; font-weight: 600; }
+    .t2 { font-size: 20px; font-weight: 600; }
+    .m { font-size: 18px; }
+    .s { font-size: 17px; fill: #9198a1; }
+    .k { font-size: 17px; font-weight: 600; letter-spacing: 0.06em; fill: #9198a1; }
+    .card { fill: #161b22; stroke: #3d444d; stroke-width: 1; }
+  </style>
+  <rect class="card" x="10" y="10" width="580" height="92" rx="10"/><rect x="10" y="10" width="6" height="92" rx="3" fill="#4493f8"/>
+  <rect x="40" y="31" width="44" height="54" rx="5" fill="none" stroke="#4493f8" stroke-width="2.5"/><rect x="52" y="26" width="20" height="10" rx="3" fill="#4493f8"/><path d="M 49 49 l 4 4 l 7 -8" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M 64 51 h 11" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round"/><path d="M 49 61 l 4 4 l 7 -8" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M 64 63 h 11" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round"/><path d="M 49 73 l 4 4 l 7 -8" fill="none" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M 64 75 h 11" stroke="#4493f8" stroke-width="2.2" stroke-linecap="round"/>
+  <text x="110" y="48" class="t" text-anchor="start">Lead session</text>
+  <text x="110" y="80" class="m" text-anchor="start">hands out the work, writes nothing</text>
+  <rect x="10" y="128" width="580" height="290" rx="12" fill="#1c2128"/>
+  <text x="24" y="382" class="k" text-anchor="start">ONE WORKBENCH,</text>
+  <text x="24" y="404" class="k" text-anchor="start">ONE PEN PER WORKTREE</text>
+  <line x1="115" y1="102" x2="115.0" y2="166.0" stroke="#9198a1" stroke-width="2.5"/><path d="M 115 178 L 121.0 166.0 L 109.0 166.0 z" fill="#9198a1"/>
+  <line x1="320" y1="102" x2="320.0" y2="166.0" stroke="#9198a1" stroke-width="2.5"/><path d="M 320 178 L 326.0 166.0 L 314.0 166.0 z" fill="#9198a1"/>
+  <line x1="505" y1="102" x2="505.0" y2="166.0" stroke="#9198a1" stroke-width="2.5"/><path d="M 505 178 L 511.0 166.0 L 499.0 166.0 z" fill="#9198a1"/>
+  <rect class="card" x="20" y="180" width="190" height="170" rx="10"/><rect x="20" y="180" width="190" height="6" rx="3" fill="#d29922"/>
+  <circle cx="84" cy="218" r="13" fill="none" stroke="#d29922" stroke-width="3"/><path d="M 94 228 l 12 12" stroke="#d29922" stroke-width="4" stroke-linecap="round"/><circle cx="134" cy="218" r="13" fill="none" stroke="#d29922" stroke-width="3"/><path d="M 144 228 l 12 12" stroke="#d29922" stroke-width="4" stroke-linecap="round"/>
+  <text x="115" y="280" class="t" text-anchor="middle">Readers</text>
+  <text x="115" y="308" class="m" text-anchor="middle">look in parallel,</text>
+  <text x="115" y="330" class="m" text-anchor="middle">report back</text>
+  <rect class="card" x="235" y="180" width="170" height="170" rx="10"/><rect x="235" y="180" width="170" height="6" rx="3" fill="#3fb950"/>
+  <g transform="rotate(-45 320 222)"><rect x="294" y="216" width="40" height="12" rx="3" fill="#3fb950"/><path d="M 334 216 L 348 222 L 334 228 z" fill="#3fb950"/></g>
+  <text x="320" y="280" class="t" text-anchor="middle">Writer A</text>
+  <text x="320" y="308" class="m" text-anchor="middle">worktree A,</text>
+  <text x="320" y="330" class="m" text-anchor="middle">one pen</text>
+  <rect class="card" x="420" y="180" width="170" height="170" rx="10"/><rect x="420" y="180" width="170" height="6" rx="3" fill="#3fb950"/>
+  <g transform="rotate(-45 505 222)"><rect x="479" y="216" width="40" height="12" rx="3" fill="#3fb950"/><path d="M 519 216 L 533 222 L 519 228 z" fill="#3fb950"/></g>
+  <text x="505" y="280" class="t" text-anchor="middle">Writer B</text>
+  <text x="505" y="308" class="m" text-anchor="middle">worktree B,</text>
+  <text x="505" y="330" class="m" text-anchor="middle">one pen</text>
+  <path d="M 24 474 H 586" stroke="#ab7df8" stroke-width="6" stroke-linecap="round"/>
+  <text x="26" y="458" class="k" text-anchor="start">MAIN</text>
+  <line x1="320" y1="350" x2="320.0" y2="446.0" stroke="#3fb950" stroke-width="2.5"/><path d="M 320 458 L 326.0 446.0 L 314.0 446.0 z" fill="#3fb950"/>
+  <circle cx="320" cy="474" r="14" fill="#ab7df8"/><path d="M 314 475 l 4 5 l 8 -10" fill="none" stroke="#0d1117" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="320" y="514" class="m" text-anchor="middle">1. merge A,</text>
+  <text x="320" y="536" class="m" text-anchor="middle">then the tests</text>
+  <line x1="505" y1="350" x2="505.0" y2="446.0" stroke="#3fb950" stroke-width="2.5"/><path d="M 505 458 L 511.0 446.0 L 499.0 446.0 z" fill="#3fb950"/>
+  <circle cx="505" cy="474" r="14" fill="#ab7df8"/><path d="M 499 475 l 4 5 l 8 -10" fill="none" stroke="#0d1117" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="505" y="514" class="m" text-anchor="middle">2. merge B,</text>
+  <text x="505" y="536" class="m" text-anchor="middle">then the tests</text>
+</svg>
