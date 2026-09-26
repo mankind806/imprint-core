@@ -161,7 +161,7 @@ like every other one here rather than a single sentence that writes all of it of
 
 *First measured 2026-09-15; measured again 2026-09-26 by listing this repository and reading
 `hooks/hooks.json` and the checks table in `tools/imprint-dev/checks.go`: nothing in this
-repository executes any of the enforceable rows. `SessionStart` and `SubagentStart` print the
+repository executes any of the rows marked *Enforceable, not enforced*. `SessionStart` and `SubagentStart` print the
 core card; since 0.5.0, `SubagentStart` and `SubagentStop` each also run a hook that only
 appends one measurement line — time, agent id, type, effort, and on a stop the transcript
 path — to a log file, measuring that a subagent started or returned and enforcing nothing. Since
