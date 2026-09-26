@@ -90,6 +90,25 @@ func TestFrontmatterDescription(t *testing.T) {
 		{name: "no description", file: "---\nname: x\n---\n", wantErr: "no description"},
 		{name: "unclosed quote", file: "---\ndescription: \"open\n---\n", wantErr: "never closed"},
 		{name: "unknown escape", file: "---\ndescription: \"bad \\q\"\n---\n", wantErr: "unknown escape"},
+		{
+			// Regression guard: \Uffffffff parses as the 32-bit value
+			// 0xffffffff, which narrows to a negative rune (int32) and above
+			// utf8.MaxRune. It must still be rejected now that the bound is
+			// checked explicitly against the constant utf8.MaxRune, not just
+			// left to utf8.ValidRune to catch the wrapped, negative value.
+			name:    "double-quoted oversized unicode escape",
+			file:    "---\ndescription: \"\\Uffffffff\"\n---\n",
+			wantErr: "bad escape",
+		},
+		{
+			// Regression guard: 0x110000 is one past the highest valid rune
+			// but still fits comfortably in a positive int32 (no sign
+			// wraparound), so it exercises the explicit utf8.MaxRune bound
+			// check on its own.
+			name:    "double-quoted unicode escape just above max rune",
+			file:    "---\ndescription: \"\\U00110000\"\n---\n",
+			wantErr: "bad escape",
+		},
 		{name: "key without space", file: "---\ndescription:\"x\"\n---\n", wantErr: "no description"},
 	}
 	for _, tc := range tests {
