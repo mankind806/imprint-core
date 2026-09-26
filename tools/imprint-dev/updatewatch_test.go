@@ -239,6 +239,40 @@ func TestUpdateWatchKeepsRecordAndHistoryInStep(t *testing.T) {
 	}
 }
 
+// A downgrade is recorded without a notice, so no range runs backwards, and
+// the next upgrade is read from the version actually in use.
+func TestUpdateWatchRecordsADowngradeSilently(t *testing.T) {
+	for _, tc := range []struct{ old, new string }{
+		{"2.1.283", "2.1.282"},
+		{"2.2.0", "2.1.999"},
+		{"3.0.0", "2.9.9"},
+		{"2.1.283", "2.1.283-beta.1"},
+	} {
+		t.Run(tc.old+" to "+tc.new, func(t *testing.T) {
+			dir := t.TempDir()
+			record(t, dir, tc.old+"\n")
+			if out := runUpdateWatch(t, fakeClaude(t, tc.new+" (Claude Code)", 0), dir, startupInput); out != "" {
+				t.Fatalf("printed %q", out)
+			}
+			if got := recordedVersion(t, dir); got != tc.new+"\n" {
+				t.Errorf("recorded %q, want %s", got, tc.new)
+			}
+		})
+	}
+	t.Run("then an upgrade reads from there", func(t *testing.T) {
+		dir := t.TempDir()
+		record(t, dir, "2.1.282\n")
+		out := runUpdateWatch(t, fakeClaude(t, "2.1.10 (Claude Code)", 0), dir, startupInput)
+		if out != "" {
+			t.Fatalf("printed %q", out)
+		}
+		out = runUpdateWatch(t, fakeClaude(t, "2.1.284 (Claude Code)", 0), dir, startupInput)
+		if !strings.Contains(contextOf(t, out), "from 2.1.10 to 2.1.284") {
+			t.Fatalf("printed %q", out)
+		}
+	})
+}
+
 func TestUpdateWatchTreatsAJunkRecordAsAFirstRun(t *testing.T) {
 	bin := fakeClaude(t, "2.1.283 (Claude Code)", 0)
 	dir := t.TempDir()

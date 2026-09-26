@@ -26,7 +26,9 @@ instruction, as `additionalContext`. It reads:
 *DATA* is the plugin's data directory, written out as a full path, because the variable
 `CLAUDE_PLUGIN_DATA` is set for hooks and not for the session's own commands.
 
-**Silent** on the first run, which only records the version; on an unchanged version; on a
+**Silent** on the first run and on a downgrade, which only record the version (a downgrade so
+that the next upgrade is read from there, and a report that exists already is not written
+twice); on a change in a pre-release or build suffix only; on an unchanged version; on a
 start after compaction, which leaves the record for the next real start, so that a background
 update cannot interrupt a task halfway; and on every failure: no `claude` on the path, an
 output that is not a version, an unset or unwritable data directory, a record that exists but

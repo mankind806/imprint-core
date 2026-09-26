@@ -13,8 +13,8 @@
 # documentation pages between the two versions read, and a dated report saved to
 #     ${CLAUDE_PLUGIN_DATA}/update-reports/<new version>.md
 #
-# SILENT. The first run, which only records the version; an unchanged version; a
-# start after compaction, which leaves the record alone for the next real start;
+# SILENT. The first run and a downgrade, which only record the version; an
+# unchanged version; a start after compaction, which leaves the record alone for the next real start;
 # and every failure: no claude on PATH, an output that is not a version, an unset
 # or unwritable CLAUDE_PLUGIN_DATA.
 #
@@ -46,6 +46,21 @@ is_version() {
   printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'
 }
 
+# is_newer A B - true if version A has a higher major.minor.patch than B. Both
+# have passed is_version; a pre-release or build suffix is not compared.
+is_newer() {
+  saved_ifs=$IFS
+  IFS=.
+  # Unquoted on purpose, to split on the dots; both hold digits and dots only.
+  set -- ${1%%[-+]*} ${2%%[-+]*}
+  IFS=$saved_ifs
+  [ "$1" -gt "$4" ] && return 0
+  [ "$1" -lt "$4" ] && return 1
+  [ "$2" -gt "$5" ] && return 0
+  [ "$2" -lt "$5" ] && return 1
+  [ "$3" -gt "$6" ]
+}
+
 command -v claude >/dev/null || exit 0
 out="$(claude --version </dev/null)" || exit 0
 new="${out%%[[:space:]]*}"
@@ -75,6 +90,9 @@ if ! { printf '%s\n' "$new" >"$tmp" &&
   exit 0
 fi
 [ -n "$old" ] || exit 0
+# A downgrade, or a change in the suffix only, is recorded without a notice: the
+# range to read runs forwards, and the next upgrade reads from here.
+is_newer "$new" "$old" || exit 0
 
 # The data path is written into a JSON string: escape backslash and quote.
 reports="$(printf '%s' "$data/update-reports" | sed 's/[\\"]/\\&/g')"
