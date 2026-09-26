@@ -205,6 +205,7 @@ func TestCheckHooksJSON(t *testing.T) {
 	}
 	const sub = `"SubagentStart": [{"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/x\""}]}]`
 	const sess = `"SessionStart": [{"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/x\""}]}]`
+	const stop = `"SubagentStop": [{"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/x\""}]}]`
 	tests := []struct {
 		name   string
 		mutate func(map[string]string)
@@ -216,18 +217,22 @@ func TestCheckHooksJSON(t *testing.T) {
 		{"invalid JSON", hooks(`{"hooks": `), 1, []string{"not a valid hooks file"}},
 		{"hooks is not an object", hooks(`{"hooks": []}`), 1, []string{"not a valid hooks file"}},
 		{"no hooks object", hooks(`{}`), 1, []string{`no "hooks" object`}},
-		{"SessionStart missing", hooks(`{"hooks": {` + sub + `}}`), 1, []string{"SessionStart is not registered"}},
-		{"SubagentStart missing", hooks(`{"hooks": {` + sess + `}}`), 1, []string{"SubagentStart is not registered"}},
-		{"SessionStart empty list", hooks(`{"hooks": {"SessionStart": [], ` + sub + `}}`), 1, []string{"SessionStart is not registered"}},
-		{"SessionStart with a matcher", hooks(`{"hooks": {"SessionStart": [{"matcher": "startup", "hooks": []}], ` + sub + `}}`), 1,
+		{"SessionStart missing", hooks(`{"hooks": {` + sub + `, ` + stop + `}}`), 1, []string{"SessionStart is not registered"}},
+		{"SubagentStart missing", hooks(`{"hooks": {` + sess + `, ` + stop + `}}`), 1, []string{"SubagentStart is not registered"}},
+		// #45: check e must protect SubagentStop's registration too, the same way it
+		// protects the two start hooks — the measuring hook added in 0.5.0 is guarded
+		// against being dropped, not just accepted when present.
+		{"SubagentStop missing", hooks(`{"hooks": {` + sess + `, ` + sub + `}}`), 1, []string{"SubagentStop is not registered"}},
+		{"SessionStart empty list", hooks(`{"hooks": {"SessionStart": [], ` + sub + `, ` + stop + `}}`), 1, []string{"SessionStart is not registered"}},
+		{"SessionStart with a matcher", hooks(`{"hooks": {"SessionStart": [{"matcher": "startup", "hooks": []}], ` + sub + `, ` + stop + `}}`), 1,
 			[]string{`SessionStart entry 1 has the matcher "startup"`}},
-		{"SessionStart with an empty matcher", hooks(`{"hooks": {"SessionStart": [{"matcher": "", "hooks": []}], ` + sub + `}}`), 0, nil},
-		{"SubagentStart may have a matcher", hooks(`{"hooks": {` + sess + `, "SubagentStart": [{"matcher": "x", "hooks": []}]}}`), 0, nil},
-		{"unquoted plugin root", hooks(`{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "cat ${CLAUDE_PLUGIN_ROOT}/x"}]}], ` + sub + `}}`), 1,
+		{"SessionStart with an empty matcher", hooks(`{"hooks": {"SessionStart": [{"matcher": "", "hooks": []}], ` + sub + `, ` + stop + `}}`), 0, nil},
+		{"SubagentStart may have a matcher", hooks(`{"hooks": {` + sess + `, "SubagentStart": [{"matcher": "x", "hooks": []}], ` + stop + `}}`), 0, nil},
+		{"unquoted plugin root", hooks(`{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "cat ${CLAUDE_PLUGIN_ROOT}/x"}]}], ` + sub + `, ` + stop + `}}`), 1,
 			[]string{"SessionStart entry 1, hook 1"}},
-		{"single-quoted plugin root", hooks(`{"hooks": {` + sess + `, "SubagentStart": [{"hooks": [{"type": "command", "command": "cat '${CLAUDE_PLUGIN_ROOT}/x'"}]}]}}`), 1,
+		{"single-quoted plugin root", hooks(`{"hooks": {` + sess + `, "SubagentStart": [{"hooks": [{"type": "command", "command": "cat '${CLAUDE_PLUGIN_ROOT}/x'"}]}], ` + stop + `}}`), 1,
 			[]string{"SubagentStart entry 1, hook 1"}},
-		{"unquoted in another event", hooks(`{"hooks": {` + sess + `, ` + sub + `, "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "sh $CLAUDE_PLUGIN_ROOT/a.sh"}]}]}}`), 1,
+		{"unquoted in another event", hooks(`{"hooks": {` + sess + `, ` + sub + `, ` + stop + `, "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "sh $CLAUDE_PLUGIN_ROOT/a.sh"}]}]}}`), 1,
 			[]string{"PreToolUse entry 1, hook 1"}},
 	}
 	for _, tc := range tests {

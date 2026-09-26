@@ -20,6 +20,9 @@ const validHooksJSON = `{
     ],
     "SubagentStart": [
       {"hooks": [{"type": "command", "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-start.json\""}]}
+    ],
+    "SubagentStop": [
+      {"hooks": [{"type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/log-subagent.sh\""}]}
     ]
   }
 }

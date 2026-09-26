@@ -9,6 +9,9 @@ duration and quality. A third hook takes over the part a program can see.
 per event to `${CLAUDE_PLUGIN_DATA}/subagent-log.jsonl`, the plugin's data directory on the
 machine it runs on — `~/.claude/plugins/data/<id>/` per the plugins documentation, read
 2026-09-26; the form of `<id>` is not checked here. The plugin ships no measurements of its own.
+`imprint-dev check`'s check e guards that `SubagentStop` stays registered in `hooks/hooks.json`,
+the same way it guards `SessionStart` and `SubagentStart`; that check protects the
+registration, not what the hook does once it runs.
 
 **What a line holds:** the time in UTC, the event, `agent_id`, `agent_type`, `session_id`, the
 effort level if the hook input carries one, and on a stop the path of the subagent's

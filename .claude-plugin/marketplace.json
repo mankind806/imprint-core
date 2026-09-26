@@ -9,7 +9,7 @@
     {
       "name": "imprint",
       "source": "./",
-      "description": "Working rules in two layers: multi-agent collaboration (delegation contract, measuring before asserting, session handover) and knowledge keeping for a store that stays provable, plus a read-only review agent and a core card injected at session and subagent start.",
+      "description": "Working rules in two layers: multi-agent collaboration (delegation contract, measuring before asserting, session handover) and knowledge keeping for a store that stays provable, plus a read-only review agent, a core card injected at session and subagent start, and a hook that logs how long each subagent ran.",
       "category": "workflow"
     }
   ]
