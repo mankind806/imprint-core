@@ -61,14 +61,18 @@ fi
 is_version "$old" || old=''
 [ "$old" = "$new" ] && exit 0
 
+# The history line goes first and the record moves last: if either write fails,
+# the record stays as it was and the next start tries again, so no version can
+# be recorded without also being in the history.
 mkdir -p "$data" || exit 0
+day="$(date -u +%Y-%m-%d)" || day=unknown
 tmp="$file.tmp.$$"
-if ! { printf '%s\n' "$new" >"$tmp" && mv -f "$tmp" "$file"; }; then
+if ! { printf '%s\n' "$new" >"$tmp" &&
+  printf '%s %s\n' "$day" "$new" >>"$data/claude-code-version-history" &&
+  mv -f "$tmp" "$file"; }; then
   rm -f "$tmp"
   exit 0
 fi
-day="$(date -u +%Y-%m-%d)" || day=unknown
-printf '%s %s\n' "$day" "$new" >>"$data/claude-code-version-history"
 [ -n "$old" ] || exit 0
 
 # The data path is written into a JSON string: escape backslash and quote.

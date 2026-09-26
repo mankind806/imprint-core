@@ -219,6 +219,26 @@ func TestUpdateWatchLeavesAnUnreadableRecordAlone(t *testing.T) {
 	}
 }
 
+// A history that cannot be written holds the record back too, so the next
+// start tries again rather than recording a version the history lacks.
+func TestUpdateWatchKeepsRecordAndHistoryInStep(t *testing.T) {
+	dir := t.TempDir()
+	record(t, dir, "2.1.282\n")
+	if err := os.Mkdir(filepath.Join(dir, historyFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
+		t.Fatalf("printed %q", out)
+	}
+	if got := recordedVersion(t, dir); got != "2.1.282\n" {
+		t.Errorf("recorded %q; without a history line the record must stay", got)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, versionFile+".tmp.*"))
+	if len(matches) > 0 {
+		t.Errorf("left temporary files behind: %v", matches)
+	}
+}
+
 func TestUpdateWatchTreatsAJunkRecordAsAFirstRun(t *testing.T) {
 	bin := fakeClaude(t, "2.1.283 (Claude Code)", 0)
 	dir := t.TempDir()
