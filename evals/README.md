@@ -31,12 +31,16 @@ workspace).
 ## Running the suite
 
 ```bash
-claude plugin eval . --trust-plugin --max-cost-usd <CAP>
+claude plugin eval . --trust-plugin --judge-model sonnet --max-cost-usd <CAP>
 ```
 
 Replace `<CAP>` with a hard cost ceiling in USD before running — every run
-and every `llm`/`baseline` grader is a real, billed model call. Useful
-variants:
+and every `llm`/`baseline` grader is a real, billed model call.
+`--judge-model sonnet` is here because the default (haiku) misjudged a
+correct `delegation-contract-behavior` response 3/3 times in run 2 below;
+it costs more per judge vote but there is no cheaper per-case way to fix
+that, since the case format has no per-case or per-grader judge-model
+field. Useful variants:
 
 ```bash
 # One arm only, cheaper, while iterating on a single case
@@ -154,9 +158,10 @@ default Haiku.
 > rewords the *existing* "second opinion" / "zweite Meinung" triggers to
 > "second opinion from another agent" / "zweite Meinung von anderen
 > Agenten", because the description was already at 399 of the 400-character
-> limit (`imprint-dev check`, rule `skill-description-length`) and adding
-> the chosen phrase alongside the old one, unshortened, measured 557
-> characters. The lead-in "Use when delegating, reviewing or choosing a
+> limit (`imprint-dev check`, rule `skill-description-length`) and a first
+> draft that kept the original lead-in and added the user's exact phrases
+> alongside the old ones came to 557 characters, well over. The lead-in
+> "Use when delegating, reviewing or choosing a
 > model:" was also cut to "Triggers:" (matching the wording other skills in
 > this plugin already use) to make room. No case in this suite tests a bare
 > "second opinion" prompt without a proposal, so whether dropping the old,
@@ -197,8 +202,10 @@ already shows it does not fire the skill either way — and add a fresh
 `delegation-contract-trigger-de-2` prompt that explicitly asks for another
 agent's independent assessment, e.g. "Ich möchte eine unabhängige zweite
 Einschätzung von einem anderen Agenten, bevor ich diesen Vorschlag
-umsetze: ...". Both new/changed cases would use only free graders, so a
-rerun (about 12 agent sessions) should stay well under $1. Alternative:
-reword only this one case's prompt the same way, without adding a second
+umsetze: ...". Both new/changed cases would use only free graders; at
+roughly $0.10 per agent session (run 2b: $0.64 for 6 sessions; runs 2 and 3:
+about $3 for 36 sessions each), 12 sessions comes to about $1 — suggest a
+$2 cap to leave headroom. Alternative: reword only this one case's prompt
+the same way, without adding a second
 negative case. Either way, the merge gate on this case stays unmet until a
 rerun confirms it.
