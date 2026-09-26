@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 372" width="880" height="372" role="img" aria-labelledby="t d">
+  <title id="t">Four kinds of rules</title>
+  <desc id="d">Enforced; Enforceable, not enforced; Reserved to a person; Behaviour rule. Each with what holds it and an example from this repository.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; fill: #e6edf3; }
+    .t { font-size: 17px; font-weight: 600; }
+    .m { font-size: 15px; }
+    .s { font-size: 14px; fill: #9198a1; }
+    .k { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; fill: #9198a1; }
+    .card { fill: #161b22; stroke: #3d444d; stroke-width: 1; }
+  </style>
+  <rect class="card" x="12" y="10" width="205" height="352" rx="10"/>
+  <rect x="12" y="10" width="205" height="6" rx="3" fill="#3fb950"/>
+  <rect x="62.5" y="36" width="8" height="52" rx="2" fill="#3fb950"/><rect x="158.5" y="36" width="8" height="52" rx="2" fill="#3fb950"/><rect x="70.5" y="54" width="88" height="16" rx="3" fill="#3fb950"/>
+  <text x="114.5" y="140" class="t" text-anchor="middle">Enforced</text>
+  <text x="114.5" y="190" class="m" text-anchor="middle">Something really</text>
+  <text x="114.5" y="210" class="m" text-anchor="middle">stops you.</text>
+  <line x1="32" y1="258" x2="197" y2="258" stroke="#3d444d" stroke-width="1"/>
+  <text x="28" y="282" class="k">FOR EXAMPLE</text>
+  <text x="28" y="300" class="s" text-anchor="start">The pre-push hook</text>
+  <text x="28" y="318" class="s" text-anchor="start">refuses an undeclared</text>
+  <text x="28" y="336" class="s" text-anchor="start">identity.</text>
+  <rect class="card" x="229" y="10" width="205" height="352" rx="10"/>
+  <rect x="229" y="10" width="205" height="6" rx="3" fill="#d29922"/>
+  <rect x="279.5" y="36" width="8" height="52" rx="2" stroke="#d29922" fill="none" stroke-width="2.5" stroke-dasharray="6 5"/><rect x="375.5" y="36" width="8" height="52" rx="2" stroke="#d29922" fill="none" stroke-width="2.5" stroke-dasharray="6 5"/><rect x="287.5" y="54" width="88" height="16" rx="3" stroke="#d29922" fill="none" stroke-width="2.5" stroke-dasharray="6 5"/>
+  <text x="331.5" y="130" class="t" text-anchor="middle">Enforceable,</text>
+  <text x="331.5" y="151" class="t" text-anchor="middle">not enforced</text>
+  <text x="331.5" y="190" class="m" text-anchor="middle">A mechanism is</text>
+  <text x="331.5" y="210" class="m" text-anchor="middle">possible; nobody</text>
+  <text x="331.5" y="230" class="m" text-anchor="middle">has built it.</text>
+  <line x1="249" y1="258" x2="414" y2="258" stroke="#3d444d" stroke-width="1"/>
+  <text x="245" y="282" class="k">FOR EXAMPLE</text>
+  <text x="245" y="300" class="s" text-anchor="start">The five-minute target</text>
+  <text x="245" y="318" class="s" text-anchor="start">for a subagent run:</text>
+  <text x="245" y="336" class="s" text-anchor="start">measured, never stopped.</text>
+  <rect class="card" x="446" y="10" width="205" height="352" rx="10"/>
+  <rect x="446" y="10" width="205" height="6" rx="3" fill="#4493f8"/>
+  <circle cx="548.5" cy="50" r="13" fill="#4493f8"/><path d="M 522.5 90 a 26 24 0 0 1 52 0 z" fill="#4493f8"/>
+  <text x="548.5" y="130" class="t" text-anchor="middle">Reserved to</text>
+  <text x="548.5" y="151" class="t" text-anchor="middle">a person</text>
+  <text x="548.5" y="190" class="m" text-anchor="middle">The rule's content is</text>
+  <text x="548.5" y="210" class="m" text-anchor="middle">a person's decision.</text>
+  <line x1="466" y1="258" x2="631" y2="258" stroke="#3d444d" stroke-width="1"/>
+  <text x="462" y="282" class="k">FOR EXAMPLE</text>
+  <text x="462" y="300" class="s" text-anchor="start">A contradiction is</text>
+  <text x="462" y="318" class="s" text-anchor="start">resolved by a person,</text>
+  <text x="462" y="336" class="s" text-anchor="start">not by the newer value.</text>
+  <rect class="card" x="663" y="10" width="205" height="352" rx="10"/>
+  <rect x="663" y="10" width="205" height="6" rx="3" fill="#ab7df8"/>
+  <path d="M 741.5 32 h 36 l 12 12 v 48 h -48 z" fill="none" stroke="#ab7df8" stroke-width="2.5" stroke-linejoin="round"/><path d="M 751.5 52 h 26 M 751.5 64 h 22 M 751.5 76 h 16" stroke="#ab7df8" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="765.5" y="140" class="t" text-anchor="middle">Behaviour rule</text>
+  <text x="765.5" y="190" class="m" text-anchor="middle">Holds only as long</text>
+  <text x="765.5" y="210" class="m" text-anchor="middle">as the discipline</text>
+  <text x="765.5" y="230" class="m" text-anchor="middle">does.</text>
+  <line x1="683" y1="258" x2="848" y2="258" stroke="#3d444d" stroke-width="1"/>
+  <text x="679" y="282" class="k">FOR EXAMPLE</text>
+  <text x="679" y="300" class="s" text-anchor="start">Reading a page for</text>
+  <text x="679" y="318" class="s" text-anchor="start">abstraction: no</text>
+  <text x="679" y="336" class="s" text-anchor="start">pattern answers it.</text>
+</svg>
