@@ -8,7 +8,8 @@ import (
 )
 
 // Every fixture is built in t.TempDir(). No test reads the real repository,
-// except TestRealCardPassesSizeCheck, which exists to do exactly that.
+// except TestRealCardPassesSizeCheck, which exists to do exactly that, and the
+// tests in hookscript_test.go, which run the real hooks/log-subagent.sh.
 
 const testCard = "First line of the fixture card.\nSecond line.\n"
 

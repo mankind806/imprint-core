@@ -51,7 +51,8 @@ later the same day, in a round of its own that also re-read the seven around it.
 current texts, a read of its own is recorded only for `delegation-contract` as it stands
 since `blind-first-pass` was merged into it. **Not read yet:** `session-handover` as rewritten
 on 2026-09-26 without a handover note. **No read recorded:** `knowledge-keeping` as one merged
-skill, and the 2026-09-26 changes to `measure-before-asserting`.
+skill, the 2026-09-26 changes to `measure-before-asserting`, and the 2026-09-26 measurement
+rows of `delegation-contract` (see [Measuring subagents](#measuring-subagents)).
 
 This repository's own rule is that zero findings in a first adversarial round on a non-trivial
 artefact is itself a finding, and no round here has come close to zero. What those rounds are
@@ -111,9 +112,9 @@ when a task matches their description.
 
 ## What is in the box
 
-Four skills and one agent, in the two layers described below, plus two plugin hooks, new in
-this release, that inject a summary of them at session start (see
-[Core card and checks](#core-card-and-checks)). Each skill carries a section
+Four skills and one agent, in the two layers described below, plus two plugin hooks that
+inject a summary of them at session start (see [Core card and checks](#core-card-and-checks))
+and one that records how long each subagent ran (see [Measuring subagents](#measuring-subagents)). Each skill carries a section
 on what actually enforces it, and sorts every rule it holds into one of four states:
 **enforced** by something that really stops you, **enforceable, not enforced** where a
 mechanism is possible and nobody has built it, **reserved to a person** where the rule's
@@ -246,8 +247,9 @@ Claude Code ships frequently enough that a longer one would be fiction, and ofte
 that a shorter one would be busywork.
 
 - **Whether plugin hooks run in claude.ai cloud sessions: unmeasured, and not documented
-  anywhere we could find.** This release ships two hooks, `SessionStart` and `SubagentStart`
-  (see [Core card and checks](#core-card-and-checks)), so the question is no longer moot —
+  anywhere we could find.** This release ships hooks on `SessionStart`, `SubagentStart` and
+  `SubagentStop` (see [Core card and checks](#core-card-and-checks) and
+  [Measuring subagents](#measuring-subagents)), so the question is no longer moot —
   but cloud sessions specifically are still not measured either way; do not assume the card
   fires there just because it fires elsewhere. *Re-check by 2026-12-13.*
 - **Whether a plugin's skills and agents are available in the IDE integrations the same way
@@ -310,6 +312,47 @@ enabled.
 Measured once on one Linux setup with `claude -p`, date not recorded: both the `SessionStart`
 and the `SubagentStart` payload arrive as additional context. Native Windows is **not
 measured**; treat the card's arrival there as unknown.
+
+## Measuring subagents
+
+`delegation-contract` asks for every dispatch to be measured: task kind, model, effort,
+duration and quality. A third hook takes over the part a program can see.
+`hooks/log-subagent.sh` runs on `SubagentStart` and `SubagentStop` and appends one JSON line
+per event to `${CLAUDE_PLUGIN_DATA}/subagent-log.jsonl`, the plugin's data directory on the
+machine it runs on — `~/.claude/plugins/data/<id>/` per the plugins documentation, read
+2026-09-26; the form of `<id>` is not checked here. The plugin ships no measurements of its own.
+
+**What a line holds:** the time in UTC, the event, `agent_id`, `agent_type`, `session_id`, the
+effort level if the hook input carries one, and on a stop the path of the subagent's
+transcript. **What it never holds:** the subagent's answer or any other text it wrote. The
+script picks the named fields out by pattern and discards the rest of its input, and a test
+feeds it an answer and checks that none of it reaches the log. Internal agents, which arrive
+with an empty `agent_type`, are not logged. The hook never stops or slows a run: it prints
+nothing, adds no context and exits 0 on every path.
+
+**Reading it back:** `go run ./tools/imprint-dev measure` (the log defaults to
+`$CLAUDE_PLUGIN_DATA/subagent-log.jsonl`; outside a hook, pass `--log`). It pairs each stop
+with the latest start of the same `agent_id` — a resumed agent starts again under its old id —
+and prints one row per run: start, agent type, model, effort, duration, and whether the run
+went over the target (`--target`, default `5m`). The model is read from the subagent's
+transcript, where each assistant line records it in `message.model`; every distinct model is
+listed, and a transcript that is gone shows `unknown`. `--projects DIR` searches `DIR` for
+`agent-<id>.jsonl` when the logged path is missing. `--format json` gives the same rows as
+JSON. An overrun is reported, not treated as a failure: the command exits 0 whatever it finds.
+The **quality** column stays empty: whether the acceptance criterion was met is a judgement,
+and the lead enters it by hand. So does the task kind, of which `agent_type` is only a proxy.
+
+**In the repository's four states:** recording the duration, effort and agent type of a run is
+**enforced** by the hook wherever it fires — measured by hook, reported on demand — in the
+sense that it no longer rests on anyone's discipline; that it fires in a live session is not
+measured yet (below). Nothing is stopped, so the five-minute target stays *enforceable, not
+enforced* by design. Quality and task kind stay a **behaviour rule**.
+
+**Limits.** Tested with invented input under `sh` in CI and locally; **the hook has not been
+measured firing in a live session yet.** Whether it fires for background agents is **not
+measured**, and neither is native Windows, where the hook needs an `sh` on the path. Whether
+the hook's `agent_id` equals the id in the transcript file name is **not measured** either;
+`--projects` depends on it. *Re-check by 2026-12-26.*
 
 ## The pre-push hook
 
