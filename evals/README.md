@@ -8,7 +8,8 @@ more files under `graders/`. See `claude plugin eval --help` and
 
 ## What the suite covers
 
-Per skill, six cases:
+At least six cases per skill (`delegation-contract` has 9 — see "Actual
+runs so far"):
 
 | Case                         | Checks                                                                  | Grader(s)                          |
 | :---------------------------- | :----------------------------------------------------------------------- | :----------------------------------- |
@@ -86,11 +87,11 @@ For `--runs 3` with both arms (the defaults), the docs give the model-call
 count as roughly `cases x runs` agent sessions per arm, plus three short
 judge votes per `llm`/`baseline` grader per run:
 
-- Agent sessions: 24 cases x 3 runs x 2 arms = **144**
+- Agent sessions: 27 cases x 3 runs x 2 arms = **162**
 - Judge votes: 3 `llm` graders (one per `-behavior` case, weighted 2, on
   `delegation-contract`, `knowledge-keeping`, `session-handover`) x 3 runs x
   2 arms x 3 votes = **54**
-- Total: **198** model interactions, on top of whatever each of the 144
+- Total: **216** model interactions, on top of whatever each of the 162
   agent sessions itself takes internally (each is capped by that case's
   `max_turns`, 10 or 15 here)
 
@@ -100,8 +101,12 @@ votes.
 
 ## Actual runs so far
 
-All three runs used Claude Code 2.1.283, `--runs 3`, both arms. Runs 1 and 2
-used the default judge model (haiku); run 3 used `--judge-model sonnet`.
+All four runs used Claude Code 2.1.283, `--runs 3`, both arms. Runs 1 and 2
+used the default judge model (haiku); runs 3 and 4 used `--judge-model
+sonnet`. Each run had its own separately authorized cap (see below);
+cumulative spend across all four, run over several rounds: $11.16 + $3.65 +
+$3.18 + $2.91 = **$20.90**. Run 4 alone was authorized against a $10
+overnight ceiling and used $2.91 of its own $3 cap within that.
 
 **Run 1 — full suite, 2026-09-26.** `--max-cost-usd` not hit, $11.16, 396s. Overall
 83.3% with the plugin loaded vs. 29.9% without; the without-arm never loaded a
