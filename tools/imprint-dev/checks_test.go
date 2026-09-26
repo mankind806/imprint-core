@@ -371,9 +371,12 @@ func TestCheckEnforcementClassification(t *testing.T) {
 		{"files other than Markdown are not read", func(f map[string]string) {
 			f["skills/beta/notes.txt"] = table("| A | plain |")
 		}, 0, nil},
-		{"tables outside skills/ are not read", func(f map[string]string) {
+		{"other tables outside skills/ and the doc are not read", func(f map[string]string) {
 			f["README.md"] = table("| A | plain |")
 		}, 0, nil},
+		{"the doc's own enforcement table is read", func(f map[string]string) {
+			f["docs/core-card-and-checks.md"] = table("| A | plain |")
+		}, 1, []string{"docs/core-card-and-checks.md:5: names no state"}},
 		{"CRLF line endings", setRef(strings.ReplaceAll(table("| A | **Enforced** |", "| B | plain |"), "\n", "\r\n")), 1,
 			[]string{":6: names no state"}},
 	}

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 404" width="600" height="404" role="img" aria-labelledby="t d">
+  <title id="t">Core card and checks</title>
+  <desc id="d">hooks/kernkarte.md, the hand-written core card, goes through imprint-dev gen into session-start.json and subagent-start.json, which hooks.json serves at SessionStart and SubagentStart. imprint-dev check guards the card's size and that the JSON is still what gen would produce; it runs in CI on every push and pull request.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; fill: #e6edf3; }
+    .t { font-size: 22px; font-weight: 600; }
+    .t2 { font-size: 20px; font-weight: 600; }
+    .m { font-size: 18px; }
+    .s { font-size: 17px; fill: #9198a1; }
+    .k { font-size: 17px; font-weight: 600; letter-spacing: 0.06em; fill: #9198a1; }
+    .card { fill: #161b22; stroke: #3d444d; stroke-width: 1; }
+  </style>
+  <rect class="card" x="10" y="10" width="300" height="72" rx="10"/><rect x="10" y="10" width="6" height="72" rx="3" fill="#4493f8"/>
+  <text x="30" y="41" class="t2" text-anchor="start">hooks/kernkarte.md</text>
+  <text x="30" y="67" class="s" text-anchor="start">the core card, by hand</text>
+  <line x1="160" y1="82" x2="160.0" y2="102.0" stroke="#9198a1" stroke-width="2.5"/><path d="M 160 114 L 166.0 102.0 L 154.0 102.0 z" fill="#9198a1"/>
+  <rect class="card" x="10" y="114" width="300" height="72" rx="10"/><rect x="10" y="114" width="6" height="72" rx="3" fill="#3fb950"/>
+  <text x="30" y="145" class="t2" text-anchor="start">imprint-dev gen</text>
+  <text x="30" y="171" class="s" text-anchor="start">writes the two payloads</text>
+  <line x1="160" y1="186" x2="160.0" y2="206.0" stroke="#9198a1" stroke-width="2.5"/><path d="M 160 218 L 166.0 206.0 L 154.0 206.0 z" fill="#9198a1"/>
+  <rect class="card" x="10" y="218" width="300" height="72" rx="10"/><rect x="10" y="218" width="6" height="72" rx="3" fill="#4493f8"/>
+  <text x="30" y="249" class="t2" text-anchor="start">session-start.json</text>
+  <text x="30" y="275" class="t2" text-anchor="start">subagent-start.json</text>
+  <line x1="160" y1="290" x2="160.0" y2="310.0" stroke="#9198a1" stroke-width="2.5"/><path d="M 160 322 L 166.0 310.0 L 154.0 310.0 z" fill="#9198a1"/>
+  <rect class="card" x="10" y="322" width="300" height="72" rx="10"/><rect x="10" y="322" width="6" height="72" rx="3" fill="#4493f8"/>
+  <text x="30" y="353" class="t2" text-anchor="start">hooks/hooks.json</text>
+  <text x="30" y="379" class="s" text-anchor="start">SessionStart, SubagentStart</text>
+  <rect class="card" x="370" y="10" width="220" height="300" rx="10"/><rect x="370" y="10" width="220" height="6" rx="3" fill="#d29922"/>
+  <text x="388" y="50" class="t2" text-anchor="start">imprint-dev check</text>
+  <text x="388" y="84" class="m" text-anchor="start">checks the card's</text>
+  <text x="388" y="108" class="m" text-anchor="start">size, and that the</text>
+  <text x="388" y="132" class="m" text-anchor="start">JSON is still what</text>
+  <text x="388" y="156" class="m" text-anchor="start">gen would produce.</text>
+  <text x="388" y="200" class="m" text-anchor="start">Runs in CI on</text>
+  <text x="388" y="224" class="m" text-anchor="start">every push and</text>
+  <text x="388" y="248" class="m" text-anchor="start">pull request.</text>
+  <line x1="370" y1="46" x2="324.0" y2="46.0" stroke="#d29922" stroke-width="2.5" stroke-dasharray="7 6"/><path d="M 312 46 L 324.0 52.0 L 324.0 40.0 z" fill="#d29922"/>
+  <line x1="370" y1="254" x2="324.0" y2="254.0" stroke="#d29922" stroke-width="2.5" stroke-dasharray="7 6"/><path d="M 312 254 L 324.0 260.0 L 324.0 248.0 z" fill="#d29922"/>
+</svg>
