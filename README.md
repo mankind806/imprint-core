@@ -4,19 +4,12 @@
 several AI coding agents cooperating without ruining each other's work, and a knowledge base
 that grows alongside you without quietly rotting.**
 
-```mermaid
-flowchart LR
-    lead["Lead session<br/>orchestrates, edits nothing"]
-    r1["reader"]
-    r2["reader"]
-    w1["writer A<br/>alone in worktree A"]
-    w2["writer B<br/>alone in worktree B"]
-    trunk[("main")]
-    lead -->|look, in parallel| r1 & r2
-    lead -->|one pen each| w1 & w2
-    w1 -->|merged first, tests run| trunk
-    w2 -->|merged next, tests run| trunk
-```
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/workbench-dark.svg">
+  <img src="docs/img/workbench-light.svg" alt="A workbench seen from above. At the top, the lead session with a clipboard: it hands out the work and writes nothing. Arrows lead down to three cards on the bench: readers with two magnifying glasses, who look in parallel and report back, and writer A and writer B, each with one pen in its own worktree. Only the writers have arrows down to main, where their results land one at a time: first merge A, then the tests; then merge B, then the tests.">
+</picture>
+</p>
 
 *One workbench, many agents, and one pen per worktree. The lead hands out the work and
 never writes; readers look at the same time; each writer works alone; results come back one
@@ -73,8 +66,8 @@ sequenceDiagram
 ```
 
 The arrows from the hooks are what the plugin is wired to do without anyone asking; the notes
-are rules the model follows. That the log hook fires in a live session is not measured yet
-(see [Measuring subagents](#measuring-subagents)). Afterwards, `go run ./tools/imprint-dev measure` turns the log into one row per run: model,
+are rules the model follows. How far the log hook is measured in a live session:
+[Measuring subagents](#measuring-subagents). Afterwards, `go run ./tools/imprint-dev measure` turns the log into one row per run: model,
 effort, duration, and whether it went over the target. The log never holds what an agent
 wrote.
 
@@ -82,7 +75,7 @@ wrote.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/four-kinds-dark.svg">
-  <img src="docs/img/four-kinds-light.svg" alt="Four cards side by side. Enforced, drawn as a closed barrier: something really stops you, for example the pre-push hook refusing an undeclared identity. Enforceable, not enforced, drawn as the dashed outline of a barrier nobody has built: for example the five-minute target for a subagent run, measured but never stopped. Reserved to a person, drawn as a person: the rule's content is a human decision, for example resolving a contradiction instead of taking the newer value. Behaviour rule, drawn as a written note: it holds only as long as the discipline does, for example reading a page for abstraction.">
+  <img src="docs/img/four-kinds-light.svg" alt="Four cards in a two-by-two grid. Enforced, drawn as a closed barrier: something really stops you, for example the pre-push hook refusing an undeclared identity. Enforceable, not enforced, drawn as the dashed outline of a barrier nobody has built: for example the five-minute target for a subagent run, measured but never stopped. Reserved to a person, drawn as a person: the rule's content is a human decision, for example resolving a contradiction instead of taking the newer value. Behaviour rule, drawn as a written note: it holds only as long as the discipline does, for example reading a page for abstraction.">
 </picture>
 
 Every rule in every skill says which of the four it is. The second is the one usually left
@@ -91,19 +84,10 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 
 ## What's in the box
 
-```mermaid
-flowchart TB
-    subgraph KL["Knowledge layer, on top"]
-        kk["knowledge-keeping"]
-    end
-    subgraph CL["Agent collaboration layer, the foundation"]
-        dc["delegation-contract"]
-        mba["measure-before-asserting"]
-        sh["session-handover"]
-    end
-    kk -->|needs a rule on who holds the pen| dc
-    kk -->|leans on| mba
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/layers-dark.svg">
+  <img src="docs/img/layers-light.svg" alt="Two layers. On top, the knowledge layer: knowledge-keeping, with one place per fact, provenance, supersede and expiry on use. One arrow from it, labelled needs a rule on who holds the pen, points to delegation-contract; another, labelled leans on, points to measure-before-asserting. Underneath, as the foundation, the agent collaboration layer: delegation-contract, measure-before-asserting and session-handover.">
+</picture>
 
 | Part | Kind | In one line |
 |---|---|---|
@@ -214,17 +198,10 @@ Each limit says what kind of claim it is and when to look again; why each one ma
 
 ### Core card and checks
 
-```mermaid
-flowchart LR
-    card["hooks/kernkarte.md<br/>the core card"]
-    gen["imprint-dev gen"]
-    json["session-start.json<br/>subagent-start.json"]
-    hooks["hooks.json<br/>SessionStart, SubagentStart"]
-    check["imprint-dev check<br/>in CI on every push and pull request"]
-    card --> gen --> json --> hooks
-    check -.->|still what gen would produce| json
-    check -.->|size| card
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/card-flow-dark.svg">
+  <img src="docs/img/card-flow-light.svg" alt="A flow from top to bottom: hooks/kernkarte.md, the core card written by hand, goes through imprint-dev gen into session-start.json and subagent-start.json, which hooks/hooks.json serves at SessionStart and SubagentStart. Beside it, imprint-dev check points with dashed arrows at the card and at the JSON: it checks the card's size and that the JSON is still what gen would produce, and it runs in CI on every push and pull request.">
+</picture>
 
 The card is hand-written, its two JSON payloads are generated from it, and `imprint-dev check`
 guards both, among other things the skill descriptions, the hook wiring, the plugin version,
@@ -245,11 +222,17 @@ merging an existing line.
 reads them back. What a line holds, what it never holds, and how the rows are built:
 [docs/measuring-subagents.md](docs/measuring-subagents.md).
 
-**Limits.** Tested with invented input under `sh` in CI and locally; **the hook has not been
-measured firing in a live session yet.** Whether it fires for background agents is **not
-measured**, and neither is native Windows, where the hook needs an `sh` on the path. Whether
-the hook's `agent_id` equals the id in the transcript file name is **not measured** either;
-`--projects` depends on it. *Re-check by 2026-12-26.*
+**Measured live.** Measured 2026-09-26 on Claude Code 2.1.283 in a live `claude -p` session
+with `--plugin-dir`: one general-purpose subagent produced one start and one stop line, and
+`measure` read model `claude-sonnet-5`, effort `high`, 10 s. Measured 2026-09-26 with 0.5.0
+installed from the marketplace, in a fresh session: one subagent again produced a start and a
+stop line in the plugin's data directory; the start line carries an empty effort, the stop
+line `high`.
+
+**Limits.** Tested with invented input under `sh` in CI and locally. Whether it fires for
+background agents is **not measured**, and neither is native Windows, where the hook needs an
+`sh` on the path. Whether the hook's `agent_id` equals the id in the transcript file name is
+**not measured** either; `--projects` depends on it. *Re-check by 2026-12-26.*
 
 ### The pre-push hook
 

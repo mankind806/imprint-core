@@ -32,6 +32,6 @@ and the lead enters it by hand. So does the task kind, of which `agent_type` is 
 
 **In the repository's four states:** recording the duration, effort and agent type of a run is
 **enforced** by the hook wherever it fires — measured by hook, reported on demand — in the
-sense that it no longer rests on anyone's discipline; that it fires in a live session is not
-measured yet ([limits, in the README](../README.md#measuring-subagents)). Nothing is stopped, so the five-minute target stays *enforceable, not
+sense that it no longer rests on anyone's discipline; that it fires in a live session is
+measured, and dated, in the [README](../README.md#measuring-subagents). Nothing is stopped, so the five-minute target stays *enforceable, not
 enforced* by design. Quality and task kind stay a **behaviour rule**.
