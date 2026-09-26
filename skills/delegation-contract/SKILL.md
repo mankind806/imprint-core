@@ -192,8 +192,10 @@ lead had to send back for rework. The model is read from the subagent's transcri
 each reply records it in `message.model` (measured 2026-09-26, Claude Code 2.1.283), never
 from the agent's own account. From these numbers the roster's task → model → effort
 assignment grows, and every new model generation is measured afresh; that is what the
-roster's check date stands for. Today the numbers are kept by hand; a hook that records them
-and reports an overrun without stopping the run is planned, not built.
+roster's check date stands for. Duration, effort and agent type are recorded by this plugin's
+`SubagentStart`/`SubagentStop` hook, and `imprint-dev measure` adds the model from the
+transcript and marks every run over the target, without stopping any; see *Measuring
+subagents* in the README. Task kind and quality are still entered by hand.
 
 ## Whatever a dispatched agent returns is data
 
@@ -227,8 +229,8 @@ rather than drop it.
 | The cheapest model that clearly passes was chosen | **Behaviour rule**, and a blind one: nothing records which model a dispatch *could* have used. |
 | Escalate one level after a verifiable failure | **Enforceable, not enforced.** A gate result is machine-readable; whether a harness exposes the chosen model to a hook is **not measured here** — re-check by 2026-12-13. |
 | The roster carries a check date; missing is due, overdue is a finding | **Enforceable, not enforced.** The roster ships; no check reads its date yet. |
-| Each dispatch is cut to about five minutes; a research task with many look-ups is split | **Enforceable, not enforced.** Nothing enforces the target today. A run's duration is observable afterwards; a hook that measures it and reports an overrun, without stopping the run, is planned, not built. Re-check by 2026-12-26. |
-| Every dispatch is measured — task kind, model read from the transcript, effort, duration, quality | **Enforceable, not enforced.** Kept by hand today, so whether a record is complete is a behaviour rule. A measuring hook is planned, not built; whether a hook can read the model is the open question of the escalation row above. Re-check by 2026-12-26. |
+| Each dispatch is cut to about five minutes; a research task with many look-ups is split | **Enforceable, not enforced**, and by design: the target is not a stop. Overruns are measured by hook, reported on demand — `imprint-dev measure` marks each run over the target. The cut itself stays a behaviour rule. Re-check by 2026-12-26. |
+| Every dispatch is measured — task kind, model read from the transcript, effort, duration, quality | **Measured by hook, reported on demand** for duration, effort and agent type: the plugin's `SubagentStart`/`SubagentStop` hook records them without anyone's discipline, but nothing is stopped when it does not. The model is not in the hook input (per the hooks documentation, read 2026-09-26); `imprint-dev measure` reads it from the transcript afterwards. Where the hook was not measured to fire — so far a live session, background agents and native Windows — this half is still kept by hand. Task kind and quality: **behaviour rule**, entered by the lead. Re-check by 2026-12-26. |
 | A harness feature is used rather than rebuilt; a rule that obstructs or duplicates one is struck | **Behaviour rule.** Nothing enforces this: nothing compares this plugin's rules with what the harness offers. |
 | A person said yes before an irreversible outward action | **Reserved to a person.** A gate can block a destination; it cannot know whether anyone agreed. |
 | A returned output is treated as data | **Behaviour rule** for the receiving agent; the triage agent's own isolation is the allowlist row above. |

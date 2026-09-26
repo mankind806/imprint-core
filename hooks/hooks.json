@@ -18,6 +18,24 @@
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-start.json\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/log-subagent.sh\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/log-subagent.sh\""
+          }
+        ]
       }
     ]
   }

@@ -2,10 +2,13 @@
 //
 //	imprint-dev gen   [--root dir]
 //	imprint-dev check [--root dir] [--sarif file]
+//	imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
 //
 // gen writes the SessionStart and SubagentStart hook payloads from their one
 // canonical source, hooks/kernkarte.md. check runs the invariants a program can
-// decide over the plugin tree and reports every finding.
+// decide over the plugin tree and reports every finding. measure reports the
+// subagent runs that hooks/log-subagent.sh logged: duration, model, effort and
+// whether a run went over the target; it exits 0 whatever it reports.
 //
 // Exit codes: 0 all good, 1 at least one violation, 2 the tool itself could not
 // run (unreadable root, an I/O error, an unwritable SARIF file, bad usage).
@@ -32,9 +35,12 @@ func main() {
 const usageText = `usage:
   imprint-dev gen   [--root dir]
   imprint-dev check [--root dir] [--sarif file]
+  imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
 
-gen    writes hooks/session-start.json and hooks/subagent-start.json from hooks/kernkarte.md
-check  checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run
+gen      writes hooks/session-start.json and hooks/subagent-start.json from hooks/kernkarte.md
+check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run
+measure  reports subagent runs from the hook's log (default $CLAUDE_PLUGIN_DATA/subagent-log.jsonl);
+         an overrun is reported, not a failure: exit 0, or 2 if the log cannot be read
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -47,6 +53,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runGen(args[1:], stdout, stderr)
 	case "check":
 		return runCheck(args[1:], stderr)
+	case "measure":
+		return runMeasure(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return exitOK
