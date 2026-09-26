@@ -70,10 +70,12 @@ plugin it touches: a skill, a hook, a card line, a check. *Nothing to do* is not
 an empty report with no such list cannot be told apart from a report nobody wrote carefully.
 
 **A missed report shows.** The version history and the report files sit side by side, so a
-reader can list every version in `claude-code-version-history` that has no report, also after
-later updates. The first line is the version found at the first run, which has no report by
-design. That is the backstop for the limit below, where one session takes the notice and does
-nothing with it.
+reader can find every upgrade that has no report, also after later updates. A line of
+`claude-code-version-history` needs a report exactly when its version is higher in
+`major.minor.patch` than the line before it. The first line, a downgrade and a suffix-only
+change need none, and an upgrade back to a version already reported finds its report in place.
+That is the backstop for the limit below, where one session takes the notice and does nothing
+with it.
 
 ## Measured
 
@@ -109,14 +111,16 @@ answered `NONE`.
 In the repository's four states: noticing the new version and putting the instruction in
 front of the session is **enforced** by the hook, wherever it fires and finds `claude` on the
 path. Dispatching the read, and writing the report, is a **behaviour rule**: the session can
-ignore the notice. The classification row lives in `measure-before-asserting`, under *What
+ignore the notice. That the subagent only reads is a **behaviour rule** as well: the instruction
+asks for it, and nothing restricts its tools. The plugin's `foreign-material-reviewer`, whose
+tools are restricted, has no tool to fetch the sources. The classification row lives in `measure-before-asserting`, under *What
 actually enforces this*.
 
 ## Limits
 
 - **The first session after an update takes the notice.** That includes a `claude -p` run or
   a script, which may not act on it. The record is updated either way, so the next session is
-  silent. The backstop is the check above: a version in the history without its report.
+  silent. The backstop is the check above: an upgrade in the history without its report.
 - **Changed documentation means the pages the changelog entries touch.** The hook knows no
   source for a diff of the documentation; whether one is published is not checked. The index
   also lists weekly *What's new* pages.

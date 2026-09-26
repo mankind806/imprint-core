@@ -275,6 +275,10 @@ func TestUpdateWatchRecordsADowngradeSilently(t *testing.T) {
 			if got := recordedVersion(t, dir); got != tc.new+"\n" {
 				t.Errorf("recorded %q, want %s", got, tc.new)
 			}
+			// The history keeps the line; being no upgrade, it needs no report.
+			if got := history(t, dir); len(got) != 1 || got[0] != tc.new {
+				t.Errorf("history %v, want [%s]", got, tc.new)
+			}
 		})
 	}
 	t.Run("then an upgrade reads from there", func(t *testing.T) {
