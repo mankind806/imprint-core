@@ -17,7 +17,10 @@ Per skill, six cases:
 | `<skill>-negative`            | A similar-sounding prompt does **not** fire the skill                  | `tool_used`, `min: 0 max: 0`, `arm: both` |
 | `<skill>-behavior`            | With the skill loaded, the outcome visibly differs from without it     | `llm` or `regex`/`tool_used`       |
 
-24 cases in total (4 skills x 6). The `-behavior` cases rely on the default
+27 cases in total: 3 skills at 6 each, plus `delegation-contract` at 9 (an
+extra negative case and two extra trigger cases added 2026-09-26 to close a
+coverage gap and retire a trigger case that never fired — see "Actual runs
+so far" below). The `-behavior` cases rely on the default
 two-arm run (`--ablation with-without`, the default whenever a plugin
 resolves) for the with/without comparison; none of them use the `baseline`
 grader type, since that needs a recorded reference transcript.
@@ -209,3 +212,29 @@ $2 cap to leave headroom. Alternative: reword only this one case's prompt
 the same way, without adding a second
 negative case. Either way, the merge gate on this case stays unmet until a
 rerun confirms it.
+
+**Run 4 — the four new/changed `delegation-contract-*` cases, 2026-09-26.**
+`--tag rerun4 --judge-model sonnet`, cap $3, actual **$2.91**, 141s. Change
+under test: `delegation-contract-trigger-de-2` (the never-firing "Ich
+brauche eine zweite Meinung..." prompt) moved to a new
+`delegation-contract-negative-2` case with the reasoning recorded in its
+own `description` field; a fresh `delegation-contract-trigger-de-2` was
+written that explicitly asks for an independent assessment from another
+agent; and `delegation-contract-trigger-en-3` / `-de-3` were added to cover
+the "review this" / "welches Modell" trigger families that no case tested
+before (see the deviation note above — the shortened description lead-in
+had dropped the words for both).
+
+| Case | With | Without | Δ |
+| :--- | :--: | :--: | :--: |
+| `delegation-contract-negative-2` | pass | pass | 0 (expected — `arm: both`) |
+| `delegation-contract-trigger-de-2` | 3/3 | 0/3 | +1.0 |
+| `delegation-contract-trigger-de-3` | 3/3 | 0/3 | +1.0 |
+| `delegation-contract-trigger-en-3` | 3/3 | 0/3 | +1.0 |
+
+All four pass cleanly: the rewritten `trigger-de-2` fires the skill every
+time once the prompt itself (not just the description) names another
+agent as the source of the second opinion, and both new coverage cases
+fire on the first try. `delegation-contract` now has 9 cases (6 trigger, 2
+negative, 1 behavior) and, per this run plus run 3, every one of them
+passes at or above the merge gate's ≥ 2/3 threshold.

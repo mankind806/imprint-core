@@ -1,5 +1,5 @@
 ---
-tags: [negative, delegation-contract]
+tags: [negative, delegation-contract, rerun4]
 description: >-
   Asks for a second opinion on a proposal without naming another agent as the
   source. Without that, Claude may just answer with its own feedback -- the

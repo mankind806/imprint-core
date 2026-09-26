@@ -1,5 +1,5 @@
 ---
-tags: [trigger, en, delegation-contract]
+tags: [trigger, en, delegation-contract, rerun4]
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 
