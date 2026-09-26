@@ -65,7 +65,8 @@ is_version "$old" || old=''
 # the record stays as it was and the next start tries again, so no version can
 # be recorded without also being in the history.
 mkdir -p "$data" || exit 0
-day="$(date -u +%Y-%m-%d)" || day=unknown
+day="$(date -u +%Y-%m-%d)" || exit 0
+case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) exit 0 ;; esac
 tmp="$file.tmp.$$"
 if ! { printf '%s\n' "$new" >"$tmp" &&
   printf '%s %s\n' "$day" "$new" >>"$data/claude-code-version-history" &&

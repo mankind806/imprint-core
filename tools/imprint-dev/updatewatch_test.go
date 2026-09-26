@@ -302,6 +302,23 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 			t.Errorf("recorded %q", got)
 		}
 	})
+	t.Run("date fails", func(t *testing.T) {
+		bin := fakeClaude(t, "2.1.283 (Claude Code)", 0)
+		if err := os.WriteFile(filepath.Join(bin, "date"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		record(t, dir, "2.1.282\n")
+		if out := runUpdateWatch(t, bin, dir, startupInput); out != "" {
+			t.Fatalf("printed %q", out)
+		}
+		if got := recordedVersion(t, dir); got != "2.1.282\n" {
+			t.Errorf("recorded %q; a failed date must leave the record alone", got)
+		}
+		if got := history(t, dir); len(got) != 0 {
+			t.Errorf("history %v; a failed date must write no line", got)
+		}
+	})
 	t.Run("CLAUDE_PLUGIN_DATA unset", func(t *testing.T) {
 		if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), "", startupInput); out != "" {
 			t.Fatalf("printed %q", out)
