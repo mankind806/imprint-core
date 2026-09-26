@@ -1,11 +1,16 @@
 // Command imprint-dev keeps the imprint plugin tree honest.
 //
 //	imprint-dev gen   [--root dir]
-//	imprint-dev check [--root dir] [--sarif file]
+//	imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
 //
 // gen writes the SessionStart and SubagentStart hook payloads from their one
 // canonical source, hooks/kernkarte.md. check runs the invariants a program can
 // decide over the plugin tree and reports every finding.
+//
+// An overdue re-check date is a warning, which leaves the exit code alone,
+// unless --release is given: overdue dates block a release, never the ordinary
+// test run. --today sets the day they are measured against; it defaults to the
+// local date.
 //
 // Exit codes: 0 all good, 1 at least one violation, 2 the tool itself could not
 // run (unreadable root, an I/O error, an unwritable SARIF file, bad usage).
@@ -17,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 const (
@@ -31,10 +37,11 @@ func main() {
 
 const usageText = `usage:
   imprint-dev gen   [--root dir]
-  imprint-dev check [--root dir] [--sarif file]
+  imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
 
 gen    writes hooks/session-start.json and hooks/subagent-start.json from hooks/kernkarte.md
-check  checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run
+check  checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run;
+       an overdue re-check date warns, and fails only with --release
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -94,11 +101,19 @@ func runCheck(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	root := fs.String("root", ".", "plugin root")
 	sarifPath := fs.String("sarif", "", "also write SARIF 2.1.0 to this file")
+	release := fs.Bool("release", false, "a release run: an overdue re-check date is a violation, not a warning")
+	today := fs.String("today", "", "the date re-check dates are measured against, YYYY-MM-DD (default: the local date)")
 	if done, code := parseFlags(fs, args, stderr); done {
 		return code
 	}
+	if *today == "" {
+		*today = time.Now().Format(dateLayout)
+	} else if _, err := time.Parse(dateLayout, *today); err != nil {
+		fmt.Fprintf(stderr, "imprint-dev check: --today %q is not a date in the form YYYY-MM-DD\n", *today)
+		return exitError
+	}
 
-	e := &env{Root: *root}
+	e := &env{Root: *root, Today: *today, Release: *release}
 	rep := runChecks(e)
 	printSummary(stderr, rep)
 	if *sarifPath != "" {

@@ -295,7 +295,13 @@ this document) enforces, among other things, that the checked-in JSON still matc
 that every skill description stays within its own limit and the shared total, that
 `hooks/hooks.json` has the expected shape, that the plugin version is valid semver, and that
 nothing in the plugin still names a skill this release removed without a migration note
-saying so on the same line. It also supports `--sarif` output for CI. The command exits `0`
+saying so on the same line. It checks that every row of an enforcement table in the skills
+(a table with an *Enforcement* column) names exactly one of the four states in bold:
+**Enforced**, **Enforceable, not enforced**, **Behaviour rule** or **Reserved to a person**.
+It lists every *Re-check by* date that has passed as a warning that leaves the exit code at
+`0`, and only `check --release` turns such a date into a violation, because an overdue
+re-check blocks a release and never the everyday test run (`--today YYYY-MM-DD` sets the day
+it measures against). It also supports `--sarif` output for CI. The command exits `0`
 clean, `1` on a violation, and `2` if a check itself could not run. `.github/workflows/check.yml` runs
 `go test` and this check on every push and pull request; CI runs wherever GitHub Actions is
 enabled.

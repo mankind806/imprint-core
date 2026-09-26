@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -20,6 +21,7 @@ type kind int
 const (
 	violation    kind = iota + 1 // the tree breaks the rule
 	notCheckable                 // the rule could not be decided here; not a failure
+	warning                      // worth acting on, but it does not fail this run
 )
 
 type finding struct {
@@ -31,7 +33,9 @@ type finding struct {
 }
 
 type env struct {
-	Root string
+	Root    string
+	Today   string // YYYY-MM-DD: the day re-check dates are measured against
+	Release bool   // a release run, which overdue re-check dates fail
 }
 
 type checkResult struct {
@@ -53,6 +57,8 @@ var checks = []check{
 	{"d", "removed-skill-reference", "No reference to a removed skill, except on a line that says formerly or merged.", checkRemovedSkills},
 	{"e", "hooks-json", "hooks/hooks.json registers SessionStart without a matcher and SubagentStart, and every ${CLAUDE_PLUGIN_ROOT} sits inside double quotes.", checkHooksJSON},
 	{"f", "plugin-version", ".claude-plugin/plugin.json carries a semver version.", checkPluginVersion},
+	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/ carries exactly one of the four states: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
+	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
 }
 
 // readRel reads a file under root. A missing file is found=false, not an error.
@@ -260,18 +266,28 @@ func regularFilesUnder(root, dir string) ([]string, error) {
 	return out, err
 }
 
-func checkRemovedSkills(e *env) (checkResult, error) {
-	const rule = "removed-skill-reference"
+// pluginFiles lists the files the text checks read: everything under the
+// plugin's own directories, and the README.
+func pluginFiles(root string) ([]string, error) {
 	var paths []string
 	for _, d := range removedScanDirs {
-		files, err := regularFilesUnder(e.Root, d)
+		files, err := regularFilesUnder(root, d)
 		if err != nil {
-			return checkResult{}, err
+			return nil, err
 		}
 		paths = append(paths, files...)
 	}
-	if info, err := os.Stat(filepath.Join(e.Root, "README.md")); err == nil && info.Mode().IsRegular() {
+	if info, err := os.Stat(filepath.Join(root, "README.md")); err == nil && info.Mode().IsRegular() {
 		paths = append(paths, "README.md")
+	}
+	return paths, nil
+}
+
+func checkRemovedSkills(e *env) (checkResult, error) {
+	const rule = "removed-skill-reference"
+	paths, err := pluginFiles(e.Root)
+	if err != nil {
+		return checkResult{}, err
 	}
 	var res checkResult
 	for _, rel := range paths {
@@ -453,6 +469,213 @@ func checkPluginVersion(e *env) (checkResult, error) {
 	return checkResult{Note: "version " + version}, nil
 }
 
+// --- g: enforcement classification -------------------------------------------
+
+// enforcementStates is the four-state vocabulary the skills' enforcement tables
+// use. A row names its state in bold, as in **Behaviour rule.**
+var enforcementStates = []string{"Enforced", "Enforceable, not enforced", "Behaviour rule", "Reserved to a person"}
+
+var (
+	boldSpanRE  = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	delimCellRE = regexp.MustCompile(`^:?-+:?$`)
+)
+
+// stateOf normalises the text of a bold span, so that **Behaviour rule.** and
+// **Behaviour rule** read alike, and reports whether it names a state.
+func stateOf(bold string) (string, bool) {
+	s := strings.TrimRight(strings.TrimSpace(bold), ".,;: ")
+	for _, st := range enforcementStates {
+		if s == st {
+			return s, true
+		}
+	}
+	return s, false
+}
+
+// tableCells splits a Markdown table row into its trimmed cells. An escaped
+// pipe (\|) stays inside its cell.
+func tableCells(line string) []string {
+	s := strings.TrimSpace(line)
+	s = strings.TrimPrefix(s, "|")
+	if strings.HasSuffix(s, "|") && !strings.HasSuffix(s, `\|`) {
+		s = s[:len(s)-1]
+	}
+	var cells []string
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s) && s[i+1] == '|':
+			b.WriteByte('|')
+			i++
+		case s[i] == '|':
+			cells = append(cells, strings.TrimSpace(b.String()))
+			b.Reset()
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return append(cells, strings.TrimSpace(b.String()))
+}
+
+func isTableLine(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "|") }
+
+func isDelimiterRow(line string) bool {
+	for _, c := range tableCells(line) {
+		if !delimCellRE.MatchString(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// classifyEnforcement returns what is wrong with one Enforcement cell, or "".
+// The state is the bold span the cell opens with; a state named in bold later
+// in the cell counts too, so that a cell naming two states is caught. Other
+// bold in the cell, such as **not measured here**, is emphasis and not a state.
+func classifyEnforcement(cell string) string {
+	var known []string
+	for _, m := range boldSpanRE.FindAllStringSubmatch(cell, -1) {
+		if st, ok := stateOf(m[1]); ok {
+			known = append(known, st)
+		}
+	}
+	if strings.HasPrefix(cell, "**") {
+		if m := boldSpanRE.FindStringSubmatchIndex(cell); m != nil && m[0] == 0 {
+			if st, ok := stateOf(cell[m[2]:m[3]]); !ok {
+				return fmt.Sprintf("the state %q is not one of the four (%s)", st, strings.Join(enforcementStates, "; "))
+			}
+		}
+	}
+	switch {
+	case len(known) == 0:
+		return fmt.Sprintf("names no state; open the Enforcement cell with one of the four in bold (%s)", strings.Join(enforcementStates, "; "))
+	case len(known) > 1:
+		return fmt.Sprintf("names %d states (%s); a row carries exactly one", len(known), strings.Join(known, "; "))
+	}
+	return ""
+}
+
+func checkEnforcementClassification(e *env) (checkResult, error) {
+	const rule = "enforcement-classification"
+	files, err := regularFilesUnder(e.Root, "skills")
+	if err != nil {
+		return checkResult{}, err
+	}
+	var res checkResult
+	tables, rows := 0, 0
+	for _, rel := range files {
+		if !strings.HasSuffix(strings.ToLower(rel), ".md") {
+			continue
+		}
+		raw, found, err := readRel(e.Root, rel)
+		if err != nil {
+			return checkResult{}, err
+		}
+		if !found {
+			continue
+		}
+		lines := splitLines(raw)
+		fence := ""
+		for i := 0; i < len(lines); i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			if fence != "" {
+				if strings.HasPrefix(trimmed, fence) {
+					fence = ""
+				}
+				continue
+			}
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				fence = trimmed[:3]
+				continue
+			}
+			if !isTableLine(lines[i]) || i+1 >= len(lines) || !isTableLine(lines[i+1]) || !isDelimiterRow(lines[i+1]) {
+				continue
+			}
+			col := -1
+			for j, h := range tableCells(lines[i]) {
+				if strings.EqualFold(h, "Enforcement") {
+					col = j
+					break
+				}
+			}
+			for i += 2; i < len(lines) && isTableLine(lines[i]); i++ {
+				if col < 0 {
+					continue
+				}
+				rows++
+				cell := ""
+				if cells := tableCells(lines[i]); col < len(cells) {
+					cell = cells[col]
+				}
+				if msg := classifyEnforcement(cell); msg != "" {
+					res.Findings = append(res.Findings, finding{rule, violation, rel, i + 1, msg})
+				}
+			}
+			if col >= 0 {
+				tables++
+			}
+			i-- // the loop's own i++ moves past the line that ended the table
+		}
+	}
+	res.Note = fmt.Sprintf("%d table(s), %d row(s)", tables, rows)
+	return res, nil
+}
+
+// --- h: overdue re-check dates -----------------------------------------------
+
+// recheckRE matches a due date as the tree writes it: "Re-check by 2026-12-13",
+// in any case and with or without "by".
+var recheckRE = regexp.MustCompile(`(?i)\bre-check\s+(?:by\s+)?(\d{4}-\d{2}-\d{2})\b`)
+
+const dateLayout = "2006-01-02"
+
+func checkOverdueRechecks(e *env) (checkResult, error) {
+	const rule = "overdue-recheck"
+	today, err := time.Parse(dateLayout, e.Today)
+	if err != nil {
+		return checkResult{}, fmt.Errorf("today's date %q is not YYYY-MM-DD", e.Today)
+	}
+	paths, err := pluginFiles(e.Root)
+	if err != nil {
+		return checkResult{}, err
+	}
+	k, consequence := warning, "; this blocks a release (check --release)"
+	if e.Release {
+		k, consequence = violation, "; a release waits until it is re-checked and re-dated"
+	}
+	var res checkResult
+	dates, overdue := 0, 0
+	for _, rel := range paths {
+		raw, found, err := readRel(e.Root, rel)
+		if err != nil {
+			return checkResult{}, err
+		}
+		if !found {
+			continue
+		}
+		for i, line := range splitLines(raw) {
+			for _, m := range recheckRE.FindAllStringSubmatch(line, -1) {
+				dates++
+				due, err := time.Parse(dateLayout, m[1])
+				if err != nil {
+					overdue++
+					res.Findings = append(res.Findings, finding{rule, k, rel, i + 1,
+						fmt.Sprintf("the re-check date %s is not a calendar date%s", m[1], consequence)})
+					continue
+				}
+				if due.Before(today) {
+					overdue++
+					days := int(today.Sub(due).Hours() / 24)
+					res.Findings = append(res.Findings, finding{rule, k, rel, i + 1,
+						fmt.Sprintf("re-check was due by %s, %d day(s) before %s%s", m[1], days, e.Today, consequence)})
+				}
+			}
+		}
+	}
+	res.Note = fmt.Sprintf("%d re-check date(s), none before %s", dates, e.Today)
+	return res, nil
+}
+
 // --- running and reporting ---------------------------------------------------
 
 type outcome struct {
@@ -540,28 +763,31 @@ func printSummary(w io.Writer, r report) {
 		fmt.Fprintf(w, "  ERROR  %v\nresult: the check could not run (exit %d)\n", r.Fatal, exitError)
 		return
 	}
-	failed, violations, errs, na := 0, 0, 0, 0
+	failed, violations, errs, na, warnings := 0, 0, 0, 0, 0
 	for _, o := range r.Outcomes {
 		label := fmt.Sprintf("%s %s", o.Check.Letter, o.Check.ID)
-		v, n := o.count(violation), o.count(notCheckable)
+		v, n, wn := o.count(violation), o.count(notCheckable), o.count(warning)
+		warnings += wn
 		switch {
 		case o.Err != nil:
 			errs++
-			fmt.Fprintf(w, "  ERROR  %-26s could not run: %v\n", label, o.Err)
+			fmt.Fprintf(w, "  ERROR  %-30s could not run: %v\n", label, o.Err)
 		case v > 0:
 			failed++
 			violations += v
-			fmt.Fprintf(w, "  FAIL   %-26s %d violation(s)\n", label, v)
+			fmt.Fprintf(w, "  FAIL   %-30s %d violation(s)\n", label, v)
+		case wn > 0:
+			fmt.Fprintf(w, "  WARN   %-30s %d warning(s)\n", label, wn)
 		case n > 0:
 			na++
 			fmt.Fprintf(w, "  n/a    %s\n", label)
 		default:
-			fmt.Fprintf(w, "  ok     %-26s %s\n", label, o.Result.Note)
+			fmt.Fprintf(w, "  ok     %-30s %s\n", label, o.Result.Note)
 		}
 		for _, f := range o.Result.Findings {
 			fmt.Fprintf(w, "           %s%s\n", f.where(), f.Message)
 		}
 	}
-	fmt.Fprintf(w, "result: %d violation(s) in %d check(s), %d check(s) could not run, %d not checkable (exit %d)\n",
-		violations, failed, errs, na, r.exitCode())
+	fmt.Fprintf(w, "result: %d violation(s) in %d check(s), %d check(s) could not run, %d not checkable, %d warning(s) (exit %d)\n",
+		violations, failed, errs, na, warnings, r.exitCode())
 }
