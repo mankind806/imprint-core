@@ -101,7 +101,10 @@ when a task matches their description.
 - **`--plugin-dir`:** measured 2026-09-15 on Claude Code 2.1.272 at plugin version 0.3.0: all
   eight skills of that release and the agent are listed under the `imprint:` prefix; the
   present four are not separately measured. *Re-check by 2026-12-15.*
-- **Shorthand over the network:** Not yet measured for `imprint-core`.
+- **Over the network:** measured 2026-09-26 on Claude Code 2.1.283: `/plugin marketplace
+  add` with the HTTPS URL of this repository, then `install imprint@imprint`, installs
+  0.4.0; a new session receives the core card from the SessionStart hook. The shorthand
+  `mankind806/imprint-core` in the block above is not separately measured.
 - Whether the bare `install imprint` stays unambiguous depends on the other marketplaces
   *you* have added; if you already have an `imprint` from somewhere else, use the qualified
   form.
