@@ -36,17 +36,35 @@ func fakeClaude(t *testing.T, output string, code int) string {
 	return dir
 }
 
-// runUpdateWatch runs the script with binDir in front of the system tools on
-// PATH ("" puts no claude there), dataDir as CLAUDE_PLUGIN_DATA ("" leaves it
-// unset) and input on stdin. It fails the test unless the script exits 0 and
-// writes nothing to stderr, and returns what it printed.
+// hookTools returns a new directory holding a link to each tool the script
+// needs besides sh, found on the caller's PATH, so that PATH can be built from
+// it and a fake claude alone. Without one of them the test is skipped.
+func hookTools(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"sed", "grep", "date", "mkdir", "mv", "rm"} {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			t.Skip("no " + name + " on PATH, so the hook script cannot be run here: " + err.Error())
+		}
+		if err := os.Symlink(p, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// runUpdateWatch runs the script with binDir in front of the tools it needs
+// on PATH ("" puts no claude there), dataDir as CLAUDE_PLUGIN_DATA ("" leaves
+// it unset) and input on stdin. It fails the test unless the script exits 0
+// and writes nothing to stderr, and returns what it printed.
 func runUpdateWatch(t *testing.T, binDir, dataDir, input string) string {
 	t.Helper()
 	sh, err := exec.LookPath("sh")
 	if err != nil {
 		t.Skip("no sh on PATH, so the hook script cannot be run here: " + err.Error())
 	}
-	path := "/usr/bin:/bin"
+	path := hookTools(t)
 	if binDir != "" {
 		path = binDir + ":" + path
 	}
@@ -331,12 +349,6 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		})
 	}
 	t.Run("no claude on PATH", func(t *testing.T) {
-		if _, err := os.Stat("/usr/bin/claude"); err == nil {
-			t.Skip("a claude sits in /usr/bin, so it cannot be kept off PATH here")
-		}
-		if _, err := os.Stat("/bin/claude"); err == nil {
-			t.Skip("a claude sits in /bin, so it cannot be kept off PATH here")
-		}
 		dir := t.TempDir()
 		record(t, dir, "2.1.282\n")
 		if out := runUpdateWatch(t, "", dir, startupInput); out != "" {
