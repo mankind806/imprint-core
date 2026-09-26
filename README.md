@@ -51,7 +51,8 @@ later the same day, in a round of its own that also re-read the seven around it.
 current texts, a read of its own is recorded only for `delegation-contract` as it stands
 since `blind-first-pass` was merged into it. **Not read yet:** `session-handover` as rewritten
 on 2026-09-26 without a handover note. **No read recorded:** `knowledge-keeping` as one merged
-skill, and the 2026-09-26 changes to `measure-before-asserting`.
+skill, the 2026-09-26 changes to `measure-before-asserting`, and the 2026-09-26 measurement
+rows of `delegation-contract` (see [Measuring subagents](#measuring-subagents)).
 
 This repository's own rule is that zero findings in a first adversarial round on a non-trivial
 artefact is itself a finding, and no round here has come close to zero. What those rounds are
@@ -311,7 +312,8 @@ measured**; treat the card's arrival there as unknown.
 duration and quality. A third hook takes over the part a program can see.
 `hooks/log-subagent.sh` runs on `SubagentStart` and `SubagentStop` and appends one JSON line
 per event to `${CLAUDE_PLUGIN_DATA}/subagent-log.jsonl`, the plugin's data directory on the
-machine it runs on. The plugin ships no measurements of its own.
+machine it runs on — `~/.claude/plugins/data/<id>/` per the plugins documentation, read
+2026-09-26; the form of `<id>` is not checked here. The plugin ships no measurements of its own.
 
 **What a line holds:** the time in UTC, the event, `agent_id`, `agent_type`, `session_id`, the
 effort level if the hook input carries one, and on a stop the path of the subagent's
@@ -333,10 +335,11 @@ JSON. An overrun is reported, not treated as a failure: the command exits 0 what
 The **quality** column stays empty: whether the acceptance criterion was met is a judgement,
 and the lead enters it by hand. So does the task kind, of which `agent_type` is only a proxy.
 
-**In the repository's four states:** recording the duration, effort and agent type of a run
-no longer rests on discipline wherever the hook fires — measured by hook, reported on demand —
-but nothing is stopped, so the five-minute target stays *enforceable, not enforced* by design.
-Quality and task kind stay a **behaviour rule**.
+**In the repository's four states:** recording the duration, effort and agent type of a run is
+**enforced** by the hook wherever it fires — measured by hook, reported on demand — in the
+sense that it no longer rests on anyone's discipline; that it fires in a live session is not
+measured yet (below). Nothing is stopped, so the five-minute target stays *enforceable, not
+enforced* by design. Quality and task kind stay a **behaviour rule**.
 
 **Limits.** Tested with invented input under `sh` in CI and locally; **the hook has not been
 measured firing in a live session yet.** Whether it fires for background agents is **not
