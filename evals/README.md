@@ -166,9 +166,11 @@ default Haiku.
 > alongside the old ones came to 557 characters, well over. The lead-in
 > "Use when delegating, reviewing or choosing a
 > model:" was also cut to "Triggers:" (matching the wording other skills in
-> this plugin already use) to make room. No case in this suite tests a bare
-> "second opinion" prompt without a proposal, so whether dropping the old,
-> unqualified trigger loses something is unmeasured. This sits only on the
+> this plugin already use) to make room. ~~No case in this suite tests a
+> bare "second opinion" prompt without a proposal, so whether dropping the
+> old, unqualified trigger loses something is unmeasured.~~ **Superseded by
+> run 4, below:** `delegation-contract-negative-2` now asserts that a bare
+> "zweite Meinung" prompt does *not* fire the skill, and passes. This sits only on the
 > unmerged `feat/evals` branch; the user's exact chosen wording was not
 > used, so it should be confirmed or corrected before anyone treats this
 > description as final.
@@ -176,7 +178,7 @@ default Haiku.
 | Case | With | Without | Δ |
 | :--- | :--: | :--: | :--: |
 | `delegation-contract-trigger-de-1` | 3/3 | 0/3 | +1.0 |
-| `delegation-contract-trigger-de-2` | 0/3 | 0/3 | 0 |
+| `delegation-contract-trigger-de-2` (prompt since moved to `-negative-2`, see run 4) | 0/3 | 0/3 | 0 |
 | `delegation-contract-trigger-en-1` | 3/3 | 0/3 | +1.0 |
 | `delegation-contract-trigger-en-2` | 3/3 | 0/3 | +1.0 |
 | `delegation-contract-negative` | pass | pass | 0 (expected — `arm: both`) |
@@ -210,8 +212,7 @@ roughly $0.10 per agent session (run 2b: $0.64 for 6 sessions; runs 2 and 3:
 about $3 for 36 sessions each), 12 sessions comes to about $1 — suggest a
 $2 cap to leave headroom. Alternative: reword only this one case's prompt
 the same way, without adding a second
-negative case. Either way, the merge gate on this case stays unmet until a
-rerun confirms it.
+negative case. **Done in run 4, below.**
 
 **Run 4 — the four new/changed `delegation-contract-*` cases, 2026-09-26.**
 `--tag rerun4 --judge-model sonnet`, cap $3, actual **$2.91**, 141s. Change
@@ -235,6 +236,15 @@ had dropped the words for both).
 All four pass cleanly: the rewritten `trigger-de-2` fires the skill every
 time once the prompt itself (not just the description) names another
 agent as the source of the second opinion, and both new coverage cases
-fire on the first try. `delegation-contract` now has 9 cases (6 trigger, 2
-negative, 1 behavior) and, per this run plus run 3, every one of them
-passes at or above the merge gate's ≥ 2/3 threshold.
+fire on the first try. `delegation-contract` now has 9 cases: 6 trigger
+cases each firing the skill ≥ 2/3, 2 negative cases both passing, and 1
+behavior case at Δ +1.0 (from run 3) — every one at or above the merge
+gate's ≥ 2/3 / pass / Δ ≥ 0 thresholds.
+
+**Caveat on the two new coverage cases.** Both prompts mention a subagent
+alongside the target trigger word — `-trigger-en-3` says "before I dispatch
+it to a subagent", `-trigger-de-3` asks "fuer einen Subagenten". They show
+the skill fires on a "review this" / "welches Modell" question asked *in a
+delegation context*, not that the bare words alone are enough to fire it
+in every context. Closing the coverage gap fully would need a version of
+each without the subagent mention.
