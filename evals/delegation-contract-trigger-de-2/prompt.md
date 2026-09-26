@@ -1,6 +1,6 @@
 ---
-tags: [trigger, de, delegation-contract, rerun2]
+tags: [trigger, de, delegation-contract]
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 
-Ich brauche eine zweite Meinung zu diesem Vorschlag, bevor ich ihn umsetze: Wir sollten die Konfigurationsdatei so aendern, dass die Zeitueberschreitung automatisch verdoppelt wird, wenn ein Dienst dreimal hintereinander fehlschlaegt.
+Ich moechte eine unabhaengige zweite Einschaetzung von einem anderen Agenten, bevor ich diesen Vorschlag umsetze: Wir sollten die Konfigurationsdatei so aendern, dass die Zeitueberschreitung automatisch verdoppelt wird, wenn ein Dienst dreimal hintereinander fehlschlaegt.
