@@ -149,8 +149,8 @@ and the checks table in `tools/imprint-dev/checks.go`. `SessionStart` and `Subag
 the core card; since 0.5.0, `SubagentStart` and `SubagentStop` each also run a hook that only
 appends one measurement line — time, agent id, type, effort, and on a stop the transcript
 path — to a log file, measuring that a subagent started or returned without enforcing anything;
-since the update watch, `SessionStart` also runs a hook that records the Claude Code version
-and, on an upgrade, asks the session to read the changelog;
+since the update watch (2026-09-27, after 0.5.0), `SessionStart` also runs a hook that records
+the Claude Code version and, only if switched on, notes after an upgrade that a review is due;
 the check tool `tools/imprint-dev` checks the plugin's own files, including that every
 enforcement-table row carries a known classification and (with `--release`) that no dated
 re-check is overdue; a workflow file under `.github/workflows/` runs it with the tests wherever

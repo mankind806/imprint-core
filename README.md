@@ -53,6 +53,7 @@ sequenceDiagram
     participant Log as subagent-log.jsonl
     CC->>H: SessionStart
     H-->>L: core card, as additional context
+    H-->>L: if switched on and Claude Code was upgraded:<br/>a note that an update review is due
     Note over L: a skill loads when the task matches it,<br/>or when you invoke it
     L->>CC: dispatch a subagent
     CC->>H: SubagentStart
@@ -98,7 +99,7 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 | `foreign-material-reviewer` | agent | Read-only triage of material you did not write; its tools are an allowlist of `Read`, `Grep` and `Glob` |
 | Core card | hooks on `SessionStart`, `SubagentStart` | Inject `hooks/kernkarte.md` as additional context |
 | Measuring hook | hook on `SubagentStart`, `SubagentStop` | Appends one JSON line per event to the plugin's data directory |
-| Update watch | hook on `SessionStart` | After a Claude Code upgrade, asks the session for one read of the changelog and a report ([docs/update-watch.md](docs/update-watch.md)) |
+| Update watch | hook on `SessionStart`, off by default | Once switched on, notes after a Claude Code upgrade that a review of the changelog is due ([docs/update-watch.md](docs/update-watch.md)) |
 | `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs |
 | Pre-push hook | `.githooks/pre-push`, this repository, opt-in | Refuses undeclared identities and the shapes personal data takes |
 
