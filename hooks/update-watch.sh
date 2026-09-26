@@ -49,9 +49,16 @@ input=''
 while IFS= read -r line || [ -n "$line" ]; do
   input="$input$line "
 done
-source="$(printf '%s\n' "$input" | sed -n \
-  's/.*[{,][[:space:]]*"source"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p')"
-[ "$source" = startup ] || exit 0
+# The input must at least be one object for SessionStart, and a fresh start.
+trimmed="$(printf '%s\n' "$input" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+case "$trimmed" in '{'*'}') ;; *) exit 0 ;; esac
+# field KEY - the string value of KEY where it follows { or , as a key does.
+field() {
+  printf '%s\n' "$trimmed" | sed -n \
+    's/.*[{,][[:space:]]*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p'
+}
+[ "$(field hook_event_name)" = SessionStart ] || exit 0
+[ "$(field source)" = startup ] || exit 0
 
 # is_version S - true if S is one line shaped like 2.1.283 or 2.1.283-beta.1.
 # Each number has at most 9 digits, so that test -gt can compare it anywhere.

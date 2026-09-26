@@ -33,7 +33,8 @@ with the next upgrade, not as a review of every release since the plugin was ins
 
 `hooks/update-watch.sh` runs on `SessionStart`, as a second entry beside the core card, with a
 timeout of 10 seconds. It acts only on a fresh start (`source` is `startup`); a resume, a fork,
-`/clear` and a compaction leave everything alone, the record included. It reads the version
+`/clear`, a compaction and input that is not one object for `SessionStart` leave everything
+alone, the record included. It reads the version
 with `claude --version` and compares it with `${CLAUDE_PLUGIN_DATA}/claude-code-version`:
 
 1. **Same version:** nothing.
@@ -83,12 +84,11 @@ because `CLAUDE_PLUGIN_DATA` is set for hooks, not for the session's own command
 
 ## The report
 
-One file per version, `update-reports/<version>.md` in the data directory. It leads with a
-table, so a person or a status view can read it at a glance:
+One file per version, `update-reports/<version>.md` in the data directory. After one line
+with the date, both versions and the sources, it leads with a table, so a person or a status
+view can read it at a glance:
 
 ```markdown
-# Claude Code <new version>: update report
-
 <YYYY-MM-DD> · <old> to <new> · sources: CHANGELOG.md, read <date>; <each page read, by URL>
 
 | Entry | Verdict | Part affected | Source |

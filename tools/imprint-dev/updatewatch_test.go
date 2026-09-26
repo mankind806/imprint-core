@@ -280,6 +280,9 @@ func TestUpdateWatchSpeaksOnlyAtStartup(t *testing.T) {
 		"no source":      `{"session_id":"s","hook_event_name":"SessionStart"}`,
 		"not JSON":       "startup",
 		"nothing at all": "",
+		"not one object": `not-json,{"hook_event_name":"SessionStart","source":"startup"`,
+		"another event":  `{"hook_event_name":"SubagentStart","source":"startup"}`,
+		"no event name":  `{"session_id":"s","source":"startup"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -456,7 +459,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		if out := runUpdateWatch(t, bin, dir, startupInput, optIn); out != "" {
 			t.Fatalf("printed %q", out)
 		}
-		if got := recordedVersion(t, dir); got != "" && got != "2.1.282\n" {
+		if got := recordedVersion(t, dir); got != "2.1.282\n" {
 			t.Errorf("recorded %q; the record must stay", got)
 		}
 		if raw, err := os.ReadFile(filepath.Join(dir, historyFile)); err == nil && len(raw) > 0 {
