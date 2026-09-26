@@ -1,6 +1,6 @@
 ---
 name: delegation-contract
-description: "How to dispatch agents: lead only orchestrates, who advises, delegation header, one writer per worktree, review depth by risk, blind second opinion, model choice. Use when delegating, reviewing or choosing a model: 'delegate this', 'agents disagree', 'second opinion', 'review this', 'which model'; 'delegier das', 'Agenten widersprechen sich', 'lass das prüfen', 'zweite Meinung', 'welches Modell'."
+description: "How to dispatch agents: lead only orchestrates, who advises, delegation header, one writer per worktree, review depth by risk, blind second opinion, model choice. Triggers: 'delegate this', 'agents disagree', 'second opinion from another agent', 'review this', 'which model'; 'delegier das', 'Agenten widersprechen sich', 'zweite Meinung von anderen Agenten', 'lass das prüfen', 'welches Modell'."
 ---
 
 # The delegation contract

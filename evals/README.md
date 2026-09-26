@@ -44,6 +44,11 @@ claude plugin eval . --case delegation-contract-trigger-de-1 --runs 1 --ablation
 
 # Only the free-to-score trigger and negative cases (no llm graders)
 claude plugin eval . --tag trigger --tag negative --max-cost-usd <CAP>
+
+# The behavior cases (llm-graded): the case format has no per-case judge-model
+# field (checked against the docs and prompt.md/case.yaml frontmatter,
+# 2026-09-26), so use a stronger judge for these on the command line
+claude plugin eval . --tag behavior --judge-model sonnet --max-cost-usd <CAP>
 ```
 
 Per the docs (checked 2026-09-26): if the account's usage limit or an API
@@ -123,3 +128,34 @@ sonnet`" — [Choose graders that give a stable signal](https://code.claude.com/
 checked 2026-09-26). Not re-run with a stronger judge here to stay inside the
 $5 cap; the reliable signal from this run is that the skill now fires 3/3,
 which it did not before.
+
+**Run 3 — all six `delegation-contract-*` cases, 2026-09-26.**
+`--tag delegation-contract --judge-model sonnet`, cap $4, actual **$3.18**,
+149s. Change under test: `skills/delegation-contract/SKILL.md`'s
+`description` now triggers on "second opinion from another agent" /
+"zweite Meinung von anderen Agenten" instead of the bare, ambiguous
+"second opinion" / "zweite Meinung"; the judge for all `llm` graders in
+this run was Sonnet instead of the default Haiku.
+
+| Case | With | Without | Δ |
+| :--- | :--: | :--: | :--: |
+| `delegation-contract-trigger-de-1` | 3/3 | 0/3 | +1.0 |
+| `delegation-contract-trigger-de-2` | 0/3 | 0/3 | 0 |
+| `delegation-contract-trigger-en-1` | 3/3 | 0/3 | +1.0 |
+| `delegation-contract-trigger-en-2` | 3/3 | 0/3 | +1.0 |
+| `delegation-contract-negative` | pass | pass | 0 (expected — `arm: both`) |
+| `delegation-contract-behavior` | 1.0 | 0 | +1.0 |
+
+The Sonnet judge fixed `delegation-contract-behavior` outright (Δ 0 → +1.0):
+the same kind of role/boundary/return plan that Haiku voted FAIL on 3/3
+times in run 2 now scores 1.0. `delegation-contract-trigger-de-2` still never
+fires the skill (0/3), unchanged from run 2, even with the sharper
+description. On inspection this looks like a prompt problem, not a
+description problem: the prompt itself ("Ich brauche eine zweite Meinung zu
+diesem Vorschlag...") never says the second opinion should come from
+*another agent* — that framing lives only in the description now, and the
+prompt still reads as an ordinary request for Claude's own feedback. Fixing
+it would mean rewording the trigger case's prompt itself (out of scope for
+a description-only change), for example to something like "Ich möchte eine
+unabhängige zweite Einschätzung von einem anderen Agenten, bevor ich diesen
+Vorschlag umsetze: ...".
