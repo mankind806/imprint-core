@@ -8,7 +8,7 @@
 # and records the new one there, appending it with the UTC date to
 #     ${CLAUDE_PLUGIN_DATA}/claude-code-version-history
 # so that a version whose report never got written stays findable after the
-# next update. Only when the version changed does it print anything:
+# next update. Only on an upgrade, a higher major.minor.patch, does it print:
 # one instruction, as additionalContext, to have the changelog entries and the
 # documentation pages between the two versions read, and a dated report saved to
 #     ${CLAUDE_PLUGIN_DATA}/update-reports/<new version>.md
