@@ -148,10 +148,21 @@ func yamlEscape(s string) (string, int, error) {
 		return "", 0, fmt.Errorf("short escape \\%s", s)
 	}
 	v, err := strconv.ParseUint(s[1:1+width], 16, 32)
-	if err != nil || !utf8.ValidRune(rune(v)) {
+	// v is checked against the constant utf8.MaxRune before it is narrowed to
+	// rune (int32). ParseUint's 32-bit result can exceed math.MaxInt32, and
+	// narrowing such a value straight to rune would wrap it into a negative
+	// number; the previous single-line check relied on utf8.ValidRune to
+	// reject that wrapped value (which it always did, since ValidRune never
+	// accepts a negative rune), but a bound check against a constant makes
+	// the narrowing provably in range rather than merely caught downstream.
+	if err != nil || v > utf8.MaxRune {
 		return "", 0, fmt.Errorf("bad escape \\%s", s[:1+width])
 	}
-	return string(rune(v)), 1 + width, nil
+	r := rune(v)
+	if !utf8.ValidRune(r) {
+		return "", 0, fmt.Errorf("bad escape \\%s", s[:1+width])
+	}
+	return string(r), 1 + width, nil
 }
 
 func decodeSingleQuoted(src string) (string, error) {
