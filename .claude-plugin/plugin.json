@@ -1,0 +1,24 @@
+{
+  "name": "imprint",
+  "description": "Working rules for running several coding agents without them ruining each other's work, and for growing a knowledge store that does not quietly rot. Ships four skills (delegation contract, measuring before asserting, session handover, and knowledge keeping), one read-only foreign-material review agent, and a short core card injected at session start and at subagent start. Every rule states what enforces it, or says plainly that nothing does.",
+  "version": "0.4.0",
+  "author": {
+    "name": "mankind806"
+  },
+  "homepage": "https://github.com/mankind806/imprint-core",
+  "repository": "https://github.com/mankind806/imprint-core",
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "delegation",
+    "orchestration",
+    "subagents",
+    "code-review",
+    "second-opinion",
+    "verification",
+    "working-rules",
+    "knowledge-management",
+    "provenance",
+    "single-source"
+  ]
+}

@@ -1,0 +1,12 @@
+# OS litter
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor and backup files
+*~
+*.swp
+*.swo
+*.bak
+.idea/
+.vscode/

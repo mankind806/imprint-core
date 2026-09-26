@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "imprint",
+  "description": "This repository is its own marketplace and carries exactly one plugin: imprint, a set of working rules for multi-agent collaboration and for knowledge that has to stay provable.",
+  "owner": {
+    "name": "mankind806"
+  },
+  "plugins": [
+    {
+      "name": "imprint",
+      "source": "./",
+      "description": "Working rules in two layers: multi-agent collaboration (delegation contract, measuring before asserting, session handover) and knowledge keeping for a store that stays provable, plus a read-only review agent and a core card injected at session and subagent start.",
+      "category": "workflow"
+    }
+  ]
+}

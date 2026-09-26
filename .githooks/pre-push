@@ -1,0 +1,219 @@
+#!/bin/sh
+#
+# imprint - pre-push gate
+#
+# WHAT IT ENFORCES. One rule has a mechanical half, and this is it: nothing
+# leaves this repository except its git identity. The hook refuses a push whose
+# commits carry an identity this clone has not declared, and it refuses a push
+# whose tracked content or commit messages match a shape that personal data
+# takes - phone numbers, bank account numbers and postal addresses in the
+# formats the patterns below spell out.
+#
+# WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
+# abstraction: a worked case told generically, with no organisation, no
+# product, no ticket number, no path off anybody's machine. Whether a passage
+# is abstract is a question of meaning, and no pattern answers it. A page that
+# names a real employer in plain words passes this hook exactly as a properly
+# abstracted one does. Reading for that stays a behaviour rule with nothing
+# behind it, and a blocklist of real names would not change that - it would
+# only look as though it had.
+#
+# In the repository's own four-state vocabulary: enforced, for the shapes named
+# above and for the identity, and for nothing else.
+#
+# INSTALL - per clone, and it does not arrive with one:
+#     git config core.hooksPath .githooks
+#
+# DECLARING A SECOND IDENTITY - for a co-author or a fork:
+#     git config --add imprint.allowedIdentity 'Name <address>'
+# Your own user.name and user.email count as declared without being listed.
+#
+# BYPASS. `git push --no-verify` skips every hook, silently, and this script
+# cannot see that it happened. Setting IMPRINT_PUSH_ANYWAY to a reason is the
+# loud alternative: the findings are printed in full, the reason is echoed
+# back, and the push proceeds.
+#
+# NOTHING TO PUSH. Git runs this hook even when every ref is already up to
+# date, and then pipes in an empty ref list. That is not a failure to read the
+# input: it is git saying that nothing new leaves the machine, so there is
+# nothing here to check and the push proceeds. An empty list from something
+# that is not git - no remote name and location in the arguments, or a terminal
+# on standard input - is a hook that was handed nothing, and is still refused.
+#
+# FAIL-CLOSED. Every other way this script can fail to finish - a git command
+# that errors, an unset identity, a temporary file it cannot create - ends in a
+# refused push. A gate that waves you through when it breaks is worse than no
+# gate, because it is indistinguishable from one that checked.
+
+set -u
+
+say() { printf '%s\n' "$*" >&2; }
+refuse() { say "pre-push: $*"; say "pre-push: refusing the push."; exit 1; }
+
+# Git calls this hook with exactly two parameters - the name and the location of
+# the destination remote - and pipes the ref list in. Without them, or with a
+# terminal on standard input, whatever is running this is not a push, and an
+# empty ref list from it says nothing about what is being published.
+if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no; fi
+
+work="$(mktemp -d 2>/dev/null)" || refuse "could not create a working directory."
+trap 'rm -rf "$work"' EXIT
+: >"$work/findings"; : >"$work/errors"; : >"$work/ran"; : >"$work/skipped"; : >"$work/ranges"
+
+# --- the identities this clone declares -------------------------------------
+me_name="$(git config --get user.name || true)"
+me_mail="$(git config --get user.email || true)"
+[ -n "$me_name" ] && [ -n "$me_mail" ] || refuse \
+  "user.name or user.email is unset here, so this hook cannot tell your own commits from a stranger's."
+printf '%s <%s>\n' "$me_name" "$me_mail" >"$work/allowed"
+git config --get-all imprint.allowedIdentity >>"$work/allowed" 2>/dev/null || true
+
+# --- what is being pushed ----------------------------------------------------
+zero="$(git hash-object --stdin </dev/null | sed 's/./0/g')" || refuse "git hash-object failed."
+lines=0
+# The `|| [ -n ... ]` catches a last line with no newline after it, which read
+# reports as a failure although it filled the variables. A line that arrives
+# but does not parse is refused rather than skipped: after the loop, lines=0
+# has to mean that git sent no bytes at all, or an unreadable input would wear
+# the face of an up-to-date remote.
+while read -r local_ref local_oid remote_ref remote_oid || [ -n "${local_ref:-}" ]; do
+  [ -n "${local_oid:-}" ] || refuse \
+    "could not read this as a ref line from git: \"${local_ref:-}\"."
+  lines=$((lines + 1))
+  if [ "$local_oid" = "$zero" ]; then
+    printf 'deletion of %s - a deletion carries no new content\n' "${remote_ref:-?}" >>"$work/skipped"
+  elif [ "$remote_oid" = "$zero" ]; then
+    printf '%s\n' "$local_oid" >>"$work/ranges"
+  else
+    printf '%s..%s\n' "$remote_oid" "$local_oid" >>"$work/ranges"
+  fi
+done
+if [ "$lines" -eq 0 ]; then
+  [ "$git_is_calling" = yes ] || refuse \
+    "no refs on standard input, and nothing says git piped them in; a silent empty run is not a pass."
+  printf 'every ref - git listed none to push, so nothing is being published\n' >>"$work/skipped"
+fi
+
+if [ ! -s "$work/ranges" ]; then
+  say "pre-push: checks that ran: none needed."
+  while read -r s; do say "pre-push:   skipped: $s"; done <"$work/skipped"
+  exit 0
+fi
+
+: >"$work/commits"
+while read -r range; do
+  git rev-list "$range" >>"$work/commits" || refuse "git rev-list failed for $range."
+done <"$work/ranges"
+sort -u "$work/commits" -o "$work/commits"
+n_commits="$(wc -l <"$work/commits" | tr -d ' ')"
+n_refs="$(wc -l <"$work/ranges" | tr -d ' ')"
+
+# --- check 1: every author and committer is a declared identity --------------
+: >"$work/ids"
+while read -r range; do
+  git log --format='%an <%ae>%n%cn <%ce>' "$range" >>"$work/ids" || refuse "git log failed for $range."
+done <"$work/ranges"
+sort -u "$work/ids" -o "$work/ids"
+n_ids="$(wc -l <"$work/ids" | tr -d ' ')"
+undeclared=0
+while read -r id; do
+  [ -n "$id" ] || continue
+  grep -Fxq "$id" "$work/allowed" && continue
+  undeclared=$((undeclared + 1))
+  printf 'undeclared identity: %s\n' "$id" >>"$work/findings"
+done <"$work/ids"
+printf 'declared identity - %s identity/identities over %s commit(s), %s undeclared\n' \
+  "$n_ids" "$n_commits" "$undeclared" >>"$work/ran"
+
+# --- the shapes --------------------------------------------------------------
+shapes() {
+  cat <<'SHAPES'
+address	[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}
+phone number	(^|[^0-9])0[0-9]{2,4}[ /-][0-9]{4,}
+IBAN	[A-Z]{2}[0-9]{2}( ?[A-Z0-9]{4}){3,}
+postcode and place	[0-9]{5}[[:space:]]+[A-ZÄÖÜ][a-zäöüß-]{2,}
+SHAPES
+}
+n_shapes="$(shapes | wc -l | tr -d ' ')"
+tab="$(printf '\t')"
+
+# --- check 2: tracked content, every commit in the range ---------------------
+# Every commit, not just the tip: a push publishes the whole range, and a file
+# removed in a later commit stays reachable by its hash for anyone who clones.
+# --text is not decoration - grep falls silent on a file holding a NUL byte and
+# reports no match, which looks exactly like a clean tree.
+while read -r commit; do
+  shapes | while IFS="$tab" read -r name pattern; do
+    hits="$(git grep --text -n -E "$pattern" "$commit" 2>"$work/greperr")"
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+      printf 'git grep could not read %s: %s\n' "$commit" "$(cat "$work/greperr")" >>"$work/errors"
+    elif [ "$rc" -eq 0 ]; then
+      printf '%s\n' "$hits" | while IFS= read -r hit; do
+        [ -n "$hit" ] || continue
+        printf '%s: %s\n' "$name" "$hit" >>"$work/findings"
+      done
+    fi
+  done
+done <"$work/commits"
+printf 'tracked content - %s shape(s) over the trees of all %s commit(s)\n' \
+  "$n_shapes" "$n_commits" >>"$work/ran"
+
+# --- check 3: commit messages ------------------------------------------------
+# A message is as public as a blob, and trailers are where addresses ride in.
+: >"$work/messages"
+while read -r range; do
+  git log --format='%h|%s%n%b' "$range" >>"$work/messages" || refuse "git log failed for $range."
+done <"$work/ranges"
+shapes | while IFS="$tab" read -r name pattern; do
+  grep -a -n -E "$pattern" "$work/messages" > "$work/mhits" 2>/dev/null
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    printf 'grep could not read the commit messages of this range\n' >>"$work/errors"
+  elif [ "$rc" -eq 0 ]; then
+    while IFS= read -r hit; do
+      [ -n "$hit" ] || continue
+      printf '%s in a commit message: %s\n' "$name" "$hit" >>"$work/findings"
+    done <"$work/mhits"
+  fi
+done
+printf 'commit messages - %s shape(s) over %s commit(s)\n' "$n_shapes" "$n_commits" >>"$work/ran"
+
+# --- report ------------------------------------------------------------------
+say "pre-push: $n_refs ref(s), $n_commits commit(s). Checks that ran:"
+while read -r r; do say "pre-push:   ran: $r"; done <"$work/ran"
+if [ -s "$work/skipped" ]; then
+  while read -r s; do say "pre-push:   skipped: $s"; done <"$work/skipped"
+else
+  say "pre-push:   skipped: none"
+fi
+say "pre-push:   not checked by anything here: whether the prose is abstract."
+
+# A check that could not run is not a check that passed, and no override covers
+# it: "I could not look" and "I looked and found nothing" must never share an exit.
+if [ -s "$work/errors" ]; then
+  say ""
+  say "pre-push: $(wc -l <"$work/errors" | tr -d ' ') check(s) could not run:"
+  while IFS= read -r e; do say "  $e"; done <"$work/errors"
+  say "pre-push: this is not a finding and IMPRINT_PUSH_ANYWAY does not cover it."
+  refuse "a check could not run."
+fi
+
+if [ ! -s "$work/findings" ]; then
+  say "pre-push: no findings. The shapes are clean; the abstraction is your judgement."
+  exit 0
+fi
+
+say ""
+say "pre-push: $(wc -l <"$work/findings" | tr -d ' ') finding(s):"
+while IFS= read -r f; do say "  $f"; done <"$work/findings"
+say ""
+if [ -n "${IMPRINT_PUSH_ANYWAY:-}" ]; then
+  say "pre-push: IMPRINT_PUSH_ANYWAY is set - \"$IMPRINT_PUSH_ANYWAY\" - pushing with the findings above unresolved."
+  exit 0
+fi
+say "pre-push: fix them, declare the identity with"
+say "pre-push:   git config --add imprint.allowedIdentity 'Name <address>'"
+say "pre-push: or push anyway with a stated reason:"
+say "pre-push:   IMPRINT_PUSH_ANYWAY='why' git push"
+refuse "$(wc -l <"$work/findings" | tr -d ' ') finding(s) above."

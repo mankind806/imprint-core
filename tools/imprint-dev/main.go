@@ -1,0 +1,111 @@
+// Command imprint-dev keeps the imprint plugin tree honest.
+//
+//	imprint-dev gen   [--root dir]
+//	imprint-dev check [--root dir] [--sarif file]
+//
+// gen writes the SessionStart and SubagentStart hook payloads from their one
+// canonical source, hooks/kernkarte.md. check runs the invariants a program can
+// decide over the plugin tree and reports every finding.
+//
+// Exit codes: 0 all good, 1 at least one violation, 2 the tool itself could not
+// run (unreadable root, an I/O error, an unwritable SARIF file, bad usage).
+package main
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+)
+
+const (
+	exitOK        = 0
+	exitViolation = 1
+	exitError     = 2
+)
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+const usageText = `usage:
+  imprint-dev gen   [--root dir]
+  imprint-dev check [--root dir] [--sarif file]
+
+gen    writes hooks/session-start.json and hooks/subagent-start.json from hooks/kernkarte.md
+check  checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run
+`
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usageText)
+		return exitError
+	}
+	switch args[0] {
+	case "gen":
+		return runGen(args[1:], stdout, stderr)
+	case "check":
+		return runCheck(args[1:], stderr)
+	case "help", "-h", "--help":
+		fmt.Fprint(stdout, usageText)
+		return exitOK
+	default:
+		fmt.Fprintf(stderr, "imprint-dev: unknown subcommand %q\n%s", args[0], usageText)
+		return exitError
+	}
+}
+
+// parseFlags parses a subcommand's flags. It returns done=true with the exit
+// code when the caller should stop: on -h, on a bad flag, or on a stray argument.
+func parseFlags(fs *flag.FlagSet, args []string, stderr io.Writer) (done bool, code int) {
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return true, exitOK
+		}
+		return true, exitError
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "imprint-dev %s: unexpected argument %q\n", fs.Name(), fs.Arg(0))
+		return true, exitError
+	}
+	return false, 0
+}
+
+func runGen(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("gen", flag.ContinueOnError)
+	root := fs.String("root", ".", "plugin root")
+	if done, code := parseFlags(fs, args, stderr); done {
+		return code
+	}
+	written, err := writeGenerated(*root)
+	if err != nil {
+		fmt.Fprintf(stderr, "imprint-dev gen: %v\n", err)
+		return exitError
+	}
+	for _, p := range written {
+		fmt.Fprintf(stdout, "imprint-dev gen: wrote %s\n", p)
+	}
+	return exitOK
+}
+
+func runCheck(args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	root := fs.String("root", ".", "plugin root")
+	sarifPath := fs.String("sarif", "", "also write SARIF 2.1.0 to this file")
+	if done, code := parseFlags(fs, args, stderr); done {
+		return code
+	}
+
+	e := &env{Root: *root}
+	rep := runChecks(e)
+	printSummary(stderr, rep)
+	if *sarifPath != "" {
+		if err := writeSARIF(*sarifPath, rep); err != nil {
+			fmt.Fprintf(stderr, "imprint-dev check: could not write SARIF: %v\n", err)
+			return exitError
+		}
+	}
+	return rep.exitCode()
+}
