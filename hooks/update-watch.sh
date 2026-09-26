@@ -83,6 +83,13 @@ fi
 is_version "$old" || old=''
 [ "$old" = "$new" ] && exit 0
 
+hist="$data/claude-code-version-history"
+# A history path that is a link or not a plain file is left alone: a write
+# there could succeed without keeping the line.
+if [ -e "$hist" ] || [ -L "$hist" ]; then
+  [ -f "$hist" ] && [ ! -L "$hist" ] || exit 0
+fi
+
 # The history line goes first and the record moves last: if either write fails,
 # the record stays as it was and the next start tries again, so no version can
 # be recorded without also being in the history.
@@ -91,7 +98,7 @@ day="$(date -u +%Y-%m-%d)" || exit 0
 case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) exit 0 ;; esac
 tmp="$file.tmp.$$"
 if ! { printf '%s\n' "$new" >"$tmp" &&
-  printf '%s %s\n' "$day" "$new" >>"$data/claude-code-version-history" &&
+  printf '%s %s\n' "$day" "$new" >>"$hist" &&
   mv -f "$tmp" "$file"; }; then
   rm -f "$tmp"
   exit 0

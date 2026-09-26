@@ -395,6 +395,26 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 			t.Errorf("the directory must stay empty: %v %v", inside, err)
 		}
 	})
+	t.Run("a link at the history's path", func(t *testing.T) {
+		dir := t.TempDir()
+		record(t, dir, "2.1.282\n")
+		target := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.WriteFile(target, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, historyFile)); err != nil {
+			t.Fatal(err)
+		}
+		if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
+			t.Fatalf("printed %q", out)
+		}
+		if got := recordedVersion(t, dir); got != "2.1.282\n" {
+			t.Errorf("recorded %q; the record must stay", got)
+		}
+		if raw, _ := os.ReadFile(target); len(raw) != 0 {
+			t.Errorf("wrote %q through the link", raw)
+		}
+	})
 	t.Run("CLAUDE_PLUGIN_DATA unset", func(t *testing.T) {
 		if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), "", startupInput); out != "" {
 			t.Fatalf("printed %q", out)
