@@ -395,6 +395,26 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 			t.Errorf("the directory must stay empty: %v %v", inside, err)
 		}
 	})
+	t.Run("a link at the record's path", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.WriteFile(target, []byte("2.1.282\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, versionFile)
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
+			t.Fatalf("printed %q", out)
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("the link must stay a link: %v", err)
+		}
+		if got := history(t, dir); len(got) != 0 {
+			t.Errorf("history %v; nothing may be written", got)
+		}
+	})
 	t.Run("a link at the history's path", func(t *testing.T) {
 		dir := t.TempDir()
 		record(t, dir, "2.1.282\n")
