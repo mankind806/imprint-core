@@ -301,3 +301,180 @@ func TestCheckPluginVersion(t *testing.T) {
 		})
 	}
 }
+
+// --- g -----------------------------------------------------------------------
+
+func TestCheckEnforcementClassification(t *testing.T) {
+	table := func(rows ...string) string {
+		return "# Reference\n\n| Rule | Enforcement |\n|---|---|\n" + strings.Join(rows, "\n") + "\n"
+	}
+	setRef := func(content string) func(map[string]string) {
+		return func(f map[string]string) { f["skills/beta/references/enforcement.md"] = content }
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+		n      int
+		want   []string
+	}{
+		{"valid", nil, 0, nil},
+		{"punctuation inside and outside the bold", setRef(table(
+			"| A | **Behaviour rule.** |",
+			"| B | **Behaviour rule**. |",
+			"| C | **Behaviour rule**, and more. |",
+			"| D | **Enforceable, not enforced** — see below. |",
+		)), 0, nil},
+		{"emphasis that is not a state", setRef(table(
+			"| A | **Enforced** only **where measured**, and **not measured here**. |",
+		)), 0, nil},
+		{"a state in plain prose does not count", setRef(table(
+			"| A | **Enforced** for one half; a behaviour rule for the other. |",
+		)), 0, nil},
+		{"no state", setRef(table("| A | Nothing enforces this. |")), 1,
+			[]string{"skills/beta/references/enforcement.md:5: names no state"}},
+		{"empty cell", setRef(table("| A | |")), 1, []string{":5: names no state"}},
+		{"missing cell", setRef(table("| A |")), 1, []string{":5: names no state"}},
+		{"unknown state", setRef(table("| A | **Partly enforced.** By a hook. |")), 1,
+			[]string{`:5: the state "Partly enforced" is not one of the four`}},
+		{"misspelt state", setRef(table("| A | **Enforcable, not enforced** |")), 1,
+			[]string{`"Enforcable, not enforced"`}},
+		{"case matters", setRef(table("| A | **behaviour rule** |")), 1, []string{`"behaviour rule"`}},
+		{"unknown lead, known state later", setRef(table("| A | **Mostly** enforced; **Behaviour rule** otherwise. |")), 1,
+			[]string{`"Mostly"`}},
+		{"two states, both known, is allowed (one per rule half)", setRef(table(
+			"| A | **Behaviour rule** for one half; **Enforceable, not enforced** for the other. |",
+		)), 0, nil},
+		{"a known and an unknown classification in the same row", setRef(table(
+			"| A | **Partly enforced** for one half; **Behaviour rule** for the other. |",
+		)), 1, []string{`:5: the state "Partly enforced" is not one of the four`}},
+		{"one finding per bad row", setRef(table(
+			"| A | **Enforced** |",
+			"| B | nothing |",
+			"| C | **Behaviour rule** |",
+			"| D | **Maybe** |",
+		)), 2, []string{":6: names no state", `:8: the state "Maybe"`}},
+		{"an escaped pipe stays in its cell", setRef(table(`| A \| B | **Enforced** |`)), 0, nil},
+		{"the Enforcement column is found by its header", setRef(
+			"| Enforcement | Rule |\n|:--|--:|\n| **Enforced** | one |\n| two | **Behaviour rule** |\n"), 1,
+			[]string{":4: names no state"}},
+		{"other tables are not read", setRef(
+			"| Claim | Position |\n|---|---|\n| A | plain text |\n"), 0, nil},
+		{"a table in a code fence is not read", setRef(
+			"```\n| Rule | Enforcement |\n|---|---|\n| A | plain |\n```\n"), 0, nil},
+		{"a header without a delimiter row is not a table", setRef(
+			"| Rule | Enforcement |\n| A | plain |\n"), 0, nil},
+		{"the table ends at the first line that is not a row", setRef(
+			table("| A | **Enforced** |") + "After the table.\n| stray | row |\n"), 0, nil},
+		{"two tables in one file", setRef(
+			table("| A | plain |") + "\n" + table("| B | **Nope** |")), 2,
+			[]string{":5: names no state", ":11: the state \"Nope\""}},
+		{"files other than Markdown are not read", func(f map[string]string) {
+			f["skills/beta/notes.txt"] = table("| A | plain |")
+		}, 0, nil},
+		{"tables outside skills/ are not read", func(f map[string]string) {
+			f["README.md"] = table("| A | plain |")
+		}, 0, nil},
+		{"CRLF line endings", setRef(strings.ReplaceAll(table("| A | **Enforced** |", "| B | plain |"), "\n", "\r\n")), 1,
+			[]string{":6: names no state"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			expectViolations(t, checkEnforcementClassification, testEnv(t, newTree(t, tc.mutate)), tc.n, tc.want...)
+		})
+	}
+}
+
+func TestEnforcementNoteCountsTablesAndRows(t *testing.T) {
+	res, err := checkEnforcementClassification(testEnv(t, newTree(t, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Note != "1 table(s), 4 row(s)" {
+		t.Fatalf("note %q", res.Note)
+	}
+}
+
+// --- h -----------------------------------------------------------------------
+
+func TestCheckOverdueRechecks(t *testing.T) {
+	// testToday is 2026-06-15.
+	setReadme := func(content string) func(map[string]string) {
+		return func(f map[string]string) { f["README.md"] = content }
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+		n      int
+		want   []string
+	}{
+		{"no dates", nil, 0, nil},
+		{"due today is not overdue", setReadme("*Re-check by 2026-06-15.*\n"), 0, nil},
+		{"due later", setReadme("Re-check by 2026-12-13.\n"), 0, nil},
+		{"one day past", setReadme("# x\n*Re-check by 2026-06-14.*\n"), 1,
+			[]string{"README.md:2: re-check was due by 2026-06-14, 1 day(s) before 2026-06-15"}},
+		{"lower case inside a table row", setReadme("| A | **Behaviour rule**; re-check by 2026-01-01. |\n"), 1,
+			[]string{"README.md:1: re-check was due by 2026-01-01, 165 day(s)"}},
+		{"bold", setReadme("**Re-check by 2025-06-15** whether it holds.\n"), 1, []string{"365 day(s)"}},
+		{"without by", setReadme("re-check 2026-06-01\n"), 1, []string{"due by 2026-06-01"}},
+		{"two on one line", setReadme("Re-check by 2026-01-01, and re-check by 2026-02-01.\n"), 2,
+			[]string{"2026-01-01", "2026-02-01"}},
+		{"not a calendar date", setReadme("Re-check by 2026-02-30.\n"), 1, []string{"2026-02-30 is not a calendar date"}},
+		{"a date with other words is not a re-check date", setReadme("Measured 2020-01-01. Checked: 2020-01-01. Due by 2020-01-01.\n"), 0, nil},
+		{"recheck without a hyphen is not read", setReadme("Recheck by 2020-01-01.\n"), 0, nil},
+		{"skills, agents and hooks are read", func(f map[string]string) {
+			f["skills/alpha/references/r.md"] = "Re-check by 2020-01-01.\n"
+			f["agents/reader.md"] += "Re-check by 2020-01-01.\n"
+			f["hooks/notes.md"] = "Re-check by 2020-01-01.\n"
+		}, 3, []string{"skills/alpha/references/r.md:1", "agents/reader.md:5", "hooks/notes.md:1"}},
+		{"files outside the plugin are not read", func(f map[string]string) {
+			f["tools/x/x_test.go"] = "// Re-check by 2020-01-01.\n"
+			f["CONTRIBUTING.md"] = "Re-check by 2020-01-01.\n"
+		}, 0, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name+" (release)", func(t *testing.T) {
+			e := testEnv(t, newTree(t, tc.mutate))
+			e.Release = true
+			expectViolations(t, checkOverdueRechecks, e, tc.n, tc.want...)
+		})
+		t.Run(tc.name+" (normal run)", func(t *testing.T) {
+			res, err := checkOverdueRechecks(testEnv(t, newTree(t, tc.mutate)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v := violations(res.Findings); len(v) != 0 {
+				t.Fatalf("a normal run reported violations: %+v", v)
+			}
+			if len(res.Findings) != tc.n {
+				t.Fatalf("got %d warning(s), want %d: %+v", len(res.Findings), tc.n, res.Findings)
+			}
+			for _, f := range res.Findings {
+				if f.Kind != warning {
+					t.Fatalf("finding of kind %d, want a warning: %+v", f.Kind, f)
+				}
+			}
+		})
+	}
+}
+
+func TestOverdueRecheckNeedsToday(t *testing.T) {
+	e := testEnv(t, newTree(t, nil))
+	e.Today = ""
+	if _, err := checkOverdueRechecks(e); err == nil {
+		t.Fatal("no error without a date for today")
+	}
+}
+
+// N17: an overdue re-check date blocks a release, never the ordinary run.
+func TestOverdueRecheckExitCodes(t *testing.T) {
+	root := newTree(t, func(f map[string]string) { f["README.md"] = "# fixture\n\n*Re-check by 2026-06-14.*\n" })
+	for _, tc := range []struct {
+		release bool
+		code    int
+	}{{false, exitOK}, {true, exitViolation}} {
+		rep := runChecks(&env{Root: root, Today: testToday, Release: tc.release})
+		if got := rep.exitCode(); got != tc.code {
+			t.Errorf("release=%v: exit %d, want %d", tc.release, got, tc.code)
+		}
+	}
+}

@@ -29,17 +29,34 @@ func skillFile(name, description string) string {
 	return "---\nname: " + name + "\ndescription: \"" + description + "\"\n---\n\n# " + name + "\n"
 }
 
+// testToday is the fixed "today" every check runs against in tests; no test
+// reads the clock.
+const testToday = "2026-06-15"
+
+// validEnforcementTable uses each of the four states once, in the spellings
+// the skills use.
+const validEnforcementTable = `# Reference
+
+| Rule | Enforcement |
+|---|---|
+| One | **Enforced** by a hook. |
+| Two | **Enforceable, not enforced.** Nothing runs it; **not measured here**. |
+| Three | **Behaviour rule**. |
+| Four | **Reserved to a person.** |
+`
+
 // validFiles is a plugin tree that passes every check.
 func validFiles(t *testing.T) map[string]string {
 	t.Helper()
 	files := map[string]string{
-		"skills/alpha/SKILL.md":      skillFile("alpha", "Short description."),
-		"skills/beta/SKILL.md":       skillFile("beta", "Another short description."),
-		"agents/reader.md":           "---\nname: reader\n---\nReads things.\n",
-		"hooks/kernkarte.md":         testCard,
-		"hooks/hooks.json":           validHooksJSON,
-		".claude-plugin/plugin.json": `{"name": "fixture", "version": "1.2.3"}`,
-		"README.md":                  "# fixture\n",
+		"skills/alpha/SKILL.md":                 skillFile("alpha", "Short description."),
+		"skills/beta/SKILL.md":                  skillFile("beta", "Another short description."),
+		"skills/beta/references/enforcement.md": validEnforcementTable,
+		"agents/reader.md":                      "---\nname: reader\n---\nReads things.\n",
+		"hooks/kernkarte.md":                    testCard,
+		"hooks/hooks.json":                      validHooksJSON,
+		".claude-plugin/plugin.json":            `{"name": "fixture", "version": "1.2.3"}`,
+		"README.md":                             "# fixture\n",
 	}
 	for _, h := range hookTargets {
 		data, err := renderHook(h.Event, cardText([]byte(testCard)))
@@ -79,7 +96,7 @@ func newTree(t *testing.T, mutate func(files map[string]string)) string {
 // testEnv wraps root in an env for a check to run against.
 func testEnv(t *testing.T, root string) *env {
 	t.Helper()
-	return &env{Root: root}
+	return &env{Root: root, Today: testToday}
 }
 
 func violations(fs []finding) []finding {
