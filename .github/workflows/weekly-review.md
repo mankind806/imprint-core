@@ -46,6 +46,8 @@ safe-outputs:
   report-failed-jobs: false
   report-incomplete:
     create-issue: false
+  missing-tool:
+    create-issue: false
   # The detection job reviews the agent's output before any issue is filed.
   # It runs a small model and has its own cap (default 400); 100 is an
   # estimate to adjust after the first runs.
