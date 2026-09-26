@@ -57,7 +57,7 @@ var checks = []check{
 	{"d", "removed-skill-reference", "No reference to a removed skill, except on a line that says formerly or merged.", checkRemovedSkills},
 	{"e", "hooks-json", "hooks/hooks.json registers SessionStart without a matcher and SubagentStart, and every ${CLAUDE_PLUGIN_ROOT} sits inside double quotes.", checkHooksJSON},
 	{"f", "plugin-version", ".claude-plugin/plugin.json carries a semver version.", checkPluginVersion},
-	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/ carries at least one known classification, none unknown: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
+	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/, and in docs/core-card-and-checks.md, carries at least one known classification, none unknown: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
 	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
 }
 
@@ -556,9 +556,13 @@ func classifyEnforcement(cell string) string {
 
 func checkEnforcementClassification(e *env) (checkResult, error) {
 	const rule = "enforcement-classification"
-	files, err := regularFilesUnder(e.Root, "skills")
-	if err != nil {
-		return checkResult{}, err
+	var files []string
+	for _, root := range []string{"skills", "docs/core-card-and-checks.md"} {
+		found, err := regularFilesUnder(e.Root, root)
+		if err != nil {
+			return checkResult{}, err
+		}
+		files = append(files, found...)
 	}
 	var res checkResult
 	tables, rows := 0, 0
