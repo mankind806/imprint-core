@@ -341,8 +341,12 @@ func TestCheckEnforcementClassification(t *testing.T) {
 		{"case matters", setRef(table("| A | **behaviour rule** |")), 1, []string{`"behaviour rule"`}},
 		{"unknown lead, known state later", setRef(table("| A | **Mostly** enforced; **Behaviour rule** otherwise. |")), 1,
 			[]string{`"Mostly"`}},
-		{"two states", setRef(table("| A | **Behaviour rule** for one half; **Enforceable, not enforced** for the other. |")), 1,
-			[]string{":5: names 2 states (Behaviour rule; Enforceable, not enforced); a row carries exactly one"}},
+		{"two states, both known, is allowed (one per rule half)", setRef(table(
+			"| A | **Behaviour rule** for one half; **Enforceable, not enforced** for the other. |",
+		)), 0, nil},
+		{"a known and an unknown classification in the same row", setRef(table(
+			"| A | **Partly enforced** for one half; **Behaviour rule** for the other. |",
+		)), 1, []string{`:5: the state "Partly enforced" is not one of the four`}},
 		{"one finding per bad row", setRef(table(
 			"| A | **Enforced** |",
 			"| B | nothing |",

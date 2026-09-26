@@ -57,7 +57,7 @@ var checks = []check{
 	{"d", "removed-skill-reference", "No reference to a removed skill, except on a line that says formerly or merged.", checkRemovedSkills},
 	{"e", "hooks-json", "hooks/hooks.json registers SessionStart without a matcher and SubagentStart, and every ${CLAUDE_PLUGIN_ROOT} sits inside double quotes.", checkHooksJSON},
 	{"f", "plugin-version", ".claude-plugin/plugin.json carries a semver version.", checkPluginVersion},
-	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/ carries exactly one of the four states: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
+	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/ carries at least one known classification, none unknown: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
 	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
 }
 
@@ -530,8 +530,10 @@ func isDelimiterRow(line string) bool {
 
 // classifyEnforcement returns what is wrong with one Enforcement cell, or "".
 // The state is the bold span the cell opens with; a state named in bold later
-// in the cell counts too, so that a cell naming two states is caught. Other
-// bold in the cell, such as **not measured here**, is emphasis and not a state.
+// in the cell counts too, so that a row naming one known state per rule half
+// is accepted rather than flagged. Other bold in the cell, such as **not
+// measured here**, is emphasis and not a state. A cell is reported only when
+// it names no state at all, or when its leading bold is not one of the four.
 func classifyEnforcement(cell string) string {
 	var known []string
 	for _, m := range boldSpanRE.FindAllStringSubmatch(cell, -1) {
@@ -546,11 +548,8 @@ func classifyEnforcement(cell string) string {
 			}
 		}
 	}
-	switch {
-	case len(known) == 0:
+	if len(known) == 0 {
 		return fmt.Sprintf("names no state; open the Enforcement cell with one of the four in bold (%s)", strings.Join(enforcementStates, "; "))
-	case len(known) > 1:
-		return fmt.Sprintf("names %d states (%s); a row carries exactly one", len(known), strings.Join(known, "; "))
 	}
 	return ""
 }
@@ -672,7 +671,11 @@ func checkOverdueRechecks(e *env) (checkResult, error) {
 			}
 		}
 	}
-	res.Note = fmt.Sprintf("%d re-check date(s), none before %s", dates, e.Today)
+	if overdue == 0 {
+		res.Note = fmt.Sprintf("%d re-check date(s), none before %s", dates, e.Today)
+	} else {
+		res.Note = fmt.Sprintf("%d re-check date(s), %d overdue before %s", dates, overdue, e.Today)
+	}
 	return res, nil
 }
 
