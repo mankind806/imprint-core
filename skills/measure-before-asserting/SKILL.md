@@ -157,11 +157,13 @@ like every other one here rather than a single sentence that writes all of it of
 | The stored state is consulted silently, before the look-up rather than after | **Behaviour rule**. The order is the rule, and nothing observes the order in which a party thought. A figure once spoken lands, and a caveat after it does not retract it — which is exactly the kind of failure no log shows. |
 | An assurance says what it does **not** cover | **Behaviour rule**. Whether a stated limit is the real one is a judgement about meaning. A checker can see that a sentence about coverage exists; it cannot see that it is honest. |
 | An unmeasurable thing is reported as unmeasured rather than guessed cautiously | **Behaviour rule**, and the one this skill exists for. A cautious-sounding wrong answer and a measured right one are the same shape on the page, which is why the over-cautious assurance is the dangerous class — nothing ever makes it fail. |
+| Claude Code's changelog and the documentation it touches are read after every version change, and a dated report says what this plugin should use, adapt or drop | **Enforced** that the change is noticed and the read requested: `hooks/update-watch.sh` compares the version at every session start and, when it moved, puts one instruction in front of the session. **Behaviour rule** that the read happens and the report is written; the session can ignore the notice, and a recorded version without its report is how a later reader sees that. Details in the repository's `docs/update-watch.md`. |
 
 *First measured 2026-09-15; measured again 2026-09-26 by listing this repository and reading
 `hooks/hooks.json`, the checks table in `tools/imprint-dev/checks.go` and the header of
 `.githooks/pre-push`: nothing in this repository executes any of the enforceable rows. The tree
-ships two start hooks, SessionStart and SubagentStart, which print the core card; the check tool
+ships the core card hooks on SessionStart and SubagentStart; the measuring hook on SubagentStart
+and SubagentStop; the update watch on SessionStart, which enforces the row above it; the check tool
 `tools/imprint-dev`, which checks the plugin's own files — description lengths, the card and its
 generated payloads, references to removed skills, the hooks file, the version; a workflow file
 under `.github/workflows/` that runs it with the tests on push and pull request wherever CI is
@@ -169,7 +171,9 @@ enabled; and `.githooks/pre-push`, active only in a clone that points `core.hook
 which checks commit identity and personal-data shapes before a push. This replaces a note that
 read "confirmed unchanged 2026-09-26 … The one script it ships runs at push time". Its finding
 that nothing executes the enforceable rows held; its inventory was already false in the commit
-that recorded it, which also carried the hooks, the check tool and the workflow.
+that recorded it, which also carried the hooks, the check tool and the workflow. The hook list
+was corrected 2026-09-26, when the update watch was added, from "two start hooks,
+SessionStart and SubagentStart, which print the core card", which left out the measuring hook.
 Re-check by 2026-12-26.*
 
 ## A cheap check before you assert

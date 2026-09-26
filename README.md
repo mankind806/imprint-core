@@ -98,6 +98,7 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 | `foreign-material-reviewer` | agent | Read-only triage of material you did not write; its tools are an allowlist of `Read`, `Grep` and `Glob` |
 | Core card | hooks on `SessionStart`, `SubagentStart` | Inject `hooks/kernkarte.md` as additional context |
 | Measuring hook | hook on `SubagentStart`, `SubagentStop` | Appends one JSON line per event to the plugin's data directory |
+| Update watch | hook on `SessionStart` | When Claude Code's version changed, asks the session for one read of the changelog and a report ([docs/update-watch.md](docs/update-watch.md)) |
 | `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs |
 | Pre-push hook | `.githooks/pre-push`, this repository, opt-in | Refuses undeclared identities and the shapes personal data takes |
 
