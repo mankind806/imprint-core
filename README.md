@@ -30,6 +30,11 @@ multi-agent work; the card is a floor under that, not a replacement for it.
 
 Early, and deliberately partial.
 
+**0.5.0** adds checks `g` (enforcement classification) and `h` (overdue re-check dates; a
+release gate behind `--release`) to `imprint-dev`, and the hook that measures how long a
+subagent ran. Released 2026-09-26, without behavioural skill evals; those are the next build
+step.
+
 **Both layers now ship.** Three skills in the agent-collaboration layer —
 `delegation-contract`, `measure-before-asserting` and `session-handover` — and one in the
 knowledge layer, `knowledge-keeping`, which holds four rules: the three that the section below
