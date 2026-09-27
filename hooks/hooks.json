@@ -8,6 +8,15 @@
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.json\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/update-watch.sh\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SubagentStart": [
