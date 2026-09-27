@@ -44,15 +44,19 @@ If an AI tool helped, say so in the commit message or the pull request with one 
 `Assisted-by: <tool or model>`, naming the tool or model and never an address. This applies
 to everyone, the owner included.
 
-`main` only takes squash merges with the commit message left blank, so a line written only in
-the pull request body never reaches the merge commit. A maintainer merging such a pull request
-carries the line over explicitly, with a real blank line before it so it lands as its own line
-rather than run into the summary — a literal `\n` inside a shell double-quoted string does not
-produce one:
+The repository setting `squash_merge_commit_message` is `PR_BODY` since 2026-09-27 (checked
+against the GitHub API on that date): a squash merge on `main` uses the pull request body as
+the merge commit message, not a blank one. The pull request text becomes the commit, so:
 
-    gh pr merge <n> --squash --body "$(printf '%s\n\n%s' '<title or summary>' 'Assisted-by: <tool or model>')"
-
-so the merged commit still carries the line.
+- The `Assisted-by: <tool or model>` line has to be the **last** line of the pull request
+  text — trailers read from the bottom, and a line after it would bury it.
+- The pull request text carries no addresses, paths, host names or employer terms either,
+  same as the rest of the checklist, because it is about to become part of the permanent
+  commit history.
+- Merging with an explicit `--body` to carry the line over by hand is superseded by this
+  setting (it was needed only while the commit message was left blank) and should not be
+  used to add a second, conflicting body; a plain `gh pr merge <n> --squash --delete-branch`
+  now carries the pull request text — trailer included — into the merge commit on its own.
 
 Commit messages carry no addresses: no `Signed-off-by` or `Co-authored-by` lines with one,
 and no other line that holds one. The pre-push hook, `.githooks/pre-push`, refuses a push
