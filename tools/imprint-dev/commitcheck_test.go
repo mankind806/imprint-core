@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -24,15 +26,22 @@ var (
 	ccTestMaintainerEmail = addr("maintainer", "example.invalid")
 )
 
+// ccTestOwnerLogin is the GitHub login ccTestConf binds "Test Author" to:
+// on a pull_request event, only a commit whose author or committer is
+// "Test Author" <ccTestAuthorEmail> *and* whose --pr-author is this login
+// passes directly; matching the name and email alone is exactly what an
+// attacker forking the repository can fake in their own commits.
+const ccTestOwnerLogin = "test-owner"
+
 // ccTestConf is a fictitious config: never this repository's own identities,
 // so these tests never depend on nor leak them. Same emailUser/emailDomain
 // split as .imprint/commit.conf, for the same reason.
 const ccTestConf = `{
   "authors": [
-    {"name": "Test Author", "emailUser": "author", "emailDomain": "example.invalid"}
+    {"name": "Test Author", "login": "test-owner", "emailUser": "author", "emailDomain": "example.invalid"}
   ],
   "committers": [
-    {"name": "Test Author", "emailUser": "author", "emailDomain": "example.invalid"},
+    {"name": "Test Author", "login": "test-owner", "emailUser": "author", "emailDomain": "example.invalid"},
     {"name": "GitHub", "emailUser": "noreply", "emailDomain": "github.com", "mergeCommitter": true}
   ],
   "botAuthors": [
@@ -60,12 +69,21 @@ func ccHasRule(findings []ccFinding, rule string) bool {
 	return false
 }
 
+func ccFindRule(findings []ccFinding, rule string) (ccFinding, bool) {
+	for _, f := range findings {
+		if f.Rule == rule {
+			return f, true
+		}
+	}
+	return ccFinding{}, false
+}
+
 func TestCommitCheckIdentity(t *testing.T) {
 	conf := ccTestConfParsed(t)
-	author := addr("author", "example.invalid")
-	someone := addr("someone", "example.invalid")
-	webFlow := addr("noreply", "github.com")
-	bot := addr("bot", "example.invalid")
+	author := ccTestAuthorEmail
+	someone := ccTestSomeoneEmail
+	webFlow := ccTestWebFlowEmail
+	bot := ccTestBotEmail
 	cases := []struct {
 		name                       string
 		authorName, authorEmail    string
@@ -74,7 +92,7 @@ func TestCommitCheckIdentity(t *testing.T) {
 		wantAuthorOK, wantCommitOK bool
 	}{
 		{
-			name:       "allowed identity, no PR context",
+			name:       "allowed identity, no PR context (push)",
 			authorName: "Test Author", authorEmail: author,
 			commName: "Test Author", commEmail: author,
 			wantAuthorOK: true, wantCommitOK: true,
@@ -92,7 +110,7 @@ func TestCommitCheckIdentity(t *testing.T) {
 			wantAuthorOK: true, wantCommitOK: false,
 		},
 		{
-			name:       "web-flow committer (squash merge)",
+			name:       "web-flow committer (squash merge, push)",
 			authorName: "Test Author", authorEmail: author,
 			commName: "GitHub", commEmail: webFlow,
 			wantAuthorOK: true, wantCommitOK: true,
@@ -121,6 +139,24 @@ func TestCommitCheckIdentity(t *testing.T) {
 			commName: "dependabot[bot]", commEmail: bot,
 			prAuthor: "someone-else", wantAuthorOK: false, wantCommitOK: false,
 		},
+		{
+			// The vulnerability item 2 closes: a fork can set its own git
+			// config to any name and email it likes and open a pull request
+			// from its own, unrelated GitHub account. Name+email matching
+			// the owner is never proof that the owner opened the pull
+			// request; only --pr-author, which the workflow fills in from
+			// the event GitHub itself sent, is.
+			name:       "a pull request opened by someone else, with the owner's identity spoofed onto the commit",
+			authorName: "Test Author", authorEmail: author,
+			commName: "Test Author", commEmail: author,
+			prAuthor: "evil", wantAuthorOK: false, wantCommitOK: false,
+		},
+		{
+			name:       "the same identity, but the pull request really was opened by its bound login",
+			authorName: "Test Author", authorEmail: author,
+			commName: "Test Author", commEmail: author,
+			prAuthor: ccTestOwnerLogin, wantAuthorOK: true, wantCommitOK: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,11 +172,25 @@ func TestCommitCheckIdentity(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("the spoofed-identity finding names the real fix, not a generic mismatch", func(t *testing.T) {
+		c := ccCommit{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			AuthorName: "Test Author", AuthorEmail: author,
+			CommitName: "Test Author", CommitEmail: author, Message: "Text\n"}
+		found := checkOneCommit(conf, c, "evil")
+		f, ok := ccFindRule(found, ccRuleAuthor)
+		if !ok {
+			t.Fatalf("findings %v, want %s", found, ccRuleAuthor)
+		}
+		if !strings.Contains(f.Message, "external contributions need an entry in .imprint/commit.conf added by the owner") {
+			t.Errorf("message %q does not name the fix", f.Message)
+		}
+	})
 }
 
 func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 	conf := ccTestConfParsed(t)
-	author := addr("author", "example.invalid")
+	author := ccTestAuthorEmail
 	allowedCommit := func(message string) ccCommit {
 		return ccCommit{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			AuthorName: "Test Author", AuthorEmail: author,
@@ -154,7 +204,14 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 		{"session line", "Text\n\nClaude-Session: https://claude.ai/code/session_abc123\n", ccRuleSessionLine},
 		{"session line, mixed case", "Text\n\nCLAUDE-SESSION:  something\n", ccRuleSessionLine},
 		{"session URL without a trailer", "Text with a link https://claude.ai/code/session_abc123 in prose.\n", ccRuleSessionURL},
-		{"an address in the message", "Text.\n\nSigned-off-by: Someone <" + addr("someone", "example.invalid") + ">\n", ccRuleAddress},
+		{"session line with underscore/hyphen between the words", "Text\n\nclaude_session: x\n", ccRuleSessionLine},
+		{"session line with a hyphen and no space before the colon", "Text\n\nclaude-session:x\n", ccRuleSessionLine},
+		{"session URL, percent-encoded underscore", "Text: https://claude.ai/code/session%5Fabc\n", ccRuleSessionURL},
+		{"session URL under claude.com", "Text: https://claude.com/code/session_abc\n", ccRuleSessionURL},
+		{"session line split by a zero-width space", "Text\n\nClaude​-Session: x\n", ccRuleSessionLine},
+		{"session URL with a Markdown-escaped underscore", `Text: https://claude.ai/code/session\_abc` + "\n", ccRuleSessionURL},
+		{"session line after a lone CR (old Mac line ending)", "Text\r\rClaude-Session: x\r", ccRuleSessionLine},
+		{"an address in the message", "Text.\n\nSigned-off-by: Someone <" + ccTestSomeoneEmail + ">\n", ccRuleAddress},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -166,7 +223,7 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 	}
 
 	t.Run("a clean message has no finding at all", func(t *testing.T) {
-		found := checkOneCommit(conf, allowedCommit("A plain commit message.\n\nAssisted-by: some tool\n"), "")
+		found := checkOneCommit(conf, allowedCommit("A plain, unassisted commit message.\n"), "")
 		if len(found) != 0 {
 			t.Errorf("findings %v, want none", found)
 		}
@@ -174,8 +231,8 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 
 	t.Run("a bot's own commit message keeps its own address (N102)", func(t *testing.T) {
 		bot := ccCommit{Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			AuthorName: "dependabot[bot]", AuthorEmail: addr("bot", "example.invalid"),
-			CommitName: "GitHub", CommitEmail: addr("noreply", "github.com"),
+			AuthorName: "dependabot[bot]", AuthorEmail: ccTestBotEmail,
+			CommitName: "GitHub", CommitEmail: ccTestWebFlowEmail,
 			Message: "Bump x from 1 to 2.\n\nSigned-off-by: dependabot[bot] <" + addr("support", "example.invalid") + ">\n"}
 		found := checkOneCommit(conf, bot, "")
 		if ccHasRule(found, ccRuleAddress) {
@@ -183,42 +240,158 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 		}
 	})
 
-	t.Run("a human commit message is never exempt from the address rule", func(t *testing.T) {
+	t.Run("a human commit message is never exempt from the address rule for an address nobody declared", func(t *testing.T) {
+		found := checkOneCommit(conf, allowedCommit("Text.\n\nContact "+ccTestSomeoneEmail+".\n"), "")
+		if !ccHasRule(found, ccRuleAddress) {
+			t.Errorf("want %s, got %v", ccRuleAddress, found)
+		}
+	})
+
+	t.Run("an address .imprint/commit.conf itself already declares is not a finding", func(t *testing.T) {
+		// Item 5: the owner's own noreply address, quoted in their own
+		// Signed-off-by line, adds nothing .imprint/commit.conf and every
+		// commit's own metadata do not already carry.
 		found := checkOneCommit(conf, allowedCommit("Text.\n\nSigned-off-by: Test Author <"+author+">\n"), "")
+		if ccHasRule(found, ccRuleAddress) {
+			t.Errorf("a configured address should be exempt, got %v", found)
+		}
+	})
+
+	t.Run("a *different* address alongside a configured one is still a finding", func(t *testing.T) {
+		msg := "Text.\n\nSigned-off-by: Test Author <" + author + ">\nCc: " + ccTestSomeoneEmail + "\n"
+		found := checkOneCommit(conf, allowedCommit(msg), "")
 		if !ccHasRule(found, ccRuleAddress) {
 			t.Errorf("want %s, got %v", ccRuleAddress, found)
 		}
 	})
 }
 
+// TestCommitCheckAssistedBy covers item 1's reading of N96: pure handiwork
+// needs no Assisted-by line, but any of the four AI-assistance markers
+// forces the rule.
+func TestCommitCheckAssistedBy(t *testing.T) {
+	conf := ccTestConfParsed(t)
+	author := ccTestAuthorEmail
+	commitWith := func(message string) ccCommit {
+		return ccCommit{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			AuthorName: "Test Author", AuthorEmail: author,
+			CommitName: "Test Author", CommitEmail: author, Message: message}
+	}
+
+	t.Run("pure handiwork, no AI marker at all, is not a finding", func(t *testing.T) {
+		found := checkOneCommit(conf, commitWith("Fix the off-by-one in the range check.\n"), "")
+		if ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("plain handiwork should need no Assisted-by line, got %v", found)
+		}
+	})
+
+	t.Run("a well-formed Assisted-by trailer is not a finding", func(t *testing.T) {
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nAssisted-by: some tool\n"), "")
+		if ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("findings %v, want none", found)
+		}
+	})
+
+	t.Run("Co-Authored-By naming Claude, with no Assisted-by line, is a finding", func(t *testing.T) {
+		msg := "Fix the check.\n\nCo-Authored-By: Claude <" + addr("noreply", "example.invalid") + ">\n"
+		found := checkOneCommit(conf, commitWith(msg), "")
+		if !ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
+		}
+	})
+
+	t.Run("Co-Authored-By naming Copilot, with no Assisted-by line, is a finding", func(t *testing.T) {
+		msg := "Fix the check.\n\nCo-Authored-By: Copilot <" + addr("noreply", "example.invalid") + ">\n"
+		found := checkOneCommit(conf, commitWith(msg), "")
+		if !ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
+		}
+	})
+
+	t.Run("Co-Authored-By naming a human, not an AI tool, needs no Assisted-by line", func(t *testing.T) {
+		msg := "Fix the check.\n\nCo-Authored-By: Pat Reviewer <" + addr("pat", "example.invalid") + ">\n"
+		found := checkOneCommit(conf, commitWith(msg), "")
+		if ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("findings %v, want none (no AI tool named)", found)
+		}
+	})
+
+	t.Run(`"Generated with", with no Assisted-by line, is a finding`, func(t *testing.T) {
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nGenerated with a tool.\n"), "")
+		if !ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
+		}
+	})
+
+	t.Run("an empty Assisted-by value is a finding, worded as fill-in-or-remove", func(t *testing.T) {
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nAssisted-by:\n"), "")
+		f, ok := ccFindRule(found, ccRuleAssistedBy)
+		if !ok {
+			t.Fatalf("findings %v, want %s", found, ccRuleAssistedBy)
+		}
+		if !strings.Contains(f.Message, "fill in") || !strings.Contains(f.Message, "remove") {
+			t.Errorf("message %q does not read as fill-in-or-remove", f.Message)
+		}
+	})
+
+	t.Run("a bot's own commit needs no Assisted-by line either", func(t *testing.T) {
+		bot := ccCommit{Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			AuthorName: "dependabot[bot]", AuthorEmail: ccTestBotEmail,
+			CommitName: "GitHub", CommitEmail: ccTestWebFlowEmail,
+			Message: "Bump x.\n\nGenerated with dependabot-core.\n"}
+		found := checkOneCommit(conf, bot, "")
+		if ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("findings %v, want none (bot commit is exempt)", found)
+		}
+	})
+}
+
 func TestCommitCheckPullRequestBody(t *testing.T) {
+	conf := ccTestConfParsed(t)
+
 	t.Run("a clean body with a well-formed trailer passes", func(t *testing.T) {
 		body := "Summary of the change.\n\nMore detail.\n\nAssisted-by: some tool\n"
-		found := checkPullRequestBody(body, false)
+		found := checkPullRequestBody(conf, body, false)
 		if len(found) != 0 {
 			t.Errorf("findings %v, want none", found)
 		}
 	})
 
+	t.Run("pure handiwork, no AI marker, needs no trailer at all", func(t *testing.T) {
+		found := checkPullRequestBody(conf, "Just a plain body, written by hand.\n", false)
+		if ccHasRule(found, ccRuleTrailer) {
+			t.Errorf("no marker should not trip the trailer rule, got %v", found)
+		}
+	})
+
 	t.Run("a session line in the body is a finding", func(t *testing.T) {
-		found := checkPullRequestBody("Text\n\nClaude-Session: https://claude.ai/code/session_x\n", false)
+		found := checkPullRequestBody(conf, "Text\n\nClaude-Session: https://claude.ai/code/session_x\n", false)
 		if !ccHasRule(found, ccRulePRSession) {
 			t.Errorf("want %s, got %v", ccRulePRSession, found)
 		}
 	})
 
 	t.Run("an address in the body is a finding", func(t *testing.T) {
-		body := "Text.\n\nContact " + addr("someone", "example.invalid") + ".\n"
-		found := checkPullRequestBody(body, false)
+		body := "Text.\n\nContact " + ccTestSomeoneEmail + ".\n"
+		found := checkPullRequestBody(conf, body, false)
 		if !ccHasRule(found, ccRulePRAddress) {
 			t.Errorf("want %s, got %v", ccRulePRAddress, found)
 		}
 	})
 
-	t.Run("no Assisted-by mention is not a finding", func(t *testing.T) {
-		found := checkPullRequestBody("Just a plain body.\n", false)
-		if ccHasRule(found, ccRuleTrailer) {
-			t.Errorf("no mention should not trip the trailer rule, got %v", found)
+	t.Run("the owner's own configured address in the body is not a finding", func(t *testing.T) {
+		body := "Text.\n\nSigned-off-by: Test Author <" + ccTestAuthorEmail + ">\n\nAssisted-by: some tool\n"
+		found := checkPullRequestBody(conf, body, false)
+		if ccHasRule(found, ccRulePRAddress) {
+			t.Errorf("findings %v, want no address finding", found)
+		}
+	})
+
+	t.Run("Co-Authored-By naming Claude, with no Assisted-by line, is a finding", func(t *testing.T) {
+		body := "Summary.\n\nCo-Authored-By: Claude <" + addr("noreply", "example.invalid") + ">\n"
+		found := checkPullRequestBody(conf, body, false)
+		if !ccHasRule(found, ccRuleTrailer) {
+			t.Errorf("want %s, got %v", ccRuleTrailer, found)
 		}
 	})
 
@@ -226,7 +399,7 @@ func TestCommitCheckPullRequestBody(t *testing.T) {
 		// The #15 shape from CONTRIBUTING.md: a line touching Assisted-by
 		// with no blank line before it breaks git's own trailer block.
 		body := "Summary.\n\n\U0001F916 Generated with a tool\nAssisted-by: some tool\n"
-		found := checkPullRequestBody(body, false)
+		found := checkPullRequestBody(conf, body, false)
 		if !ccHasRule(found, ccRuleTrailer) {
 			t.Errorf("want %s, got %v", ccRuleTrailer, found)
 		}
@@ -236,7 +409,7 @@ func TestCommitCheckPullRequestBody(t *testing.T) {
 		// git still parses both as trailers with no blank line between them,
 		// but Assisted-by is then the second-to-last one, not the last.
 		body := "Summary.\n\nAssisted-by: some tool\nReviewed-by: someone\n"
-		found := checkPullRequestBody(body, false)
+		found := checkPullRequestBody(conf, body, false)
 		if !ccHasRule(found, ccRuleTrailer) {
 			t.Errorf("want %s, got %v", ccRuleTrailer, found)
 		}
@@ -244,25 +417,58 @@ func TestCommitCheckPullRequestBody(t *testing.T) {
 
 	t.Run("Assisted-by followed by a blank line and more prose is a finding", func(t *testing.T) {
 		body := "Summary.\n\nAssisted-by: some tool\n\nOne more line after it.\n"
-		found := checkPullRequestBody(body, false)
+		found := checkPullRequestBody(conf, body, false)
 		if !ccHasRule(found, ccRuleTrailer) {
 			t.Errorf("want %s, got %v", ccRuleTrailer, found)
 		}
 	})
 
+	t.Run("an empty Assisted-by value in the body is a finding", func(t *testing.T) {
+		found := checkPullRequestBody(conf, "Summary.\n\nAssisted-by: \n", false)
+		f, ok := ccFindRule(found, ccRuleTrailer)
+		if !ok {
+			t.Fatalf("findings %v, want %s", found, ccRuleTrailer)
+		}
+		if !strings.Contains(f.Message, "fill in") {
+			t.Errorf("message %q does not read as fill-in-or-remove", f.Message)
+		}
+	})
+
 	t.Run("a generator line separated by a blank line still parses", func(t *testing.T) {
 		body := "Summary.\n\n\U0001F916 Generated with a tool\n\nAssisted-by: some tool\n"
-		found := checkPullRequestBody(body, false)
+		found := checkPullRequestBody(conf, body, false)
 		if ccHasRule(found, ccRuleTrailer) {
 			t.Errorf("a blank line before Assisted-by should parse, got %v", found)
 		}
 	})
 
-	t.Run("a recognised bot PR body is exempt from every PR-text rule", func(t *testing.T) {
-		body := "Bumps x.\n\nContact " + addr("someone", "example.invalid") + ".\n\nClaude-Session: https://claude.ai/code/session_x\n"
-		found := checkPullRequestBody(body, true)
-		if len(found) != 0 {
-			t.Errorf("findings %v, want none (bot PR is exempt)", found)
+	t.Run("a 🤖 line present but not immediately before Assisted-by is a finding", func(t *testing.T) {
+		// The 🤖 line is there, and the trailer itself is well-formed, but
+		// something sits between them: CONTRIBUTING.md's required shape for
+		// the pull-request body specifically is the 🤖 line, one blank
+		// line, then Assisted-by, with nothing else in between.
+		body := "Summary.\n\n\U0001F916 Generated with a tool\n\nOne more paragraph.\n\nAssisted-by: some tool\n"
+		found := checkPullRequestBody(conf, body, false)
+		if !ccHasRule(found, ccRuleTrailer) {
+			t.Errorf("want %s, got %v", ccRuleTrailer, found)
+		}
+	})
+
+	t.Run("a recognised bot PR body is exempt from every PR-text rule, verified against real findings", func(t *testing.T) {
+		// Item 8: prove the exemption actually suppresses findings, rather
+		// than merely exercising an early return that says nothing about
+		// the checks it bypasses.
+		body := "Bumps x.\n\nContact " + ccTestSomeoneEmail + ".\n\nClaude-Session: https://claude.ai/code/session_x\n"
+		withoutExemption := checkPullRequestBody(conf, body, false)
+		if len(withoutExemption) == 0 {
+			t.Fatalf("test body produces no findings even without the exemption; it proves nothing")
+		}
+		if !ccHasRule(withoutExemption, ccRulePRAddress) || !ccHasRule(withoutExemption, ccRulePRSession) {
+			t.Fatalf("findings %v, want both %s and %s", withoutExemption, ccRulePRAddress, ccRulePRSession)
+		}
+		withExemption := checkPullRequestBody(conf, body, true)
+		if len(withExemption) != 0 {
+			t.Errorf("findings %v, want none (bot PR is exempt)", withExemption)
 		}
 	})
 }
@@ -274,5 +480,27 @@ func TestCommitCheckSummary(t *testing.T) {
 	f := []ccFinding{{Where: "a", Rule: ccRuleAuthor, Message: "x"}, {Where: "b", Rule: ccRuleAuthor, Message: "y"}}
 	if s := ccSummary(f); !strings.Contains(s, "2 finding(s)") || !strings.Contains(s, "commit-author 2") {
 		t.Errorf("ccSummary = %q", s)
+	}
+}
+
+// TestCommitCheckLoadsTheRealConf is item 8: one test loads this
+// repository's own .imprint/commit.conf, not only the fictitious one, so a
+// schema change here is caught even if nobody remembers to update the test
+// fixture in step.
+func TestCommitCheckLoadsTheRealConf(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(filepath.Dir(wd)) // tools/imprint-dev -> tools -> repo root
+	conf, err := loadCommitConf(filepath.Join(root, defaultCommitConfPath))
+	if err != nil {
+		t.Fatalf("loading the real %s: %v", defaultCommitConfPath, err)
+	}
+	if len(conf.Authors) == 0 || conf.Authors[0].Email == "" || !strings.Contains(conf.Authors[0].Email, "@") {
+		t.Fatalf("real conf's first author did not resolve an email: %+v", conf.Authors)
+	}
+	if len(conf.BotAuthors) == 0 {
+		t.Fatalf("real conf has no bot authors; Dependabot is expected to be listed")
 	}
 }

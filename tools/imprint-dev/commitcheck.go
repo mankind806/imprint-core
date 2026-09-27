@@ -43,6 +43,18 @@ const defaultCommitConfPath = ".imprint/commit.conf"
 
 type ccIdentity struct {
 	Name string `json:"name"`
+	// Login is the GitHub login that has to have opened the pull request
+	// for this identity to count as this commit's author or committer on a
+	// pull_request event (prAuthor != ""). A commit's own author/committer
+	// name and email are exactly as spoofable as any other git metadata —
+	// anyone can `git config user.name`/`user.email` to anything, in their
+	// own fork, on their own commits — so matching them alone is never
+	// proof of who actually opened the pull request; only the login GitHub
+	// itself reports for the event is. On a push (prAuthor == ""), Login is
+	// not checked: pushing already needs write access, which is git's own
+	// access control, not this file's. Left empty, the identity is never
+	// trusted on a pull_request event, only on a push.
+	Login string `json:"login,omitempty"`
 	// EmailUser and EmailDomain together are the identity's email address,
 	// split across two JSON fields and joined only at load time (see
 	// resolveEmail). A whole address here would be an address-shaped
@@ -54,7 +66,12 @@ type ccIdentity struct {
 	Comment     string `json:"comment,omitempty"`
 	// MergeCommitter marks a committers[] entry that only a merge through the
 	// web UI or API produces. It gates a bot author in on a push, where there
-	// is no pull-request context to check a PR author against.
+	// is no pull-request context to check a PR author against. What actually
+	// ties this identity string to a genuine GitHub-performed merge is the
+	// repository's ruleset (PR-only, squash-merge-only), not this git
+	// metadata by itself, which remains as spoofable as any other; a fork PR
+	// cannot make its own commits carry this identity before such a merge
+	// happens, because nothing but GitHub's own merge action produces it.
 	MergeCommitter bool `json:"mergeCommitter,omitempty"`
 	// Email is EmailUser + "@" + EmailDomain. It is never itself read from
 	// or written to JSON; resolveEmail fills it in after unmarshalling.
@@ -114,22 +131,55 @@ func loadCommitConf(path string) (ccConf, error) {
 	return c, nil
 }
 
-func (c ccConf) authorAllowedDirect(name, email string) bool {
-	for _, id := range c.Authors {
+// identityStatus reports whether name/email matches one of ids directly
+// (matched), and, when it does, whether it is trusted for prAuthor
+// (loginOK): always true on a push (prAuthor == ""), and, on a
+// pull_request event, only when the matched entry's own Login is exactly
+// prAuthor. See ccIdentity.Login for why a name/email match alone is never
+// enough on a pull_request event.
+func identityStatus(ids []ccIdentity, name, email, prAuthor string) (matched, loginOK bool) {
+	for _, id := range ids {
 		if id.Name == name && id.Email == email {
-			return true
+			if prAuthor == "" {
+				return true, true
+			}
+			return true, id.Login != "" && id.Login == prAuthor
 		}
 	}
-	return false
+	return false, false
 }
 
-func (c ccConf) committerAllowedDirect(name, email string) bool {
-	for _, id := range c.Committers {
-		if id.Name == name && id.Email == email {
-			return true
+func (c ccConf) authorIdentityStatus(name, email, prAuthor string) (matched, loginOK bool) {
+	return identityStatus(c.Authors, name, email, prAuthor)
+}
+
+func (c ccConf) committerIdentityStatus(name, email, prAuthor string) (matched, loginOK bool) {
+	return identityStatus(c.Committers, name, email, prAuthor)
+}
+
+// configuredEmails collects every address .imprint/commit.conf itself
+// declares (as an author, a committer, or a bot). A message may quote one
+// of these — the owner's own Signed-off-by with their own noreply address,
+// say — without that quoting itself becoming an address-rule finding: the
+// address is already public in every commit's own metadata, and this file
+// is the one canonical place declaring it. Any other address still is one.
+func (c ccConf) configuredEmails() map[string]bool {
+	m := map[string]bool{}
+	add := func(email string) {
+		if email != "" {
+			m[email] = true
 		}
 	}
-	return false
+	for _, id := range c.Authors {
+		add(id.Email)
+	}
+	for _, id := range c.Committers {
+		add(id.Email)
+	}
+	for _, b := range c.BotAuthors {
+		add(b.Email)
+	}
+	return m
 }
 
 func (c ccConf) findBotAuthor(name, email string) (ccBotAuthor, bool) {
@@ -159,6 +209,20 @@ type ccCommit struct {
 	CommitName  string
 	CommitEmail string
 	Message     string
+}
+
+// isShallowClone reports whether root is a shallow git clone. A shallow
+// clone can make a range like base..head resolve against a history that
+// was never actually fetched, silently checking fewer commits than were
+// really pushed; the caller aborts rather than risk that fail-open.
+func isShallowClone(root string) (bool, error) {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--is-shallow-repository")
+	var out, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errBuf
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("git rev-parse --is-shallow-repository: %w: %s", err, strings.TrimSpace(errBuf.String()))
+	}
+	return strings.TrimSpace(out.String()) == "true", nil
 }
 
 const ccFieldSep = "\x1f"
@@ -202,16 +266,64 @@ func commitsInRange(root, rangeSpec string) ([]ccCommit, error) {
 
 // --- message patterns ------------------------------------------------------
 
-var ccSessionLineRE = regexp.MustCompile(`(?im)^[ \t]*claude-session[ \t]*:`)
-var ccSessionURLRE = regexp.MustCompile(`(?i)claude\.ai/code/session_`)
+// ccSessionLineRE and ccSessionURLRE are matched against normalizeForSession's
+// output, not the raw message: [\s_-]* between "claude" and "session", and
+// the %5f alternative for the URL's underscore, are exactly the two
+// variants measured getting past a plain "claude-session" / "session_"
+// match while still reading as the real thing to a human.
+var ccSessionLineRE = regexp.MustCompile(`(?im)^[ \t]*claude[\s_-]*session[ \t]*:`)
+var ccSessionURLRE = regexp.MustCompile(`(?i)claude\.(ai|com)/code/session(_|%5f)`)
 
 // ccAddressRE is the address shape .githooks/pre-push already checks tracked
 // content and commit messages against.
 var ccAddressRE = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
 
 var ccAssistedByMentionRE = regexp.MustCompile(`(?im)^[ \t]*assisted-by[ \t]*:`)
+var ccAssistedByLineRE = regexp.MustCompile(`(?i)^[ \t]*assisted-by[ \t]*:[ \t]*(.*)$`)
+var ccRobotLineRE = regexp.MustCompile(`\x{1F916}`)
+var ccGeneratedWithRE = regexp.MustCompile(`(?i)generated with`)
+var ccCoAuthoredAIRE = regexp.MustCompile(`(?im)^[ \t]*co-authored-by[ \t]*:.*\b(claude|copilot)\b`)
 
-func normalizeCRLF(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
+// ccZeroWidthRE matches characters with no visible width that would
+// otherwise split up "claude-session" or a session URL for a plain string
+// match while a human reading the rendered text sees it as one unbroken
+// word: zero-width space/non-joiner/joiner, the word joiner, and a BOM.
+var ccZeroWidthRE = regexp.MustCompile(`[\x{200B}\x{200C}\x{200D}\x{2060}\x{FEFF}]`)
+
+// ccMarkdownEscapeRE matches a backslash escaping one ASCII punctuation
+// character, CommonMark's own escape rule (the same one GitHub's Markdown
+// renderer follows) — "claude\_session\_x" reads as "claude_session_x" once
+// rendered, or once unescaped here.
+var ccMarkdownEscapeRE = regexp.MustCompile(`\\([\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E])`)
+
+func normalizeCRLF(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n") // a lone CR is still a line break, not a character
+}
+
+// normalizeForSession undoes the shapes measured getting a session marker
+// past a plain string match while it still reads as one to a person:
+// CRLF/lone-CR line endings, zero-width characters spliced into the words,
+// and a Markdown backslash-escape in front of a punctuation character.
+// Unicode normalization (e.g. full-width Latin letters folding to ASCII)
+// would close more of these, but needs a library beyond the standard one
+// this module is built against, so it stays open (see CONTRIBUTING.md).
+func normalizeForSession(s string) string {
+	s = normalizeCRLF(s)
+	s = ccZeroWidthRE.ReplaceAllString(s, "")
+	return ccMarkdownEscapeRE.ReplaceAllString(s, "$1")
+}
+
+// hasAIAssistanceMarker reports whether text already discloses AI
+// assistance by one of the shapes N96 names: a robot-emoji line, a
+// "Generated with" line, a Co-Authored-By trailer naming Claude or Copilot,
+// or any Assisted-by mention at all. Pure human handiwork that names none
+// of these owes the repository no Assisted-by line (CONTRIBUTING.md, "AI
+// assistance and commit messages": "if an AI tool helped, say so").
+func hasAIAssistanceMarker(text string) bool {
+	return ccRobotLineRE.MatchString(text) || ccGeneratedWithRE.MatchString(text) ||
+		ccCoAuthoredAIRE.MatchString(text) || ccAssistedByMentionRE.MatchString(text)
+}
 
 // ccFinding is one violation, either of one commit or of the pull-request
 // text. Where is a short human-readable label: a short commit hash, or "PR
@@ -230,6 +342,7 @@ const (
 	ccRuleSessionLine = "commit-session-line"
 	ccRuleSessionURL  = "commit-session-url"
 	ccRuleAddress     = "commit-address"
+	ccRuleAssistedBy  = "commit-assisted-by"
 	ccRulePRSession   = "pr-session-line"
 	ccRulePRURL       = "pr-session-url"
 	ccRulePRAddress   = "pr-address"
@@ -238,32 +351,38 @@ const (
 
 // ccRules lists every rule in a fixed order, for the summary and for SARIF.
 var ccRules = []struct{ ID, Title string }{
-	{ccRuleAuthor, "the commit's author (name+email) is in .imprint/commit.conf"},
-	{ccRuleCommitter, "the commit's committer (name+email) is in .imprint/commit.conf"},
+	{ccRuleAuthor, "the commit's author (name+email), and, on a pull request, the login that opened it, are in .imprint/commit.conf"},
+	{ccRuleCommitter, "the commit's committer (name+email), and, on a pull request, the login that opened it, are in .imprint/commit.conf"},
 	{ccRuleSessionLine, `the commit message has no "Claude-Session:" line`},
 	{ccRuleSessionURL, "the commit message has no claude.ai/code/session_ URL"},
-	{ccRuleAddress, "the commit message carries no email address"},
+	{ccRuleAddress, "the commit message carries no email address CONTRIBUTING.md and .imprint/commit.conf do not already declare"},
+	{ccRuleAssistedBy, `if the commit message discloses AI assistance at all, its last line is a well-formed, non-empty "Assisted-by:" trailer`},
 	{ccRulePRSession, `the pull-request body has no "Claude-Session:" line`},
 	{ccRulePRURL, "the pull-request body has no claude.ai/code/session_ URL"},
-	{ccRulePRAddress, "the pull-request body carries no email address"},
-	{ccRuleTrailer, `if the pull-request body mentions "Assisted-by:", it is a well-formed trailer`},
+	{ccRulePRAddress, "the pull-request body carries no email address CONTRIBUTING.md and .imprint/commit.conf do not already declare"},
+	{ccRuleTrailer, `if the pull-request body discloses AI assistance at all, its last line is a well-formed, non-empty "Assisted-by:" trailer, and a 🤖 line, if any, is immediately followed by a blank line and then it`},
 }
 
-// checkCommitMessage runs the message-shape rules against msg (a commit
-// message or the pull-request body) and appends findings under where. When
-// exemptAddress is true, ccRuleAddress/ccRulePRAddress is skipped (N102: the
+// checkCommitMessage runs the session-link and address rules against msg (a
+// commit message or the pull-request body) and appends findings under
+// where. When exemptAddress is true, the address rule is skipped (N102: the
 // message was let in only via a bot identity, so it is not ours to police).
-func checkCommitMessage(msg, where string, sessionRule, urlRule, addressRule string, exemptAddress bool, out *[]ccFinding) {
-	msg = normalizeCRLF(msg)
-	if ccSessionLineRE.MatchString(msg) {
+// allowedAddrs exempts an address CONTRIBUTING.md itself already declares
+// (an owner's or a bot's own noreply address, quoted rather than leaked).
+func checkCommitMessage(msg, where string, sessionRule, urlRule, addressRule string, exemptAddress bool, allowedAddrs map[string]bool, out *[]ccFinding) {
+	forSession := normalizeForSession(msg)
+	if ccSessionLineRE.MatchString(forSession) {
 		*out = append(*out, ccFinding{where, sessionRule, `contains a "Claude-Session:" line`})
 	}
-	if ccSessionURLRE.MatchString(msg) {
+	if ccSessionURLRE.MatchString(forSession) {
 		*out = append(*out, ccFinding{where, urlRule, "contains a claude.ai/code/session_ URL"})
 	}
 	if !exemptAddress {
-		if m := ccAddressRE.FindString(msg); m != "" {
-			*out = append(*out, ccFinding{where, addressRule, fmt.Sprintf("contains an address: %s", m)})
+		for _, m := range ccAddressRE.FindAllString(normalizeCRLF(msg), -1) {
+			if !allowedAddrs[m] {
+				*out = append(*out, ccFinding{where, addressRule, fmt.Sprintf("contains an address: %s", m)})
+				break
+			}
 		}
 	}
 }
@@ -277,7 +396,8 @@ func checkOneCommit(conf ccConf, c ccCommit, prAuthor string) []ccFinding {
 		short = short[:10]
 	}
 
-	authorOK := conf.authorAllowedDirect(c.AuthorName, c.AuthorEmail)
+	authorMatched, authorLoginOK := conf.authorIdentityStatus(c.AuthorName, c.AuthorEmail, prAuthor)
+	authorOK := authorMatched && authorLoginOK
 	bot, isBot := conf.findBotAuthor(c.AuthorName, c.AuthorEmail)
 	viaBot := false
 	if !authorOK && isBot {
@@ -289,93 +409,109 @@ func checkOneCommit(conf ccConf, c ccCommit, prAuthor string) []ccFinding {
 		}
 	}
 	if !authorOK {
-		out = append(out, ccFinding{short, ccRuleAuthor,
-			fmt.Sprintf("author %q <%s> is not in .imprint/commit.conf", c.AuthorName, c.AuthorEmail)})
+		msg := fmt.Sprintf("author %q <%s> is not in .imprint/commit.conf", c.AuthorName, c.AuthorEmail)
+		if authorMatched && !authorLoginOK {
+			msg = "external contributions need an entry in .imprint/commit.conf added by the owner"
+		}
+		out = append(out, ccFinding{short, ccRuleAuthor, msg})
 	}
 
-	committerOK := conf.committerAllowedDirect(c.CommitName, c.CommitEmail)
+	committerMatched, committerLoginOK := conf.committerIdentityStatus(c.CommitName, c.CommitEmail, prAuthor)
+	committerOK := committerMatched && committerLoginOK
 	if !committerOK && prAuthor != "" {
 		if b, ok := conf.findBotAuthor(c.CommitName, c.CommitEmail); ok && prAuthor == b.PRAuthor {
 			committerOK, viaBot = true, true
 		}
 	}
 	if !committerOK {
-		out = append(out, ccFinding{short, ccRuleCommitter,
-			fmt.Sprintf("committer %q <%s> is not in .imprint/commit.conf", c.CommitName, c.CommitEmail)})
+		msg := fmt.Sprintf("committer %q <%s> is not in .imprint/commit.conf", c.CommitName, c.CommitEmail)
+		if committerMatched && !committerLoginOK {
+			msg = "external contributions need an entry in .imprint/commit.conf added by the owner"
+		}
+		out = append(out, ccFinding{short, ccRuleCommitter, msg})
 	}
 
-	checkCommitMessage(c.Message, short, ccRuleSessionLine, ccRuleSessionURL, ccRuleAddress, viaBot, &out)
+	checkCommitMessage(c.Message, short, ccRuleSessionLine, ccRuleSessionURL, ccRuleAddress, viaBot, conf.configuredEmails(), &out)
+	if !viaBot {
+		if msg := checkAssistedByRule(c.Message, false); msg != "" {
+			out = append(out, ccFinding{short, ccRuleAssistedBy, msg})
+		}
+	}
 	return out
 }
 
 // checkPullRequestBody runs all four pull-request-text rules: the session
-// line, the session URL, the address, and the trailer. isBotPR — true when
-// the caller's --pr-author matches a configured botAuthors entry's PRAuthor,
-// a condition on the pull request as a whole, not on any one commit's
-// identity the way checkOneCommit's viaBot is — skips every one of the four
-// (N102 plus "Bot-PRs von der PR-Text-Regel ausnehmen": the body is
-// generated by the bot and not authored by a repository contributor at all,
-// and may embed a third party's changelog we have no way to edit).
-func checkPullRequestBody(body string, isBotPR bool) []ccFinding {
+// line, the session URL, the address, and the Assisted-by trailer. isBotPR —
+// true when the caller's --pr-author matches a configured botAuthors
+// entry's PRAuthor, a condition on the pull request as a whole, not on any
+// one commit's identity the way checkOneCommit's viaBot is — skips every
+// one of the four (N102 plus "Bot-PRs von der PR-Text-Regel ausnehmen": the
+// body is generated by the bot and not authored by a repository
+// contributor at all, and may embed a third party's changelog we have no
+// way to edit).
+func checkPullRequestBody(conf ccConf, body string, isBotPR bool) []ccFinding {
 	if isBotPR {
 		return nil
 	}
 	var out []ccFinding
-	checkCommitMessage(body, "PR body", ccRulePRSession, ccRulePRURL, ccRulePRAddress, false, &out)
-	if trailerOK, mentioned := checkAssistedByTrailer(body); mentioned && !trailerOK {
-		out = append(out, ccFinding{"PR body", ccRuleTrailer,
-			`mentions "Assisted-by:" but it is not the last line read as a git trailer ` +
-				`(a blank line has to separate it from anything above, and nothing may follow it)`})
+	checkCommitMessage(body, "PR body", ccRulePRSession, ccRulePRURL, ccRulePRAddress, false, conf.configuredEmails(), &out)
+	if msg := checkAssistedByRule(body, true); msg != "" {
+		out = append(out, ccFinding{"PR body", ccRuleTrailer, msg})
 	}
 	return out
 }
 
-// checkAssistedByTrailer reports whether body mentions "Assisted-by:" at all,
-// and, if it does, whether it is the last line, read by git as the last
-// trailer of a well-formed trailer block. Both conditions are required and
-// neither implies the other: "Assisted-by:" immediately followed by another
-// `Key: value` line (no blank line between them) is still the physical last
-// line but git reads it as the second-to-last trailer, not the last one; a
-// generator line touching "Assisted-by:" from above (no blank line before
-// it, the #15 shape CONTRIBUTING.md describes) still leaves it the last
-// physical line, but breaks git's trailer block entirely, so nothing in the
-// tail is read as a trailer at all. `git interpret-trailers` is the same
-// parser CONTRIBUTING.md's own `%(trailers:key=Assisted-by)` example reads
-// with, rather than a hand-rolled one, so the two never disagree about what
-// counts as a trailer.
-func checkAssistedByTrailer(body string) (ok, mentioned bool) {
-	body = normalizeCRLF(body)
-	if !ccAssistedByMentionRE.MatchString(body) {
-		return false, false
+// checkAssistedByRule implements N96's reading of "AI assistance and
+// commit messages": pure human handiwork that names no AI feature owes no
+// Assisted-by line, but the moment text discloses one at all — a robot-emoji
+// line, "Generated with", a Co-Authored-By naming Claude or Copilot, or any
+// Assisted-by mention — its own last non-blank line has to be a non-empty
+// "Assisted-by: <value>" that git itself reads as the last trailer of a
+// well-formed block (`git interpret-trailers`, the same parser
+// CONTRIBUTING.md's own `%(trailers:key=Assisted-by)` example reads with,
+// rather than a hand-rolled one, so the two never disagree about what
+// counts as a trailer). requireRobotSequence additionally demands, only for
+// the pull-request body: if a 🤖 line appears anywhere, the text's very
+// last three lines are that 🤖 line, one blank line, then Assisted-by —
+// CONTRIBUTING.md's own required shape for the squash-merge commit message.
+// Returns "" for no finding.
+func checkAssistedByRule(text string, requireRobotSequence bool) string {
+	text = normalizeCRLF(text)
+	if !hasAIAssistanceMarker(text) {
+		return ""
 	}
-	mentioned = true
-
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
-	lastNonBlank := ""
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			lastNonBlank = lines[i]
-			break
-		}
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	last := lines[len(lines)-1]
+	m := ccAssistedByLineRE.FindStringSubmatch(last)
+	if m == nil {
+		return `discloses AI assistance (a 🤖 line, "Generated with", an AI Co-Authored-By trailer, or an Assisted-by mention) ` +
+			`but its last non-blank line is not "Assisted-by: <value>"`
 	}
-	if !ccAssistedByMentionRE.MatchString(lastNonBlank) {
-		return false, true
+	if strings.TrimSpace(m[1]) == "" {
+		return `has an empty "Assisted-by:" line; fill in the tool or model name, or remove the line`
 	}
 
 	cmd := exec.Command("git", "interpret-trailers", "--parse", "--only-trailers")
-	cmd.Stdin = strings.NewReader(body)
+	cmd.Stdin = strings.NewReader(text)
 	out, err := cmd.Output()
-	if err != nil {
-		return false, true
-	}
 	trimmed := strings.TrimSpace(string(out))
-	if trimmed == "" {
-		return false, true
+	if err != nil || trimmed == "" {
+		return `has an "Assisted-by:" line that git does not read as a trailer at all ` +
+			`(a blank line has to separate it from anything above)`
 	}
 	trailerLines := strings.Split(trimmed, "\n")
-	lastTrailer := trailerLines[len(trailerLines)-1]
-	k, _, found := strings.Cut(lastTrailer, ":")
-	return found && strings.EqualFold(strings.TrimSpace(k), "assisted-by"), true
+	if k, _, found := strings.Cut(trailerLines[len(trailerLines)-1], ":"); !found || !strings.EqualFold(strings.TrimSpace(k), "assisted-by") {
+		return `has "Assisted-by:" as its last line, but git reads a later trailer as the last one ` +
+			`(nothing, not even another trailer, may follow it)`
+	}
+
+	if requireRobotSequence && ccRobotLineRE.MatchString(text) {
+		if len(lines) < 3 || !ccRobotLineRE.MatchString(lines[len(lines)-3]) || strings.TrimSpace(lines[len(lines)-2]) != "" {
+			return `contains a 🤖 line, but the text's last three lines are not exactly that line, ` +
+				`one blank line, then "Assisted-by:"`
+		}
+	}
+	return ""
 }
 
 func ccSummary(findings []ccFinding) string {
@@ -400,7 +536,7 @@ func ccSummary(findings []ccFinding) string {
 func runCommitCheck(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("commit-check", flag.ContinueOnError)
 	root := fs.String("root", ".", "repository root")
-	conf := fs.String("conf", defaultCommitConfPath, "path to commit.conf, relative to root")
+	conf := fs.String("conf", defaultCommitConfPath, "path to commit.conf: relative to root, or absolute to read it from anywhere else (e.g. the base commit, not the pull request's own tree)")
 	rangeSpec := fs.String("range", "", "commit range to check, e.g. base..head or onlyCommit^! (required)")
 	prAuthor := fs.String("pr-author", "", "login of the pull-request author (bot rule only, e.g. dependabot[bot]); leave empty on a push")
 	prBodyFile := fs.String("pr-body-file", "", "file holding the pull-request body to check; omitted on a push")
@@ -450,7 +586,17 @@ func checkCommitCheckRange(root, confRelPath, rangeSpec, prAuthor, prBodyFile st
 	if st, err := os.Stat(absRoot); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("root %q is not a readable directory", root)
 	}
-	conf, err := loadCommitConf(filepath.Join(absRoot, filepath.FromSlash(confRelPath)))
+	if shallow, err := isShallowClone(absRoot); err != nil {
+		return nil, fmt.Errorf("could not tell whether %s is a shallow clone: %w", root, err)
+	} else if shallow {
+		return nil, fmt.Errorf("%s is a shallow git clone; refusing to run rather than risk a range silently "+
+			"resolving against history that was never fetched (checkout needs fetch-depth: 0)", root)
+	}
+	confPath := confRelPath
+	if !filepath.IsAbs(confPath) {
+		confPath = filepath.Join(absRoot, filepath.FromSlash(confRelPath))
+	}
+	conf, err := loadCommitConf(confPath)
 	if err != nil {
 		return nil, err
 	}
@@ -468,7 +614,7 @@ func checkCommitCheckRange(root, confRelPath, rangeSpec, prAuthor, prBodyFile st
 			return nil, fmt.Errorf("cannot read --pr-body-file %s: %w", prBodyFile, err)
 		}
 		_, isBotPR := findBotAuthorByPRAuthor(conf, prAuthor)
-		out = append(out, checkPullRequestBody(string(body), isBotPR)...)
+		out = append(out, checkPullRequestBody(conf, string(body), isBotPR)...)
 	}
 	return out, nil
 }

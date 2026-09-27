@@ -107,14 +107,30 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 	t.Run("an address in a commit message", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		// Not the owner's own configured address (item 5 exempts that one);
+		// some other address is still a finding.
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail,
-			"Feature\n\nSigned-off-by: Test Author <"+ccTestAuthorEmail+">\n")
+			"Feature\n\nSigned-off-by: Someone Else <"+ccTestSomeoneEmail+">\n")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !ccHasRule(findings, ccRuleAddress) {
 			t.Fatalf("findings %v, want %s", findings, ccRuleAddress)
+		}
+	})
+
+	t.Run("the owner's own configured address in a commit message is not a finding (item 5)", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail,
+			"Feature\n\nSigned-off-by: Test Author <"+ccTestAuthorEmail+">\n")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings %v, want none (a configured address is not a leak)", findings)
 		}
 	})
 
@@ -207,12 +223,81 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		if err := os.WriteFile(body, []byte("Text.\n\nContact "+ccTestSomeoneEmail+".\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "Test Author", body)
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, body)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !ccHasRule(findings, ccRulePRAddress) {
 			t.Fatalf("findings %v, want %s", findings, ccRulePRAddress)
+		}
+	})
+
+	t.Run("item 2: a foreign pull request cannot pass by spoofing the owner's git identity", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		// Anyone forking the repository can set these exact values in their
+		// own clone; nothing about them proves who opened the pull request.
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Spoofed commit")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "evil", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ccHasRule(findings, ccRuleAuthor) || !ccHasRule(findings, ccRuleCommitter) {
+			t.Fatalf("findings %v, want both %s and %s", findings, ccRuleAuthor, ccRuleCommitter)
+		}
+	})
+
+	t.Run("item 2: the owner's real pull request, opened under their own login, passes", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "The owner's own commit")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings %v, want none", findings)
+		}
+	})
+
+	t.Run("item 4: an absolute --conf reads the config from anywhere, not only under --root", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Someone Else", ccTestSomeoneEmail, "Would fail against the tree's own conf")
+		// A base-commit conf that, unlike the tree's own copy, allows
+		// "Someone Else" — standing in for `git show base:.imprint/commit.conf`
+		// read into a file outside the checkout, the mechanism
+		// check.yml uses so a pull request cannot rewrite the list it is
+		// itself checked against.
+		altConf := `{"authors":[{"name":"Someone Else","emailUser":"someone","emailDomain":"example.invalid"}],` +
+			`"committers":[{"name":"Someone Else","emailUser":"someone","emailDomain":"example.invalid"}]}`
+		confFile := filepath.Join(t.TempDir(), "base-commit.conf")
+		if err := os.WriteFile(confFile, []byte(altConf), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		findings, err := checkCommitCheckRange(dir, confFile, base+"..HEAD", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings %v, want none (the absolute conf, not the tree's own, decided this)", findings)
+		}
+	})
+
+	t.Run("item 7: a shallow clone is refused rather than checked incompletely", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "First")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Second")
+		shallow := t.TempDir()
+		cmd := exec.Command("git", "clone", "-q", "--depth", "1", "--branch", "main", "file://"+dir, shallow)
+		cmd.Env = ccIsolatedGitEnv()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git clone --depth 1: %v\n%s", err, out)
+		}
+		if _, err := checkCommitCheckRange(shallow, defaultCommitConfPath, "HEAD^!", "", ""); err == nil {
+			t.Fatal("want an error refusing to run against a shallow clone")
+		} else if !strings.Contains(err.Error(), "shallow") {
+			t.Fatalf("error %q does not mention the shallow clone", err)
 		}
 	})
 

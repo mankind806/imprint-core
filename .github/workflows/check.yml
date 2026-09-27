@@ -1,7 +1,14 @@
 name: check
 
 on:
+  # push is restricted to main: a feature-branch push would otherwise produce
+  # its own, separately green check run on the same commit its pull request
+  # is also checked on, and that push run skips commit-check (the condition
+  # below), which reads as ambiguous on that SHA rather than as green for a
+  # reason. A feature branch is still checked, once its pull request exists,
+  # through pull_request below.
   push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
@@ -38,11 +45,6 @@ jobs:
       - name: imprint-dev check
         run: go run ./tools/imprint-dev check --root . --sarif "$RUNNER_TEMP/imprint-dev.sarif"
       - name: imprint-dev commit-check
-        # Only a pull request, or a push landing on main, creates history that
-        # was not already checked as a pull request; a push to any other
-        # branch is checked once its pull request runs this same step (N79:
-        # only new commits are checked, never the existing history).
-        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -60,14 +62,26 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             range="$BASE_SHA..$HEAD_SHA"
             printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.txt"
-            go run ./tools/imprint-dev commit-check --root . --range "$range" \
+            # .imprint/commit.conf is read from the base commit, not the pull
+            # request's own tree: otherwise a pull request could grant
+            # itself an entry by editing the very file it is checked
+            # against. A repository that has never had the file falls back
+            # to the tree's own copy (its first introduction), noted below.
+            conf_path=".imprint/commit.conf"
+            if git show "$BASE_SHA:.imprint/commit.conf" >"$RUNNER_TEMP/commit-base.conf" 2>/dev/null; then
+              conf_path="$RUNNER_TEMP/commit-base.conf"
+            else
+              echo "::notice::.imprint/commit.conf not found at the base commit; using this pull request's own copy (its first introduction)"
+            fi
+            go run ./tools/imprint-dev commit-check --root . --range "$range" --conf "$conf_path" \
               --pr-author "$PR_AUTHOR" --pr-body-file "$RUNNER_TEMP/pr-body.txt" \
               --sarif "$RUNNER_TEMP/commit-check.sarif"
           else
             # A push's "before" is all-zero (or absent) only when the ref did
             # not exist beforehand; a bare $AFTER as the range would then walk
             # the whole history instead of just the new commit, so this uses
-            # the "just this commit" form instead.
+            # the "just this commit" form instead. push is restricted to
+            # main above, so this branch only ever runs there.
             if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$zero" ]; then
               range="${AFTER_SHA}^!"
             else
