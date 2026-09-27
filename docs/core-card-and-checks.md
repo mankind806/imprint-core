@@ -62,3 +62,48 @@ the picture line — not four: a finding that named the decision-register line a
 did not hold up against `references/superseding.md` row "A conflict between the decision
 register and a rule text is put to the user with both wordings, and the register holds
 meanwhile," which is that line's long form, classified already.
+
+## The arrival test
+
+Everything above proves things about *this working tree*. None of it proves that the card a
+real, installed session receives matches it: the 2026-09-27 review's Befund 1 was exactly that
+gap — the "pictures first" line (above, added to `main` by #5) sat on `main` for a day while
+`.claude-plugin/plugin.json` still read `0.5.0`, so no installed session ever saw it, because
+an install only picks up a new `main` when the owner bumps the version and a marketplace
+update runs. Nothing in `imprint-dev check` catches that: `check` only reads files on disk, in
+whichever tree it is pointed at, never an installed copy.
+
+`tools/arrival-test.sh` closes part of that gap. It does not read `hooks/session-start.json`
+or run `check` — both would only re-confirm what is on disk. Instead it starts one real,
+non-interactive `claude -p` session (model `haiku`, no tools) and asks it to reproduce the
+`SessionStart` system-reminder verbatim, then checks whether one line of `hooks/kernkarte.md`
+(read from this checkout) appears as an exact line of that reproduction:
+
+    tools/arrival-test.sh                              # against the installed plugin
+    tools/arrival-test.sh --plugin-dir <path>           # against a worktree instead
+    tools/arrival-test.sh --line 4                      # a specific card line, not the default
+
+Without `--line`, the default is the line most recently added to `hooks/kernkarte.md`, found
+via `git log` — the line a release just added is the one most likely missing from a stale
+install. The comparison is literal (`grep -Fxq` against the trimmed model output), and the
+script prints `claude --version`, the installed plugin's line from `claude plugin list` (or,
+with `--plugin-dir`, that it is not reading the installed copy), the exact line it checked for,
+and the model's raw output, so a failure can be read without re-running anything.
+
+Exit codes follow `imprint-dev`'s convention: `0` the line arrived verbatim, `1` a card
+arrived but not with that line (the failure this test exists to catch), `2` the test itself
+could not run (`claude` missing, a non-zero exit, empty output, or bad usage) — never read a
+`2` as a pass or as evidence of Befund 1.
+
+It is deliberately not wired into CI: CI has no logged-in `claude` account, and the point is to
+test what an actual installed session receives, which CI cannot represent. It is a manual
+release step instead — see `CONTRIBUTING.md`, "Releasing" — run once against the release
+worktree (expected: pass) and once against whatever is currently installed (expected: whatever
+is currently installed; a mismatch is exactly the signal this test exists to surface, not
+something to work around by editing the test).
+
+This narrows, but does not close, Befund 40 (2026-09-27: N05/N06 want an automatic per-release
+test that the card arrived; this is that test, but run by hand, not automatically). It also
+does not prove arrival on every harness or every host this plugin runs on — only on whatever
+machine and `claude` version ran it, on the date printed in its output; treat every other
+combination as unmeasured.

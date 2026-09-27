@@ -61,6 +61,27 @@ shapes of personal data, or an author or committer identity the clone has not de
 runs only in a clone that opted in (`git config core.hooksPath .githooks`); the README
 section "The pre-push hook" says what it checks and what it does not.
 
+## Releasing
+
+Bump `.claude-plugin/plugin.json`'s `version` (and a `version` field in
+`.claude-plugin/marketplace.json`, only if one is present there) and add a dated sentence to
+the README's Status section saying what the release adds, derived from `git log` between the
+previous release tag and this one — no claim without a commit or PR to point at.
+
+Before opening the release pull request, run `tools/arrival-test.sh` twice by hand (it is not
+in CI — see `docs/core-card-and-checks.md`, "The arrival test" — because CI has no logged-in
+`claude` account):
+
+    tools/arrival-test.sh --plugin-dir <path to the release worktree>   # expected: pass
+    tools/arrival-test.sh                                               # against whatever
+                                                                         # is currently installed
+
+Record both results, verbatim, in the pull request. A pass against the worktree and a fail
+against the current install is normal and expected — it is the gap this release is about to
+close, not a bug in the test. Only the owner's merge, followed by a marketplace update and a
+restart on their own machine, actually closes it; re-run `tools/arrival-test.sh` (without
+`--plugin-dir`) afterwards to confirm it did.
+
 ## Keep it publishable
 
 - No personal names besides the handle `mankind806`, no paths from your machine, no host

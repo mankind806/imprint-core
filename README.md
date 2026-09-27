@@ -151,6 +151,20 @@ release gate behind `--release`) to `imprint-dev`, and the hook that measures ho
 subagent ran. Released 2026-09-26, without behavioural skill evals; those are the next build
 step.
 
+**0.6.0** (2026-09-27; ships when the owner merges it):
+
+- Card line: pictures first for anything a person reads (#5).
+- Table of all 12 card lines against their enforcement; check `g` reads it too (#8).
+- Fix for two CodeQL alerts in `imprint-dev` (#11).
+- `claude plugin eval` suite for all four skills, under `evals/` (#7).
+- Check `e` now requires `SubagentStop` to actually run the measuring hook (#13).
+- CI fails on zero tests or a dirty working tree (N16, #13).
+- Doc fixes (#13).
+- `tools/arrival-test.sh`: a release-time check that a fresh session actually receives the
+  card this release ships — see [Core card and checks](#core-card-and-checks).
+
+Not included: the update watcher (PR #12).
+
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
 one.** **Not read yet:** `session-handover` as rewritten
@@ -220,6 +234,25 @@ arrival there as unknown.
 Measured 2026-09-26 with `imprint-dev check` on `main`: the card holds 1421 characters and 12
 non-empty lines, which is the line limit, so a new rule can join it only by replacing or
 merging an existing line.
+
+### The arrival test
+
+`tools/arrival-test.sh` asks a fresh, non-interactive session to reproduce the `SessionStart`
+card verbatim, then checks whether one chosen line of `hooks/kernkarte.md` — by default, the
+line this repository's history added most recently — actually arrived. It costs one billed
+`claude -p` call, is not part of CI (it needs a logged-in account), and is meant to run once
+per release: against the release worktree, and again against whatever is already installed.
+See [Contributing](#contributing) for when, and
+[docs/core-card-and-checks.md](docs/core-card-and-checks.md) for what it checks and its exit
+codes.
+
+**Measured 2026-09-27** on Claude Code 2.1.283, model `haiku`. Against the 0.6.0 release
+worktree (`--plugin-dir`): the card carried this release's added line ("Anything a person
+reads …") verbatim — exit 0. Against the plugin installed from the marketplace at the time
+(`imprint@imprint`, version 0.5.0): the same line did not arrive; the card stopped at 11 lines
+without it — exit 1. That is this tool proving Befund 1 from the 2026-09-27 review: a finished
+release can sit on `main` without a single installed session ever seeing it, because
+`.claude-plugin/plugin.json`'s version is the only thing anyone's install picks up.
 
 ### Measuring subagents
 
