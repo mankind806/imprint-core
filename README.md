@@ -151,7 +151,7 @@ release gate behind `--release`) to `imprint-dev`, and the hook that measures ho
 subagent ran. Released 2026-09-26, without behavioural skill evals; those are the next build
 step.
 
-**0.6.0** (2026-09-27; ships when the owner merges it):
+**0.6.0** (released 2026-09-27):
 
 - Card line: pictures first for anything a person reads (#5).
 - Table of all 12 card lines against their enforcement; check `g` reads it too (#8).
