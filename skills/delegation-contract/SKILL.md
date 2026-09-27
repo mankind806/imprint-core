@@ -25,9 +25,11 @@ next dispatch needs.
 - The lead does not check a subagent's work by looking at it; it dispatches a separate reader.
 - Merging the writers' results is writing, so a subagent merges them too.
 - **Exception — co-browsing.** When the person is watching a shared browser session, the lead
-  may drive one visible tab itself so the person can follow along. Nothing else moves off the
-  list above for this: reading, searching, measuring, writing and reviewing still go to a
-  subagent.
+  may drive one visible tab itself so the person can follow along — which includes reading
+  that one tab's own page state (a snapshot, its console, its network log) to the extent
+  driving it needs, since a tab cannot be operated blind. Nothing else moves off the list
+  above for this: searching, measuring, writing, reviewing, and reading anything beyond that
+  one tab still go to a subagent.
 
 Outside that one exception, there is no size below which the lead may act itself. The cost is
 one dispatch per edit, and it is accepted; the model rules below keep it low by sending small
