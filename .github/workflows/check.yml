@@ -3,6 +3,7 @@ name: check
 on:
   push:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -15,6 +16,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # commit-check needs the commit range, and a push to main needs the
+          # commit before it to resolve before..after.
+          fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: tools/imprint-dev/go.mod
@@ -33,6 +37,45 @@ jobs:
           go test ./...
       - name: imprint-dev check
         run: go run ./tools/imprint-dev check --root . --sarif "$RUNNER_TEMP/imprint-dev.sarif"
+      - name: imprint-dev commit-check
+        # Only a pull request, or a push landing on main, creates history that
+        # was not already checked as a pull request; a push to any other
+        # branch is checked once its pull request runs this same step (N79:
+        # only new commits are checked, never the existing history).
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          # PR_AUTHOR and PR_BODY come from outside the repository, so they
+          # are only ever read from this env: block, never interpolated with
+          # a double-brace expression into this script (that would even parse
+          # as an expression inside a comment, breaking the workflow file).
+          zero='0000000000000000000000000000000000000000'
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            range="$BASE_SHA..$HEAD_SHA"
+            printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.txt"
+            go run ./tools/imprint-dev commit-check --root . --range "$range" \
+              --pr-author "$PR_AUTHOR" --pr-body-file "$RUNNER_TEMP/pr-body.txt" \
+              --sarif "$RUNNER_TEMP/commit-check.sarif"
+          else
+            # A push's "before" is all-zero (or absent) only when the ref did
+            # not exist beforehand; a bare $AFTER as the range would then walk
+            # the whole history instead of just the new commit, so this uses
+            # the "just this commit" form instead.
+            if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$zero" ]; then
+              range="${AFTER_SHA}^!"
+            else
+              range="$BEFORE_SHA..$AFTER_SHA"
+            fi
+            go run ./tools/imprint-dev commit-check --root . --range "$range" \
+              --sarif "$RUNNER_TEMP/commit-check.sarif"
+          fi
       - name: working tree unchanged
         # N16: CI compares the file list before and after the run.
         run: |
