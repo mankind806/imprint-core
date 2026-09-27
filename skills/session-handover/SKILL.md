@@ -157,7 +157,7 @@ afterwards by any amount of reading the repository.
 checks table in `tools/imprint-dev/checks.go`: nothing here observes a session ending.
 `SessionStart` and `SubagentStart` print the core card, and since 2026-09-27 (after 0.5.0)
 `SessionStart` also runs `hooks/update-watch.sh`, which records the Claude Code version and,
-only if switched on, notes after an upgrade that a review is due; since 0.5.0, `SubagentStart` and `SubagentStop` each also run
+after an upgrade, notes that a review is due; since 0.5.0, `SubagentStart` and `SubagentStop` each also run
 `hooks/log-subagent.sh`, which appends one measurement line — time,
 agent id, type, effort, and on a stop the transcript path, no response text — to a log file.
 That measuring hook records that a subagent started or returned; it runs no check and enforces

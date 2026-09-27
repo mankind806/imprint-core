@@ -7,8 +7,8 @@ The detail behind [What's in the box](../README.md#whats-in-the-box) in the READ
 Four skills and one agent, in the two layers described below, plus two plugin hooks that
 inject a summary of them at session and subagent start (see [Core card and
 checks](core-card-and-checks.md)), a hook that records how long each subagent ran (see
-[Measuring subagents](measuring-subagents.md)) and, since 2026-09-27 and off by default, a hook
-that notes after a Claude Code upgrade that a review is due (see [Watching Claude Code
+[Measuring subagents](measuring-subagents.md)) and, since 2026-09-27, a hook that notes after
+a Claude Code upgrade that a review is due (see [Watching Claude Code
 updates](update-watch.md)). Each skill carries a section
 on what actually enforces it, and sorts every rule it holds into one of four states:
 **enforced** by something that really stops you, **enforceable, not enforced** where a

@@ -1,17 +1,16 @@
 #!/bin/sh
 #
-# imprint - Claude Code update watch, off by default
+# imprint - Claude Code update watch
 #
 # Registered for SessionStart in hooks/hooks.json. On a fresh start (source
 # "startup") it reads the Claude Code version with `claude --version` and
 # compares it with the version recorded last time in
 #     ${CLAUDE_PLUGIN_DATA}/claude-code-version
 #
-# OFF BY DEFAULT. It speaks only when switched on: IMPRINT_UPDATE_WATCH=1 in its
-# environment, or a file ${CLAUDE_PLUGIN_DATA}/update-watch.enabled.
-# IMPRINT_UPDATE_WATCH=0 keeps it off whatever the file says. Switched off, it
-# still keeps the record current, silently, so that switching it on later
-# compares against the version in use and not against one from months ago.
+# ON BY DEFAULT. IMPRINT_UPDATE_WATCH=0 in its environment switches it off; any
+# other value, or none, leaves it on. Switched off, it still keeps the record
+# current, silently, so that switching it on again compares against the version
+# in use and not against one from months ago.
 #
 # SWITCHED ON, on an upgrade (a higher major.minor.patch) it claims the new
 # version by creating the directory ${CLAUDE_PLUGIN_DATA}/.claim-<version>. Of
@@ -123,11 +122,8 @@ record() {
   return 1
 }
 
-case "${IMPRINT_UPDATE_WATCH:-}" in
-  1) on=1 ;;
-  0) on='' ;;
-  *) on=''; [ -f "$data/update-watch.enabled" ] && on=1 ;;
-esac
+on=1
+[ "${IMPRINT_UPDATE_WATCH:-}" = 0 ] && on=''
 
 mkdir -p "$data" || exit 0
 if [ -z "$on" ] || [ -z "$old" ] || ! is_newer "$new" "$old"; then

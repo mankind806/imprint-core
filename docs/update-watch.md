@@ -2,32 +2,31 @@
 
 | What | How | State |
 |---|---|---|
-| Switched on | `IMPRINT_UPDATE_WATCH=1`, or a file `update-watch.enabled` in the plugin's data directory | **off by default** |
-| Speaks | on a fresh start after an upgrade, once per version, in one session | enforced by the hook, once on |
+| Switched off | `IMPRINT_UPDATE_WATCH=0` in the environment Claude Code starts with | **on by default** |
+| Speaks | on a fresh start after an upgrade, once per version, in one session | enforced by the hook |
 | Says | an update review is due, what it reads, where its one report goes | a factual note, no command |
 | The review and the report | one read-only subagent reads; the session writes one file | behaviour rule |
 | End to end | a subagent reading and a report written | **not measured** |
 
 Claude Code changes often, and a plugin that is not re-read against each release ends up
 rebuilding what Claude Code now does itself, or getting in its way. A fourth hook notices a
-new version at session start and, if you switched it on, tells the session that a review is
-due.
+new version at session start and tells the session, as an offer, that a review is due.
 
-## Switching it on
+## On for everyone, with a way out
 
-Either way works; the variable wins over the file:
+The owner decided on 2026-09-27 that the watch runs for every user, without a switch to turn
+it on, only at a fresh start, and worded as an offer. It is therefore **on by default**.
 
-- **A file.** Create `update-watch.enabled` in the plugin's data directory,
-  `~/.claude/plugins/data/<id>/` per the plugins reference (read 2026-09-26). Delete it to
-  switch off.
-- **A variable.** `IMPRINT_UPDATE_WATCH=1` in the environment Claude Code starts with; hooks
-  inherit it, per the hooks reference (read 2026-09-26). `IMPRINT_UPDATE_WATCH=0` keeps the
-  watch off even where the file exists; any other value does not count. Whether the `env`
-  block of `settings.json` reaches the hook is **not measured**.
+- **Switching off.** `IMPRINT_UPDATE_WATCH=0` in the environment Claude Code starts with; hooks
+  inherit it, per the hooks reference (read 2026-09-26). Any other value, or none, leaves it
+  on. Whether the `env` block of `settings.json` reaches the hook is **not measured**.
+- **Why a way out does not undo that decision.** Nobody has to do anything for the watch to
+  run; the variable only lets someone who does not want the note stop it without editing the
+  plugin.
 
 **Off, it still records.** Switched off, the hook keeps the recorded version current in
-silence. Switching on later then compares against the version in use: the first notice comes
-with the next upgrade, not as a review of every release since the plugin was installed.
+silence. Switching on again then compares against the version in use: the first notice comes
+with the next upgrade, not as a review of every release that passed meanwhile.
 
 ## What the hook does
 
@@ -40,7 +39,7 @@ with `claude --version` and compares it with `${CLAUDE_PLUGIN_DATA}/claude-code-
 1. **Same version:** nothing.
 2. **First run, downgrade, suffix-only change, or switched off:** the new version is recorded,
    silently.
-3. **Upgrade, switched on:** the session claims the version by creating the directory
+3. **Upgrade:** the session claims the version by creating the directory
    `.claim-<version>` in the data directory. Creating a directory is atomic, so of several
    sessions starting at once exactly one goes on; the others stay silent. That one appends
    the version with the UTC date to `claude-code-version-history`, records it and prints the
@@ -150,9 +149,9 @@ imperative and the hook had no switch.
 
 ## Enforcement
 
-In the repository's four states: once switched on, noticing an upgrade and putting the note
-in front of one session is **enforced** by the hook, wherever it fires and finds `claude` on
-the path; switched off, which is the default, it is **enforceable, not enforced**. Offering
+In the repository's four states: noticing an upgrade and putting the note in front of one
+session is **enforced** by the hook, wherever it fires and finds `claude` on the path, unless
+someone switched it off with `IMPRINT_UPDATE_WATCH=0`. Offering
 the review, running it and writing the report is a **behaviour rule**: the session or the
 user can decline. That the subagent only reads and treats what it fetches as data is a
 **behaviour rule** as well: the note asks for it, and nothing restricts the subagent's tools.

@@ -23,8 +23,7 @@ var updateWatchScript = filepath.Join("..", "..", "hooks", "update-watch.sh")
 const (
 	versionFile = "claude-code-version"
 	historyFile = "claude-code-version-history"
-	enabledFile = "update-watch.enabled"
-	optIn       = "IMPRINT_UPDATE_WATCH=1"
+	off         = "IMPRINT_UPDATE_WATCH=0"
 )
 
 // fakeClaude writes an executable claude into a new directory that prints
@@ -175,7 +174,7 @@ func TestUpdateWatchSpeaksOnceAfterAnUpgrade(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "odd \"data\" \\ dir")
 	record(t, dir, "2.1.282\n")
 
-	ctx := contextOf(t, runUpdateWatch(t, bin, dir, startupInput, optIn))
+	ctx := contextOf(t, runUpdateWatch(t, bin, dir, startupInput))
 	for _, want := range []string{
 		"injected by the imprint plugin",
 		"Claude Code changed from 2.1.282 to 2.1.283",
@@ -207,14 +206,14 @@ func TestUpdateWatchSpeaksOnceAfterAnUpgrade(t *testing.T) {
 		t.Errorf("history %v, want [2.1.283]", got)
 	}
 
-	if out := runUpdateWatch(t, bin, dir, startupInput, optIn); out != "" {
+	if out := runUpdateWatch(t, bin, dir, startupInput); out != "" {
 		t.Fatalf("the second run must be silent, printed %q", out)
 	}
 	if got := history(t, dir); len(got) != 1 {
 		t.Errorf("history %v after the second run; an unchanged version adds no line", got)
 	}
 
-	if out := runUpdateWatch(t, fakeClaude(t, "2.1.284 (Claude Code)", 0), dir, startupInput, optIn); !strings.Contains(out, "from 2.1.283 to 2.1.284") {
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.284 (Claude Code)", 0), dir, startupInput); !strings.Contains(out, "from 2.1.283 to 2.1.284") {
 		t.Fatalf("the next upgrade must speak again, printed %q", out)
 	}
 	if got := history(t, dir); len(got) != 2 || got[1] != "2.1.284" {
@@ -222,26 +221,28 @@ func TestUpdateWatchSpeaksOnceAfterAnUpgrade(t *testing.T) {
 	}
 }
 
-// Off by default. Switched off, the record is kept current in silence, so
-// that switching on later compares against the version in use.
-func TestUpdateWatchOptIn(t *testing.T) {
+// On by default (N105, 2026-09-27); IMPRINT_UPDATE_WATCH=0 switches it off.
+// Switched off, the record is kept current in silence, so that switching on
+// again compares against the version in use. A file update-watch.enabled, the
+// switch of an earlier draft, has no effect.
+func TestUpdateWatchSwitch(t *testing.T) {
 	bin := fakeClaude(t, "2.1.283 (Claude Code)", 0)
 	for name, tc := range map[string]struct {
 		env      []string
 		flagFile bool
 		speaks   bool
 	}{
-		"off by default":            {nil, false, false},
-		"on by environment":         {[]string{optIn}, false, true},
-		"on by file":                {nil, true, true},
-		"environment 0 beats file":  {[]string{"IMPRINT_UPDATE_WATCH=0"}, true, false},
-		"other values do not count": {[]string{"IMPRINT_UPDATE_WATCH=yes"}, false, false},
+		"on by default":               {nil, false, true},
+		"off by 0":                    {[]string{off}, false, false},
+		"other values leave it on":    {[]string{"IMPRINT_UPDATE_WATCH=no"}, false, true},
+		"1 leaves it on":              {[]string{"IMPRINT_UPDATE_WATCH=1"}, false, true},
+		"a flag file does not stop 0": {[]string{off}, true, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			record(t, dir, "2.1.282\n")
 			if tc.flagFile {
-				if err := os.WriteFile(filepath.Join(dir, enabledFile), nil, 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, "update-watch.enabled"), nil, 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -259,11 +260,11 @@ func TestUpdateWatchOptIn(t *testing.T) {
 			}
 		})
 	}
-	t.Run("switched on after an update in silence", func(t *testing.T) {
+	t.Run("switched on again after an update in silence", func(t *testing.T) {
 		dir := t.TempDir()
 		record(t, dir, "2.1.282\n")
-		runUpdateWatch(t, bin, dir, startupInput)
-		if out := runUpdateWatch(t, bin, dir, startupInput, optIn); out != "" {
+		runUpdateWatch(t, bin, dir, startupInput, off)
+		if out := runUpdateWatch(t, bin, dir, startupInput); out != "" {
 			t.Fatalf("switching on must not announce the update that passed while off, printed %q", out)
 		}
 	})
@@ -287,7 +288,7 @@ func TestUpdateWatchSpeaksOnlyAtStartup(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			record(t, dir, "2.1.282\n")
-			if out := runUpdateWatch(t, bin, dir, input, optIn); out != "" {
+			if out := runUpdateWatch(t, bin, dir, input); out != "" {
 				t.Fatalf("printed %q", out)
 			}
 			if got := recordedVersion(t, dir); got != "2.1.282\n" {
@@ -311,7 +312,7 @@ func TestUpdateWatchParallelStartsSpeakOnce(t *testing.T) {
 		}
 		runs := make([]run, n)
 		for i := range runs {
-			cmd, out, errOut := hookCmd(t, bin, dir, startupInput, optIn)
+			cmd, out, errOut := hookCmd(t, bin, dir, startupInput)
 			runs[i] = run{cmd, out, errOut}
 		}
 		for _, r := range runs {
@@ -348,19 +349,19 @@ func TestUpdateWatchParallelStartsSpeakOnce(t *testing.T) {
 func TestUpdateWatchAnnouncesEachVersionOnce(t *testing.T) {
 	dir := t.TempDir()
 	record(t, dir, "2.1.282\n")
-	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput, optIn); out == "" {
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out == "" {
 		t.Fatal("the upgrade must speak")
 	}
 	if fi, err := os.Stat(filepath.Join(dir, ".claim-2.1.283")); err != nil || !fi.IsDir() {
 		t.Fatalf("no claim directory: %v", err)
 	}
-	if out := runUpdateWatch(t, fakeClaude(t, "2.1.282 (Claude Code)", 0), dir, startupInput, optIn); out != "" {
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.282 (Claude Code)", 0), dir, startupInput); out != "" {
 		t.Fatalf("a downgrade must be silent, printed %q", out)
 	}
-	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput, optIn); out != "" {
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
 		t.Fatalf("a version already announced must stay silent, printed %q", out)
 	}
-	out := runUpdateWatch(t, fakeClaude(t, "2.1.284 (Claude Code)", 0), dir, startupInput, optIn)
+	out := runUpdateWatch(t, fakeClaude(t, "2.1.284 (Claude Code)", 0), dir, startupInput)
 	if !strings.Contains(contextOf(t, out), "from 2.1.282 to 2.1.284") {
 		t.Fatalf("printed %q", out)
 	}
@@ -371,7 +372,7 @@ func TestUpdateWatchAnnouncesEachVersionOnce(t *testing.T) {
 
 func TestUpdateWatchFirstRunOnlyRecords(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "not", "yet", "there")
-	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput, optIn); out != "" {
+	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
 		t.Fatalf("a first run must be silent, printed %q", out)
 	}
 	if got := recordedVersion(t, dir); got != "2.1.283\n" {
@@ -394,7 +395,7 @@ func TestUpdateWatchRecordsADowngradeSilently(t *testing.T) {
 		t.Run(tc.old+" to "+tc.new, func(t *testing.T) {
 			dir := t.TempDir()
 			record(t, dir, tc.old+"\n")
-			if out := runUpdateWatch(t, fakeClaude(t, tc.new+" (Claude Code)", 0), dir, startupInput, optIn); out != "" {
+			if out := runUpdateWatch(t, fakeClaude(t, tc.new+" (Claude Code)", 0), dir, startupInput); out != "" {
 				t.Fatalf("printed %q", out)
 			}
 			if got := recordedVersion(t, dir); got != tc.new+"\n" {
@@ -417,7 +418,7 @@ func TestUpdateWatchTreatsAJunkRecordAsAFirstRun(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			record(t, dir, junk)
-			if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput, optIn); out != "" {
+			if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
 				t.Fatalf("a junk record must not reach the context, printed %q", out)
 			}
 			if got := recordedVersion(t, dir); got != "2.1.283\n" {
@@ -442,7 +443,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			record(t, dir, "2.1.282\n")
-			if out := runUpdateWatch(t, fakeClaude(t, tc.output, tc.code), dir, startupInput, optIn); out != "" {
+			if out := runUpdateWatch(t, fakeClaude(t, tc.output, tc.code), dir, startupInput); out != "" {
 				t.Fatalf("printed %q", out)
 			}
 			if got := recordedVersion(t, dir); got != "2.1.282\n" {
@@ -456,7 +457,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 	// history.
 	silent := func(t *testing.T, bin, dir string) {
 		t.Helper()
-		if out := runUpdateWatch(t, bin, dir, startupInput, optIn); out != "" {
+		if out := runUpdateWatch(t, bin, dir, startupInput); out != "" {
 			t.Fatalf("printed %q", out)
 		}
 		if got := recordedVersion(t, dir); got != "2.1.282\n" {
@@ -495,7 +496,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		if err := os.Chmod(f, 0); err != nil {
 			t.Fatal(err)
 		}
-		if out := runUpdateWatch(t, upgrade(t), dir, startupInput, optIn); out != "" {
+		if out := runUpdateWatch(t, upgrade(t), dir, startupInput); out != "" {
 			t.Fatalf("printed %q", out)
 		}
 		if err := os.Chmod(f, 0o644); err != nil {
@@ -509,7 +510,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("running as root, so a directory cannot be made read-only here")
 		}
-		for name, env := range map[string][]string{"switched on": {optIn}, "switched off": nil} {
+		for name, env := range map[string][]string{"switched on": nil, "switched off": {off}} {
 			t.Run(name, func(t *testing.T) {
 				dir := t.TempDir()
 				record(t, dir, "2.1.282\n")
@@ -536,7 +537,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(dir, versionFile), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if out := runUpdateWatch(t, upgrade(t), dir, startupInput, optIn); out != "" {
+		if out := runUpdateWatch(t, upgrade(t), dir, startupInput); out != "" {
 			t.Fatalf("printed %q", out)
 		}
 		inside, err := os.ReadDir(filepath.Join(dir, versionFile))
@@ -554,7 +555,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
-		if out := runUpdateWatch(t, upgrade(t), dir, startupInput, optIn); out != "" {
+		if out := runUpdateWatch(t, upgrade(t), dir, startupInput); out != "" {
 			t.Fatalf("printed %q", out)
 		}
 		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
@@ -571,7 +572,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(dir, historyFile)); err != nil {
 			t.Fatal(err)
 		}
-		if out := runUpdateWatch(t, upgrade(t), dir, startupInput, optIn); out != "" {
+		if out := runUpdateWatch(t, upgrade(t), dir, startupInput); out != "" {
 			t.Fatalf("printed %q", out)
 		}
 		if got := recordedVersion(t, dir); got != "2.1.282\n" {
@@ -622,7 +623,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		}
 	})
 	t.Run("CLAUDE_PLUGIN_DATA unset", func(t *testing.T) {
-		if out := runUpdateWatch(t, upgrade(t), "", startupInput, optIn); out != "" {
+		if out := runUpdateWatch(t, upgrade(t), "", startupInput); out != "" {
 			t.Fatalf("printed %q", out)
 		}
 	})
@@ -631,7 +632,7 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 		if err := os.WriteFile(file, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if out := runUpdateWatch(t, upgrade(t), filepath.Join(file, "below"), startupInput, optIn); out != "" {
+		if out := runUpdateWatch(t, upgrade(t), filepath.Join(file, "below"), startupInput); out != "" {
 			t.Fatalf("printed %q", out)
 		}
 	})
