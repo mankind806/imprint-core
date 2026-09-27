@@ -3,12 +3,17 @@
 //	imprint-dev gen   [--root dir]
 //	imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
 //	imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
+//	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
+//	    [--pr-body-file file] [--same-repo] [--sarif file]
 //
 // gen writes the SessionStart and SubagentStart hook payloads from their one
 // canonical source, hooks/kernkarte.md. check runs the invariants a program can
 // decide over the plugin tree and reports every finding. measure reports the
 // subagent runs that hooks/log-subagent.sh logged: duration, model, effort and
-// whether a run went over the target; it exits 0 whatever it reports.
+// whether a run went over the target; it exits 0 whatever it reports. commit-check
+// checks a range of new commits, and on a pull request its body, against
+// .imprint/commit.conf and CONTRIBUTING.md's rules for commit messages (N78, N79,
+// N96); see commitcheck.go.
 //
 // An overdue re-check date is a warning, which leaves the exit code alone,
 // unless --release is given: overdue dates block a release, never the ordinary
@@ -42,12 +47,17 @@ const usageText = `usage:
   imprint-dev gen   [--root dir]
   imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
   imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
+  imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
+      [--pr-body-file file] [--same-repo] [--sarif file]
 
 gen      writes hooks/session-start.json and hooks/subagent-start.json from hooks/kernkarte.md
 check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run;
          an overdue re-check date warns, and fails only with --release
 measure  reports subagent runs from the hook's log (default $CLAUDE_PLUGIN_DATA/subagent-log.jsonl);
          an overrun is reported, not a failure: exit 0, or 2 if the log cannot be read
+commit-check   checks a range of new commits (and, with --pr-body-file, a pull request's
+         body) against .imprint/commit.conf and CONTRIBUTING.md's commit-message rules;
+         exit 0 no findings, 1 a finding, 2 the check could not run
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -62,6 +72,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runCheck(args[1:], stderr)
 	case "measure":
 		return runMeasure(args[1:], stdout, stderr)
+	case "commit-check":
+		return runCommitCheck(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return exitOK
