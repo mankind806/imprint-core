@@ -17,5 +17,9 @@
 
 ## Assisted-by
 
-<!-- The AI tool or model that helped, without an address, or "none". -->
+<!-- The AI tool or model that helped, without an address, or "none". Keep this the LAST
+     line of the pull request text: a squash merge on this repository uses the pull request
+     body as the commit message (`squash_merge_commit_message` is `PR_BODY`), so this line
+     becomes the merge commit's trailer only if nothing follows it. No addresses or paths
+     anywhere in this text either, for the same reason. -->
 Assisted-by:
