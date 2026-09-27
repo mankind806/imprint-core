@@ -2,16 +2,16 @@
 
 The detail behind [The pre-push hook](../README.md#the-pre-push-hook) in the README.
 
-One rule here has a mechanical half, and this repository now runs it: nothing leaves this
-repository except its git identity. `.githooks/pre-push` refuses a push whose commits carry
-an identity this clone has not declared, and it refuses a push whose tracked content or
-commit messages match a shape that personal data takes — an address of the kind mail uses, a
-phone number, a bank account number, a postal address, each only in the format its pattern
-spells out, so a format it was not written for passes. It reads every
-commit in the pushed range rather than the tip alone, because a push publishes the whole
-range, and a file removed in a later commit stays reachable by its hash for anyone who
-clones. Commit messages are checked alongside the trees, since a message is as public as a
-blob and trailers are where addresses ride in.
+One rule here has a mechanical half, and a clone runs it only once it has opted in: nothing
+leaves this repository except its git identity. `.githooks/pre-push` refuses a push whose
+commits carry an identity this clone has not declared, and it refuses a push whose tracked
+content or commit messages match a shape that personal data takes — an address of the kind
+mail uses, a phone number, a bank account number, a postal address, each only in the format
+its pattern spells out, so a format it was not written for passes. It reads every commit in
+the pushed range rather than the tip alone, because a push publishes the whole range, and a
+file removed in a later commit stays reachable by its hash for anyone who clones. Commit
+messages are checked alongside the trees, since a message is as public as a blob and
+trailers are where addresses ride in.
 
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:
@@ -19,6 +19,11 @@ otherwise, and nothing in a checkout can tell it for you. Each clone needs one l
 ```
 git config core.hooksPath .githooks
 ```
+
+Nothing turns it on by default. The check workflow neither sets `core.hooksPath` nor calls
+the script, and, absent that line, `.git/hooks` has no copy of it either. *Measured
+2026-09-27: `git config --get core.hooksPath` returned nothing and `.git/hooks/pre-push` did
+not exist in the maintainer's own clone, and the workflow was read. Re-check by 2026-12-27.*
 
 A co-author or a fork declares a second identity with
 `git config --add imprint.allowedIdentity 'Name <address>'`. Your own `user.name` and
