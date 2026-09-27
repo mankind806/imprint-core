@@ -132,8 +132,22 @@ if [ -z "$on" ] || [ -z "$old" ] || ! is_newer "$new" "$old"; then
 fi
 
 # Claim the version. mkdir is atomic: of sessions starting at once, one wins.
+# A claim that exists already is either another session's, right now, or one
+# from an earlier announcement of this version (a downgrade and back); only in
+# the second case is the version in the history, and then the record catches
+# up in silence, so that the next notice reads from the version in use.
 claim="$data/.claim-$new"
-mkdir "$claim" || exit 0
+if ! mkdir "$claim"; then
+  if [ -f "$hist" ]; then
+    while read -r _ seen; do
+      if [ "$seen" = "$new" ]; then
+        record "$new"
+        break
+      fi
+    done <"$hist"
+  fi
+  exit 0
+fi
 
 # The history line goes before the record, so that a record that fails to move
 # leaves a line without a report behind, which is what a reader looks for.

@@ -44,7 +44,8 @@ with `claude --version` and compares it with `${CLAUDE_PLUGIN_DATA}/claude-code-
    sessions starting at once exactly one goes on; the others stay silent. That one appends
    the version with the UTC date to `claude-code-version-history`, records it and prints the
    note below as `additionalContext`. The claim stays, so a version is announced once, also
-   after a downgrade and back; each claim is an empty directory.
+   after a downgrade and back; then the record catches up in silence, so the next notice reads
+   from the version in use. Each claim is an empty directory.
 
 **Silent on every failure**, too: no `claude` on the path, an output that is not a version,
 an unset or unwritable data directory or one whose path holds a control character, a record

@@ -345,7 +345,7 @@ func TestUpdateWatchParallelStartsSpeakOnce(t *testing.T) {
 }
 
 // A claim stays: after a downgrade and back, the version is not announced
-// twice, and the next new version is read from the version in use.
+// twice, the record catches up, and the next new version is read from there.
 func TestUpdateWatchAnnouncesEachVersionOnce(t *testing.T) {
 	dir := t.TempDir()
 	record(t, dir, "2.1.282\n")
@@ -361,8 +361,11 @@ func TestUpdateWatchAnnouncesEachVersionOnce(t *testing.T) {
 	if out := runUpdateWatch(t, fakeClaude(t, "2.1.283 (Claude Code)", 0), dir, startupInput); out != "" {
 		t.Fatalf("a version already announced must stay silent, printed %q", out)
 	}
+	if got := recordedVersion(t, dir); got != "2.1.283\n" {
+		t.Errorf("recorded %q; the record must catch up with the version in use", got)
+	}
 	out := runUpdateWatch(t, fakeClaude(t, "2.1.284 (Claude Code)", 0), dir, startupInput)
-	if !strings.Contains(contextOf(t, out), "from 2.1.282 to 2.1.284") {
+	if !strings.Contains(contextOf(t, out), "from 2.1.283 to 2.1.284") {
 		t.Fatalf("printed %q", out)
 	}
 	if got := history(t, dir); len(got) != 2 || got[0] != "2.1.283" || got[1] != "2.1.284" {
