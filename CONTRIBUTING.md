@@ -121,26 +121,39 @@ a reason). It checks only the new commits — a pull request's `base..head`, or,
   own metadata do not already carry) — now also enforced here for everyone, except that the
   address check alone is skipped for a commit whose author or committer was let in only
   through a `botAuthors` entry (see "bot pull requests" below); the two session-link checks
-  stay on regardless. Unicode normalization beyond that (e.g. full-width Latin letters folding
-  to ASCII) is not implemented — see `tools/imprint-dev/commitcheck.go`'s
-  `normalizeForSession` — because it needs a library beyond the standard one this module
-  depends on; open.
-- If the commit message discloses AI assistance at all — a 🤖 line, `Generated with`,
-  `Co-Authored-By:` naming Claude or Copilot, or any `Assisted-by:` mention, filled in or not
-  — its own last non-blank line has to be a well-formed, non-empty `Assisted-by:` trailer,
-  read as such by `git interpret-trailers`; an empty value (the pull request template's own
-  unfilled placeholder counts) is its own finding, worded as fill in or remove.
+  stay on regardless. Unicode normalization beyond what `normalizeForSession` already does
+  (CRLF/lone-CR line endings, zero-width characters, a Markdown backslash escape — see
+  `tools/imprint-dev/commitcheck.go`) is not implemented, because it needs a library beyond the
+  standard one this module depends on. Left open, not yet measured against a real incident:
+  a session marker split by U+2010 (hyphen), U+00AD (soft hyphen), a full-width variant of a
+  letter or the colon, `%2E` in place of a URL's literal dot, `//` in place of `/`, or a URL
+  wrapped across two lines by a renderer; an AI tool named only as Devin or aider, which
+  `ccCoAuthoredAIRE` and `ccAIToolNameRE` do not list (no incident or documented identity
+  evidenced yet, the same bar CONTRIBUTING already holds a bot identity to); and U+3164
+  (Hangul filler) as an `Assisted-by:` value, which reads as visually blank but is not itself
+  whitespace to Go's `strings.TrimSpace` or covered by `ccZeroWidthRE`.
+- If the commit message discloses AI assistance at all — a 🤖 line, a `Generated with/by/using`
+  sentence that also names an AI tool or the word "AI" (not a code generator's own unrelated
+  boilerplate, such as `protoc`, `stringer` or `mockgen` output — N5), `Co-Authored-By:` naming
+  Claude or Copilot, or any `Assisted-by:` mention, filled in or not — its own last non-blank
+  line has to be a well-formed, non-empty `Assisted-by:` trailer, read as such by `git
+  interpret-trailers`; an empty value (the pull request template's own unfilled placeholder
+  counts) is its own finding, worded as fill in or remove.
 
 On a pull-request event, `.imprint/commit.conf` itself is read from the base commit
-(`git show base:.imprint/commit.conf`, passed to `--conf` as an absolute path outside the
-checkout), not from the pull request's own tree, so a pull request cannot grant itself an
-entry by editing the file it is checked against; a repository that has never had the file
-before falls back to the tree's own copy, noted in the workflow log. This closes only the
-list itself — the checking code and the workflow file that runs it still come from the pull
-request's own tree, so a pull request that edits `tools/imprint-dev/commitcheck.go` or
-`.github/workflows/check.yml` together with `.imprint/commit.conf` is not stopped by this
-alone. Closing that the rest of the way needs `CODEOWNERS` with required review on those
-paths, which this repository does not have; left as the owner's own call, not decided here.
+(`--conf-rev "$BASE_SHA"`, which runs `git show base:.imprint/commit.conf` internally rather
+than from the pull request's own tree), so a pull request cannot grant itself an entry by
+editing the file it is checked against. This has no fallback to the pull request's own tree
+copy: a base commit without the file fails the check outright (rc=2, a clear message naming
+the missing path and rev) rather than letting a pull request supply the file's first copy
+itself, which would be exactly the self-granted entry this rule exists to refuse (N4;
+`.imprint/commit.conf` has lived on `main` since #18, so this is not expected to fire in
+practice). This closes only the list itself — the checking code and the workflow file that
+runs it still come from the pull request's own tree, so a pull request that edits
+`tools/imprint-dev/commitcheck.go` or `.github/workflows/check.yml` together with
+`.imprint/commit.conf` is not stopped by this alone. Closing that the rest of the way needs
+`CODEOWNERS` with required review on those paths, which this repository does not have; left as
+the owner's own call, not decided here.
 
 The same message rules run over the pull request's title and body together, joined as
 title-blank line-body — the exact shape a squash merge turns them into (see "AI assistance and
@@ -149,10 +162,14 @@ as one in the body — with the Assisted-by rule's own pull-request-only additio
 appears anywhere, the text's very last three lines have to be exactly that line, one blank
 line, then `Assisted-by:` — CONTRIBUTING's own required shape above, checked here rather than
 only described. Naming an AI tool also covers a few more shapes than a literal "Assisted-by":
-"Generated with" or "Generated by", a `Co-Authored-By:` naming Claude, Copilot, Cursor,
-Gemini, Codex, ChatGPT or OpenAI, the robot emoji with or without a trailing variation
-selector, and an Assisted-by value made only of zero-width characters or non-breaking spaces
-(reads as empty to a person, so it is treated as empty).
+"Generated with", "Generated by" or "Generated using" *in the same sentence as* an AI tool,
+lab or the word "AI" itself — CONTRIBUTING's own canonical "Generated with [Claude Code](...)"
+line included, since "Claude" is right there in its own brackets, but not a code generator's
+own unrelated boilerplate such as "Code generated by protoc-gen-go. DO NOT EDIT." (N5) — a
+`Co-Authored-By:` naming Claude, Copilot, Cursor, Gemini, Codex, ChatGPT or OpenAI, the robot
+emoji with or without a trailing variation selector, and an Assisted-by value made only of
+zero-width characters or non-breaking spaces (reads as empty to a person, so it is treated as
+empty).
 
 **Bot pull requests are exempt from every pull-request-body check outright**, Dependabot's
 today: their body is generated by the bot, not written by a repository contributor, and can

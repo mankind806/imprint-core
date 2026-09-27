@@ -360,7 +360,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		findings, err := checkCommitCheckRangeTitle(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, body,
-			"Generated with a tool: fix the thing")
+			"Generated with Claude: fix the thing")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -409,11 +409,10 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Someone Else", ccTestSomeoneEmail, "Would fail against the tree's own conf")
-		// A base-commit conf that, unlike the tree's own copy, allows
-		// "Someone Else" — standing in for `git show base:.imprint/commit.conf`
-		// read into a file outside the checkout, the mechanism
-		// check.yml uses so a pull request cannot rewrite the list it is
-		// itself checked against.
+		// A conf that, unlike the tree's own copy, allows "Someone Else",
+		// read from an absolute path outside the checkout entirely
+		// (check.yml itself now uses --conf-rev instead; see the N4 tests
+		// below).
 		altConf := `{"authors":[{"name":"Someone Else","emailUser":"someone","emailDomain":"example.invalid"}],` +
 			`"committers":[{"name":"Someone Else","emailUser":"someone","emailDomain":"example.invalid"}]}`
 		confFile := filepath.Join(t.TempDir(), "base-commit.conf")
@@ -426,6 +425,61 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		}
 		if len(findings) != 0 {
 			t.Fatalf("findings %v, want none (the absolute conf, not the tree's own, decided this)", findings)
+		}
+	})
+
+	t.Run("N4: a base with no committed commit.conf fails, rather than falling back to the PR's own added copy", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		// ccNewTestRepo's own .imprint/commit.conf fixture is never
+		// git-added, so this base commit has no committed conf at all —
+		// the same as a repository that has never had the file in its
+		// history.
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base, no committed conf")
+
+		// The pull request's own commit adds a commit.conf that allows a
+		// complete stranger — exactly the self-granted entry N4 exists to
+		// refuse.
+		strangerConf := `{"authors":[{"name":"Someone Else","emailUser":"someone","emailDomain":"example.invalid"}],` +
+			`"committers":[{"name":"Someone Else","emailUser":"someone","emailDomain":"example.invalid"}]}`
+		if err := os.WriteFile(filepath.Join(dir, ".imprint", "commit.conf"), []byte(strangerConf), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ccRunGit(t, dir, "add", ".imprint/commit.conf")
+		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Someone Else", ccTestSomeoneEmail, "Add a commit.conf that allows me")
+
+		// (a) --conf-rev base: the base commit has no committed conf at
+		// all, so this fails outright (rc=2) rather than falling back to
+		// the pull request's own added copy.
+		code, out, errOut := runCLI(t, "commit-check", "--root", dir, "--range", base+"..HEAD", "--conf-rev", base)
+		if code != exitError {
+			t.Fatalf("code %d, want %d (exitError); stdout %q stderr %q", code, exitError, out, errOut)
+		}
+		if !strings.Contains(errOut, ".imprint/commit.conf") || !strings.Contains(errOut, base) {
+			t.Fatalf("stderr %q does not name the missing file and rev", errOut)
+		}
+
+		// (b) proves this is a real vulnerability being closed, not a test
+		// that would pass regardless: without --conf-rev, the checkout's
+		// own tree copy (the one the PR just added) really does let the
+		// stranger's commit in.
+		code, out, errOut = runCLI(t, "commit-check", "--root", dir, "--range", base+"..HEAD")
+		if code != exitOK {
+			t.Fatalf("without --conf-rev, code %d, want %d (the PR's own conf lets the stranger in); stdout %q stderr %q",
+				code, exitOK, out, errOut)
+		}
+	})
+
+	t.Run("N4: --conf-rev reads a base commit's own committed conf and passes an author it allows", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, ".imprint", "commit.conf"), []byte(ccTestConf), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ccRunGit(t, dir, "add", ".imprint/commit.conf")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base, with a committed conf")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Allowed commit")
+		code, out, errOut := runCLI(t, "commit-check", "--root", dir, "--range", base+"..HEAD", "--conf-rev", base)
+		if code != exitOK {
+			t.Fatalf("code %d, want %d; stdout %q stderr %q", code, exitOK, out, errOut)
 		}
 	})
 
