@@ -50,14 +50,23 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          # A plain boolean comparison, done by the expression engine itself
+          # before this script ever runs; the result is a fixed "true" or
+          # "false" string, so head.repo.full_name (attacker-controlled on a
+          # fork) is never itself interpolated into anything this script
+          # runs — same-repo cannot mean "spoofable" the way the git
+          # identities below can be.
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}
         run: |
-          # PR_AUTHOR and PR_BODY come from outside the repository, so they
-          # are only ever read from this env: block, never interpolated with
-          # a double-brace expression into this script (that would even parse
-          # as an expression inside a comment, breaking the workflow file).
+          # PR_AUTHOR, PR_TITLE and PR_BODY come from outside the
+          # repository, so they are only ever read from this env: block,
+          # never interpolated with a double-brace expression into this
+          # script (that would even parse as an expression inside a
+          # comment, breaking the workflow file).
           zero='0000000000000000000000000000000000000000'
           if [ "$EVENT_NAME" = "pull_request" ]; then
             range="$BASE_SHA..$HEAD_SHA"
@@ -73,8 +82,12 @@ jobs:
             else
               echo "::notice::.imprint/commit.conf not found at the base commit; using this pull request's own copy (its first introduction)"
             fi
-            go run ./tools/imprint-dev commit-check --root . --range "$range" --conf "$conf_path" \
-              --pr-author "$PR_AUTHOR" --pr-body-file "$RUNNER_TEMP/pr-body.txt" \
+            same_repo_flag=""
+            if [ "$SAME_REPO" = "true" ]; then
+              same_repo_flag="--same-repo"
+            fi
+            go run ./tools/imprint-dev commit-check --root . --range "$range" --conf "$conf_path" $same_repo_flag \
+              --pr-author "$PR_AUTHOR" --pr-title "$PR_TITLE" --pr-body-file "$RUNNER_TEMP/pr-body.txt" \
               --sarif "$RUNNER_TEMP/commit-check.sarif"
           else
             # A push's "before" is all-zero (or absent) only when the ref did

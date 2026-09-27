@@ -3,7 +3,8 @@
 //	imprint-dev gen   [--root dir]
 //	imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
 //	imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
-//	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-body-file file] [--sarif file]
+//	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
+//	    [--pr-body-file file] [--same-repo] [--sarif file]
 //
 // gen writes the SessionStart and SubagentStart hook payloads from their one
 // canonical source, hooks/kernkarte.md. check runs the invariants a program can
@@ -46,7 +47,8 @@ const usageText = `usage:
   imprint-dev gen   [--root dir]
   imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
   imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
-  imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-body-file file] [--sarif file]
+  imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
+      [--pr-body-file file] [--same-repo] [--sarif file]
 
 gen      writes hooks/session-start.json and hooks/subagent-start.json from hooks/kernkarte.md
 check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run;

@@ -61,6 +61,20 @@ func ccCommitAs(t *testing.T, dir, authorName, authorEmail, commName, commEmail,
 	return strings.TrimSpace(ccRunGit(t, dir, "rev-parse", "HEAD"))
 }
 
+// checkCommitCheckRangeSameRepo is checkCommitCheckRange with sameRepo true
+// and no PR title, for the N1-N3 same-repo cases.
+func checkCommitCheckRangeSameRepo(root, confRelPath, rangeSpec, prAuthor, prBodyFile, prTitle string) ([]ccFinding, error) {
+	return checkCommitCheckRange(root, confRelPath, rangeSpec, prAuthor, prBodyFile, prTitle, true)
+}
+
+// checkCommitCheckRangeTitle is checkCommitCheckRange with a PR title set
+// and sameRepo true (item N7 is about the title, not about same-repo trust;
+// true here just keeps the commits themselves out of the way of the
+// assertion).
+func checkCommitCheckRangeTitle(root, confRelPath, rangeSpec, prAuthor, prBodyFile, prTitle string) ([]ccFinding, error) {
+	return checkCommitCheckRange(root, confRelPath, rangeSpec, prAuthor, prBodyFile, prTitle, true)
+}
+
 // TestCommitCheckRangeIntegration covers the task's required cases end to
 // end through a real git repository.
 func TestCommitCheckRangeIntegration(t *testing.T) {
@@ -68,7 +82,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Allowed commit")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -81,7 +95,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Test Author", ccTestAuthorEmail, "Foreign author")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -95,7 +109,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail,
 			"Feature\n\nClaude-Session: https://claude.ai/code/session_xyz\n")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +125,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		// some other address is still a finding.
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail,
 			"Feature\n\nSigned-off-by: Someone Else <"+ccTestSomeoneEmail+">\n")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,7 +139,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail,
 			"Feature\n\nSigned-off-by: Test Author <"+ccTestAuthorEmail+">\n")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +152,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "GitHub", ccTestWebFlowEmail, "Squash merge")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -152,7 +166,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "dependabot[bot]", ccTestBotEmail, "dependabot[bot]", ccTestBotEmail, "chore(deps): bump x")
 
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -160,7 +174,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 			t.Fatalf("without --pr-author, want %s, got %v", ccRuleAuthor, findings)
 		}
 
-		findings, err = checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "dependabot[bot]", "")
+		findings, err = checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "dependabot[bot]", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -173,7 +187,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "dependabot[bot]", ccTestBotEmail, "GitHub", ccTestWebFlowEmail, "chore(deps): bump x (#1)")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -186,7 +200,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Someone Else", ccTestSomeoneEmail, "An old, already-accepted commit")
 		head := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "The new commit")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, head+"^!", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, head+"^!", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -198,7 +212,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 	t.Run("empty range is not an error", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		head := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, head+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, head+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,7 +224,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 	t.Run("an unresolvable range is an error", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
-		if _, err := checkCommitCheckRange(dir, defaultCommitConfPath, "no-such-ref..HEAD", "", ""); err == nil {
+		if _, err := checkCommitCheckRange(dir, defaultCommitConfPath, "no-such-ref..HEAD", "", "", "", false); err == nil {
 			t.Fatal("want an error for an unresolvable range")
 		}
 	})
@@ -223,7 +237,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		if err := os.WriteFile(body, []byte("Text.\n\nContact "+ccTestSomeoneEmail+".\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, body)
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, body, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -238,7 +252,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		// Anyone forking the repository can set these exact values in their
 		// own clone; nothing about them proves who opened the pull request.
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Spoofed commit")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "evil", "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "evil", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -251,12 +265,143 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		dir := ccNewTestRepo(t)
 		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "The owner's own commit")
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, "")
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(findings) != 0 {
 			t.Fatalf("findings %v, want none", findings)
+		}
+	})
+
+	t.Run("N1: a real dependabot pull request (bot author, web-flow committer, same-repo) passes", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		// Measured against cli/cli #14487 and actions/checkout #2578 (gh
+		// api .../pulls/N/commits): a real, still-open Dependabot pull
+		// request's own commits already carry the web-flow identity as
+		// committer, not dependabot[bot] itself.
+		ccCommitAs(t, dir, "dependabot[bot]", ccTestBotEmail, "GitHub", ccTestWebFlowEmail, "chore(deps): bump x")
+		findings, err := checkCommitCheckRangeSameRepo(dir, defaultCommitConfPath, base+"..HEAD", "dependabot[bot]", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings %v, want none", findings)
+		}
+	})
+
+	t.Run("N2: a web-flow committer on the owner's own, same-repo pull request passes", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		// A web-UI edit, an "Update branch" merge, or an accepted Copilot
+		// suggestion on the owner's own pull request: author is the owner,
+		// committer is web-flow, before any merge.
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "GitHub", ccTestWebFlowEmail, "Edited through the web UI")
+		findings, err := checkCommitCheckRangeSameRepo(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings %v, want none", findings)
+		}
+	})
+
+	t.Run("N3: the owner's own fix commit on a dependabot pull request passes", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "dependabot[bot]", ccTestBotEmail, "GitHub", ccTestWebFlowEmail, "chore(deps): bump x")
+		// The owner pushes straight onto Dependabot's own, same-repo
+		// branch; --pr-author still names the pull request's own opener.
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Fix the lockfile too")
+		findings, err := checkCommitCheckRangeSameRepo(dir, defaultCommitConfPath, base+"..HEAD", "dependabot[bot]", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings %v, want none", findings)
+		}
+	})
+
+	t.Run("a fork pull request still cannot pass by spoofing the owner's identity, even after N1-N3", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Spoofed commit")
+		// Not same-repo: same-repo trust is exactly the fix N1-N3 asked
+		// for, so this has to keep failing without it.
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "evil", "", "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ccHasRule(findings, ccRuleAuthor) || !ccHasRule(findings, ccRuleCommitter) {
+			t.Fatalf("findings %v, want both %s and %s", findings, ccRuleAuthor, ccRuleCommitter)
+		}
+	})
+
+	t.Run("a same-repo commit from an unrecognized identity is still refused", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Someone Else", ccTestSomeoneEmail, "Not in .imprint/commit.conf at all")
+		findings, err := checkCommitCheckRangeSameRepo(dir, defaultCommitConfPath, base+"..HEAD", "someone-else", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ccHasRule(findings, ccRuleAuthor) || !ccHasRule(findings, ccRuleCommitter) {
+			t.Fatalf("findings %v, want both %s and %s", findings, ccRuleAuthor, ccRuleCommitter)
+		}
+	})
+
+	t.Run("N7: an AI marker in the PR title alone forces the Assisted-by rule on the body", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Clean commit")
+		body := filepath.Join(t.TempDir(), "body.txt")
+		if err := os.WriteFile(body, []byte("Just a plain body.\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		findings, err := checkCommitCheckRangeTitle(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, body,
+			"Generated with a tool: fix the thing")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ccHasRule(findings, ccRuleTrailer) {
+			t.Fatalf("findings %v, want %s (the title alone names an AI feature)", findings, ccRuleTrailer)
+		}
+	})
+
+	t.Run("N7: the title's own Assisted-by, last after title+blank+body, satisfies the rule", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Clean commit")
+		body := filepath.Join(t.TempDir(), "body.txt")
+		if err := os.WriteFile(body, []byte("Some detail.\n\nAssisted-by: some tool\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		findings, err := checkCommitCheckRangeTitle(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, body,
+			"Fix the thing")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings %v, want none", findings)
+		}
+	})
+
+	t.Run("N7: an address in the PR title alone is a finding", func(t *testing.T) {
+		dir := ccNewTestRepo(t)
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Clean commit")
+		body := filepath.Join(t.TempDir(), "body.txt")
+		if err := os.WriteFile(body, []byte("Plain body.\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		findings, err := checkCommitCheckRangeTitle(dir, defaultCommitConfPath, base+"..HEAD", ccTestOwnerLogin, body,
+			"Fix the thing, contact "+ccTestSomeoneEmail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ccHasRule(findings, ccRulePRAddress) {
+			t.Fatalf("findings %v, want %s", findings, ccRulePRAddress)
 		}
 	})
 
@@ -275,7 +420,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		if err := os.WriteFile(confFile, []byte(altConf), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		findings, err := checkCommitCheckRange(dir, confFile, base+"..HEAD", "", "")
+		findings, err := checkCommitCheckRange(dir, confFile, base+"..HEAD", "", "", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -294,7 +439,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git clone --depth 1: %v\n%s", err, out)
 		}
-		if _, err := checkCommitCheckRange(shallow, defaultCommitConfPath, "HEAD^!", "", ""); err == nil {
+		if _, err := checkCommitCheckRange(shallow, defaultCommitConfPath, "HEAD^!", "", "", "", false); err == nil {
 			t.Fatal("want an error refusing to run against a shallow clone")
 		} else if !strings.Contains(err.Error(), "shallow") {
 			t.Fatalf("error %q does not mention the shallow clone", err)
@@ -309,7 +454,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 		if err := os.WriteFile(body, []byte("Bumps x.\n\nSee "+ccTestMaintainerEmail+" for details.\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "dependabot[bot]", body)
+		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "dependabot[bot]", body, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}

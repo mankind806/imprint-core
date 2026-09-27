@@ -2,7 +2,8 @@
 // N96 for a range of new commits and, on a pull-request event, for the
 // pull-request text that becomes the squash-merge commit message.
 //
-//	imprint-dev commit-check --root . --range base..head [--pr-author login] [--pr-body-file file] [--sarif file]
+//	imprint-dev commit-check --root . --range base..head [--pr-author login] [--pr-title text]
+//	    [--pr-body-file file] [--same-repo] [--sarif file]
 //
 // Rules (see CONTRIBUTING.md, "AI assistance and commit messages"):
 //
@@ -132,15 +133,22 @@ func loadCommitConf(path string) (ccConf, error) {
 }
 
 // identityStatus reports whether name/email matches one of ids directly
-// (matched), and, when it does, whether it is trusted for prAuthor
-// (loginOK): always true on a push (prAuthor == ""), and, on a
-// pull_request event, only when the matched entry's own Login is exactly
-// prAuthor. See ccIdentity.Login for why a name/email match alone is never
-// enough on a pull_request event.
-func identityStatus(ids []ccIdentity, name, email, prAuthor string) (matched, loginOK bool) {
+// (matched), and, when it does, whether it is trusted here (loginOK).
+// loginOK is unconditional on a push (prAuthor == "") and on a same-repo
+// pull request (sameRepo == true): a push already needs write access, and a
+// pull request whose head branch lives in this repository, not a fork
+// (github.event.pull_request.head.repo.full_name == github.repository),
+// can only carry commits from someone who already has write access here too
+// — Dependabot's own branches, the owner's own branches, or a commit the
+// owner added straight onto someone else's such branch. Only a fork pull
+// request, where anyone can set their own git config to anything on their
+// own commits, falls back to checking the matched entry's own Login against
+// prAuthor. See ccIdentity.Login for more on why a name/email match alone is
+// never enough there.
+func identityStatus(ids []ccIdentity, name, email, prAuthor string, sameRepo bool) (matched, loginOK bool) {
 	for _, id := range ids {
 		if id.Name == name && id.Email == email {
-			if prAuthor == "" {
+			if prAuthor == "" || sameRepo {
 				return true, true
 			}
 			return true, id.Login != "" && id.Login == prAuthor
@@ -149,12 +157,12 @@ func identityStatus(ids []ccIdentity, name, email, prAuthor string) (matched, lo
 	return false, false
 }
 
-func (c ccConf) authorIdentityStatus(name, email, prAuthor string) (matched, loginOK bool) {
-	return identityStatus(c.Authors, name, email, prAuthor)
+func (c ccConf) authorIdentityStatus(name, email, prAuthor string, sameRepo bool) (matched, loginOK bool) {
+	return identityStatus(c.Authors, name, email, prAuthor, sameRepo)
 }
 
-func (c ccConf) committerIdentityStatus(name, email, prAuthor string) (matched, loginOK bool) {
-	return identityStatus(c.Committers, name, email, prAuthor)
+func (c ccConf) committerIdentityStatus(name, email, prAuthor string, sameRepo bool) (matched, loginOK bool) {
+	return identityStatus(c.Committers, name, email, prAuthor, sameRepo)
 }
 
 // configuredEmails collects every address .imprint/commit.conf itself
@@ -280,9 +288,18 @@ var ccAddressRE = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]
 
 var ccAssistedByMentionRE = regexp.MustCompile(`(?im)^[ \t]*assisted-by[ \t]*:`)
 var ccAssistedByLineRE = regexp.MustCompile(`(?i)^[ \t]*assisted-by[ \t]*:[ \t]*(.*)$`)
+
+// ccRobotLineRE matches the robot emoji's own code point regardless of a
+// following variation selector (U+FE0F, forcing emoji presentation) or
+// anything else on the line: the substring is there either way.
 var ccRobotLineRE = regexp.MustCompile(`\x{1F916}`)
-var ccGeneratedWithRE = regexp.MustCompile(`(?i)generated with`)
-var ccCoAuthoredAIRE = regexp.MustCompile(`(?im)^[ \t]*co-authored-by[ \t]*:.*\b(claude|copilot)\b`)
+var ccGeneratedWithRE = regexp.MustCompile(`(?i)generated (with|by)`)
+
+// ccCoAuthoredAIRE names every AI tool or lab CONTRIBUTING.md's own examples
+// and this repository's own history have used in a Co-Authored-By trailer;
+// a human co-author's own name never matches, so a genuine review credit
+// keeps needing no Assisted-by line.
+var ccCoAuthoredAIRE = regexp.MustCompile(`(?im)^[ \t]*co-authored-by[ \t]*:.*\b(claude|copilot|cursor|gemini|codex|chatgpt|openai)\b`)
 
 // ccZeroWidthRE matches characters with no visible width that would
 // otherwise split up "claude-session" or a session URL for a plain string
@@ -388,15 +405,17 @@ func checkCommitMessage(msg, where string, sessionRule, urlRule, addressRule str
 }
 
 // checkOneCommit runs every commit-scoped rule against c and returns its
-// findings.
-func checkOneCommit(conf ccConf, c ccCommit, prAuthor string) []ccFinding {
+// findings. sameRepo is only ever true on a pull_request event, and only
+// when the pull request's head branch lives in this repository rather than
+// a fork; see identityStatus.
+func checkOneCommit(conf ccConf, c ccCommit, prAuthor string, sameRepo bool) []ccFinding {
 	var out []ccFinding
 	short := c.Hash
 	if len(short) > 10 {
 		short = short[:10]
 	}
 
-	authorMatched, authorLoginOK := conf.authorIdentityStatus(c.AuthorName, c.AuthorEmail, prAuthor)
+	authorMatched, authorLoginOK := conf.authorIdentityStatus(c.AuthorName, c.AuthorEmail, prAuthor, sameRepo)
 	authorOK := authorMatched && authorLoginOK
 	bot, isBot := conf.findBotAuthor(c.AuthorName, c.AuthorEmail)
 	viaBot := false
@@ -416,7 +435,7 @@ func checkOneCommit(conf ccConf, c ccCommit, prAuthor string) []ccFinding {
 		out = append(out, ccFinding{short, ccRuleAuthor, msg})
 	}
 
-	committerMatched, committerLoginOK := conf.committerIdentityStatus(c.CommitName, c.CommitEmail, prAuthor)
+	committerMatched, committerLoginOK := conf.committerIdentityStatus(c.CommitName, c.CommitEmail, prAuthor, sameRepo)
 	committerOK := committerMatched && committerLoginOK
 	if !committerOK && prAuthor != "" {
 		if b, ok := conf.findBotAuthor(c.CommitName, c.CommitEmail); ok && prAuthor == b.PRAuthor {
@@ -449,14 +468,14 @@ func checkOneCommit(conf ccConf, c ccCommit, prAuthor string) []ccFinding {
 // body is generated by the bot and not authored by a repository
 // contributor at all, and may embed a third party's changelog we have no
 // way to edit).
-func checkPullRequestBody(conf ccConf, body string, isBotPR bool) []ccFinding {
+func checkPullRequestBody(conf ccConf, text string, isBotPR bool) []ccFinding {
 	if isBotPR {
 		return nil
 	}
 	var out []ccFinding
-	checkCommitMessage(body, "PR body", ccRulePRSession, ccRulePRURL, ccRulePRAddress, false, conf.configuredEmails(), &out)
-	if msg := checkAssistedByRule(body, true); msg != "" {
-		out = append(out, ccFinding{"PR body", ccRuleTrailer, msg})
+	checkCommitMessage(text, "PR text", ccRulePRSession, ccRulePRURL, ccRulePRAddress, false, conf.configuredEmails(), &out)
+	if msg := checkAssistedByRule(text, true); msg != "" {
+		out = append(out, ccFinding{"PR text", ccRuleTrailer, msg})
 	}
 	return out
 }
@@ -487,7 +506,10 @@ func checkAssistedByRule(text string, requireRobotSequence bool) string {
 		return `discloses AI assistance (a 🤖 line, "Generated with", an AI Co-Authored-By trailer, or an Assisted-by mention) ` +
 			`but its last non-blank line is not "Assisted-by: <value>"`
 	}
-	if strings.TrimSpace(m[1]) == "" {
+	// A value made only of zero-width characters (NBSP is already
+	// whitespace to TrimSpace) reads as empty to a person but is not empty
+	// as bytes, so it is stripped before judging it empty.
+	if strings.TrimSpace(ccZeroWidthRE.ReplaceAllString(m[1], "")) == "" {
 		return `has an empty "Assisted-by:" line; fill in the tool or model name, or remove the line`
 	}
 
@@ -538,8 +560,11 @@ func runCommitCheck(args []string, stdout, stderr io.Writer) int {
 	root := fs.String("root", ".", "repository root")
 	conf := fs.String("conf", defaultCommitConfPath, "path to commit.conf: relative to root, or absolute to read it from anywhere else (e.g. the base commit, not the pull request's own tree)")
 	rangeSpec := fs.String("range", "", "commit range to check, e.g. base..head or onlyCommit^! (required)")
-	prAuthor := fs.String("pr-author", "", "login of the pull-request author (bot rule only, e.g. dependabot[bot]); leave empty on a push")
+	prAuthor := fs.String("pr-author", "", "login of the pull-request author; leave empty on a push")
 	prBodyFile := fs.String("pr-body-file", "", "file holding the pull-request body to check; omitted on a push")
+	prTitle := fs.String("pr-title", "", "the pull request's own title, checked together with --pr-body-file as title+blank+body, the shape a squash merge turns them into")
+	sameRepo := fs.Bool("same-repo", false, "the pull request's head branch lives in this repository, not a fork "+
+		"(github.event.pull_request.head.repo.full_name == github.repository); ignored on a push")
 	sarifPath := fs.String("sarif", "", "also write SARIF 2.1.0 to this file")
 	if done, code := parseFlags(fs, args, stderr); done {
 		return code
@@ -549,7 +574,7 @@ func runCommitCheck(args []string, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
-	findings, err := checkCommitCheckRange(*root, *conf, *rangeSpec, *prAuthor, *prBodyFile)
+	findings, err := checkCommitCheckRange(*root, *conf, *rangeSpec, *prAuthor, *prBodyFile, *prTitle, *sameRepo)
 	if err != nil {
 		fmt.Fprintf(stderr, "imprint-dev commit-check: could not run: %v\n", err)
 		if *sarifPath != "" {
@@ -577,8 +602,9 @@ func runCommitCheck(args []string, stdout, stderr io.Writer) int {
 
 // checkCommitCheckRange loads the config, resolves the commit range, and
 // returns every finding across the commits plus, when prBodyFile is set, the
-// pull-request body.
-func checkCommitCheckRange(root, confRelPath, rangeSpec, prAuthor, prBodyFile string) ([]ccFinding, error) {
+// pull-request text (its title, then a blank line, then its body — the
+// shape a squash merge turns them into).
+func checkCommitCheckRange(root, confRelPath, rangeSpec, prAuthor, prBodyFile, prTitle string, sameRepo bool) ([]ccFinding, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -606,15 +632,19 @@ func checkCommitCheckRange(root, confRelPath, rangeSpec, prAuthor, prBodyFile st
 	}
 	var out []ccFinding
 	for _, c := range commits {
-		out = append(out, checkOneCommit(conf, c, prAuthor)...)
+		out = append(out, checkOneCommit(conf, c, prAuthor, sameRepo)...)
 	}
 	if prBodyFile != "" {
 		body, err := os.ReadFile(prBodyFile)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read --pr-body-file %s: %w", prBodyFile, err)
 		}
+		text := string(body)
+		if prTitle != "" {
+			text = prTitle + "\n\n" + text
+		}
 		_, isBotPR := findBotAuthorByPRAuthor(conf, prAuthor)
-		out = append(out, checkPullRequestBody(conf, string(body), isBotPR)...)
+		out = append(out, checkPullRequestBody(conf, text, isBotPR)...)
 	}
 	return out, nil
 }

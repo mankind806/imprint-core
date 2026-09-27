@@ -89,6 +89,7 @@ func TestCommitCheckIdentity(t *testing.T) {
 		authorName, authorEmail    string
 		commName, commEmail        string
 		prAuthor                   string
+		sameRepo                   bool
 		wantAuthorOK, wantCommitOK bool
 	}{
 		{
@@ -157,13 +158,64 @@ func TestCommitCheckIdentity(t *testing.T) {
 			commName: "Test Author", commEmail: author,
 			prAuthor: ccTestOwnerLogin, wantAuthorOK: true, wantCommitOK: true,
 		},
+		{
+			// N1: a real Dependabot pull request's own commits, measured
+			// against cli/cli #14487 and actions/checkout #2578 (gh api
+			// .../pulls/N/commits): author dependabot[bot], committer
+			// already the web-flow identity, even before any merge.
+			// Dependabot's branches live in this repository, not a fork.
+			name:       "a real dependabot pull request: bot author, web-flow committer already, same-repo",
+			authorName: "dependabot[bot]", authorEmail: bot,
+			commName: "GitHub", commEmail: webFlow,
+			prAuthor: "dependabot[bot]", sameRepo: true, wantAuthorOK: true, wantCommitOK: true,
+		},
+		{
+			// N2: a web-UI edit, an "Update branch" merge, or an accepted
+			// Copilot suggestion on the owner's own pull request all commit
+			// as the owner with the web-flow identity as committer. The
+			// register allows web-flow at a merge; this is that same
+			// identity, same-repo, before the pull request has merged.
+			name:       "a web-flow committer on the owner's own, same-repo pull request",
+			authorName: "Test Author", authorEmail: author,
+			commName: "GitHub", commEmail: webFlow,
+			prAuthor: ccTestOwnerLogin, sameRepo: true, wantAuthorOK: true, wantCommitOK: true,
+		},
+		{
+			// N3: the owner pushes a fix commit straight onto someone
+			// else's (here Dependabot's) still-open, same-repo pull
+			// request; --pr-author still names the pull request's own
+			// opener, not this commit's author.
+			name:       "the owner's own fix commit on a dependabot pull request",
+			authorName: "Test Author", authorEmail: author,
+			commName: "Test Author", commEmail: author,
+			prAuthor: "dependabot[bot]", sameRepo: true, wantAuthorOK: true, wantCommitOK: true,
+		},
+		{
+			// The same spoofed-identity attempt as above, but now flagged
+			// as coming from a fork (sameRepo stays false): a fork pull
+			// request still needs the login binding regardless.
+			name:       "a fork pull request still cannot pass by spoofing the owner's identity",
+			authorName: "Test Author", authorEmail: author,
+			commName: "Test Author", commEmail: author,
+			prAuthor: "evil", sameRepo: false, wantAuthorOK: false, wantCommitOK: false,
+		},
+		{
+			// Same-repo trust covers only identities already in
+			// .imprint/commit.conf; a genuinely unrecognized identity is
+			// still refused even from a same-repo branch (a collaborator
+			// nobody has added, say).
+			name:       "a same-repo commit from an unrecognized identity is still refused",
+			authorName: "Someone Else", authorEmail: someone,
+			commName: "Someone Else", commEmail: someone,
+			prAuthor: "someone-else", sameRepo: true, wantAuthorOK: false, wantCommitOK: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := ccCommit{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				AuthorName: tc.authorName, AuthorEmail: tc.authorEmail,
 				CommitName: tc.commName, CommitEmail: tc.commEmail, Message: "Text\n"}
-			found := checkOneCommit(conf, c, tc.prAuthor)
+			found := checkOneCommit(conf, c, tc.prAuthor, tc.sameRepo)
 			if got := ccHasRule(found, ccRuleAuthor); got == tc.wantAuthorOK {
 				t.Errorf("author finding %v, want author-OK=%v", got, tc.wantAuthorOK)
 			}
@@ -177,7 +229,7 @@ func TestCommitCheckIdentity(t *testing.T) {
 		c := ccCommit{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			AuthorName: "Test Author", AuthorEmail: author,
 			CommitName: "Test Author", CommitEmail: author, Message: "Text\n"}
-		found := checkOneCommit(conf, c, "evil")
+		found := checkOneCommit(conf, c, "evil", false)
 		f, ok := ccFindRule(found, ccRuleAuthor)
 		if !ok {
 			t.Fatalf("findings %v, want %s", found, ccRuleAuthor)
@@ -215,7 +267,7 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			found := checkOneCommit(conf, allowedCommit(tc.message), "")
+			found := checkOneCommit(conf, allowedCommit(tc.message), "", false)
 			if !ccHasRule(found, tc.rule) {
 				t.Errorf("want rule %s, got %v", tc.rule, found)
 			}
@@ -223,7 +275,7 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 	}
 
 	t.Run("a clean message has no finding at all", func(t *testing.T) {
-		found := checkOneCommit(conf, allowedCommit("A plain, unassisted commit message.\n"), "")
+		found := checkOneCommit(conf, allowedCommit("A plain, unassisted commit message.\n"), "", false)
 		if len(found) != 0 {
 			t.Errorf("findings %v, want none", found)
 		}
@@ -234,14 +286,14 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 			AuthorName: "dependabot[bot]", AuthorEmail: ccTestBotEmail,
 			CommitName: "GitHub", CommitEmail: ccTestWebFlowEmail,
 			Message: "Bump x from 1 to 2.\n\nSigned-off-by: dependabot[bot] <" + addr("support", "example.invalid") + ">\n"}
-		found := checkOneCommit(conf, bot, "")
+		found := checkOneCommit(conf, bot, "", false)
 		if ccHasRule(found, ccRuleAddress) {
 			t.Errorf("bot commit's own address should be exempt, got %v", found)
 		}
 	})
 
 	t.Run("a human commit message is never exempt from the address rule for an address nobody declared", func(t *testing.T) {
-		found := checkOneCommit(conf, allowedCommit("Text.\n\nContact "+ccTestSomeoneEmail+".\n"), "")
+		found := checkOneCommit(conf, allowedCommit("Text.\n\nContact "+ccTestSomeoneEmail+".\n"), "", false)
 		if !ccHasRule(found, ccRuleAddress) {
 			t.Errorf("want %s, got %v", ccRuleAddress, found)
 		}
@@ -251,7 +303,7 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 		// Item 5: the owner's own noreply address, quoted in their own
 		// Signed-off-by line, adds nothing .imprint/commit.conf and every
 		// commit's own metadata do not already carry.
-		found := checkOneCommit(conf, allowedCommit("Text.\n\nSigned-off-by: Test Author <"+author+">\n"), "")
+		found := checkOneCommit(conf, allowedCommit("Text.\n\nSigned-off-by: Test Author <"+author+">\n"), "", false)
 		if ccHasRule(found, ccRuleAddress) {
 			t.Errorf("a configured address should be exempt, got %v", found)
 		}
@@ -259,7 +311,7 @@ func TestCommitCheckSessionAndAddressPatterns(t *testing.T) {
 
 	t.Run("a *different* address alongside a configured one is still a finding", func(t *testing.T) {
 		msg := "Text.\n\nSigned-off-by: Test Author <" + author + ">\nCc: " + ccTestSomeoneEmail + "\n"
-		found := checkOneCommit(conf, allowedCommit(msg), "")
+		found := checkOneCommit(conf, allowedCommit(msg), "", false)
 		if !ccHasRule(found, ccRuleAddress) {
 			t.Errorf("want %s, got %v", ccRuleAddress, found)
 		}
@@ -279,14 +331,14 @@ func TestCommitCheckAssistedBy(t *testing.T) {
 	}
 
 	t.Run("pure handiwork, no AI marker at all, is not a finding", func(t *testing.T) {
-		found := checkOneCommit(conf, commitWith("Fix the off-by-one in the range check.\n"), "")
+		found := checkOneCommit(conf, commitWith("Fix the off-by-one in the range check.\n"), "", false)
 		if ccHasRule(found, ccRuleAssistedBy) {
 			t.Errorf("plain handiwork should need no Assisted-by line, got %v", found)
 		}
 	})
 
 	t.Run("a well-formed Assisted-by trailer is not a finding", func(t *testing.T) {
-		found := checkOneCommit(conf, commitWith("Fix the check.\n\nAssisted-by: some tool\n"), "")
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nAssisted-by: some tool\n"), "", false)
 		if ccHasRule(found, ccRuleAssistedBy) {
 			t.Errorf("findings %v, want none", found)
 		}
@@ -294,7 +346,7 @@ func TestCommitCheckAssistedBy(t *testing.T) {
 
 	t.Run("Co-Authored-By naming Claude, with no Assisted-by line, is a finding", func(t *testing.T) {
 		msg := "Fix the check.\n\nCo-Authored-By: Claude <" + addr("noreply", "example.invalid") + ">\n"
-		found := checkOneCommit(conf, commitWith(msg), "")
+		found := checkOneCommit(conf, commitWith(msg), "", false)
 		if !ccHasRule(found, ccRuleAssistedBy) {
 			t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
 		}
@@ -302,7 +354,7 @@ func TestCommitCheckAssistedBy(t *testing.T) {
 
 	t.Run("Co-Authored-By naming Copilot, with no Assisted-by line, is a finding", func(t *testing.T) {
 		msg := "Fix the check.\n\nCo-Authored-By: Copilot <" + addr("noreply", "example.invalid") + ">\n"
-		found := checkOneCommit(conf, commitWith(msg), "")
+		found := checkOneCommit(conf, commitWith(msg), "", false)
 		if !ccHasRule(found, ccRuleAssistedBy) {
 			t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
 		}
@@ -310,21 +362,21 @@ func TestCommitCheckAssistedBy(t *testing.T) {
 
 	t.Run("Co-Authored-By naming a human, not an AI tool, needs no Assisted-by line", func(t *testing.T) {
 		msg := "Fix the check.\n\nCo-Authored-By: Pat Reviewer <" + addr("pat", "example.invalid") + ">\n"
-		found := checkOneCommit(conf, commitWith(msg), "")
+		found := checkOneCommit(conf, commitWith(msg), "", false)
 		if ccHasRule(found, ccRuleAssistedBy) {
 			t.Errorf("findings %v, want none (no AI tool named)", found)
 		}
 	})
 
 	t.Run(`"Generated with", with no Assisted-by line, is a finding`, func(t *testing.T) {
-		found := checkOneCommit(conf, commitWith("Fix the check.\n\nGenerated with a tool.\n"), "")
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nGenerated with a tool.\n"), "", false)
 		if !ccHasRule(found, ccRuleAssistedBy) {
 			t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
 		}
 	})
 
 	t.Run("an empty Assisted-by value is a finding, worded as fill-in-or-remove", func(t *testing.T) {
-		found := checkOneCommit(conf, commitWith("Fix the check.\n\nAssisted-by:\n"), "")
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nAssisted-by:\n"), "", false)
 		f, ok := ccFindRule(found, ccRuleAssistedBy)
 		if !ok {
 			t.Fatalf("findings %v, want %s", found, ccRuleAssistedBy)
@@ -339,11 +391,51 @@ func TestCommitCheckAssistedBy(t *testing.T) {
 			AuthorName: "dependabot[bot]", AuthorEmail: ccTestBotEmail,
 			CommitName: "GitHub", CommitEmail: ccTestWebFlowEmail,
 			Message: "Bump x.\n\nGenerated with dependabot-core.\n"}
-		found := checkOneCommit(conf, bot, "")
+		found := checkOneCommit(conf, bot, "", false)
 		if ccHasRule(found, ccRuleAssistedBy) {
 			t.Errorf("findings %v, want none (bot commit is exempt)", found)
 		}
 	})
+
+	// N6: a value made only of zero-width characters (and/or NBSP, already
+	// whitespace) reads as empty to a person but is not empty as bytes.
+	t.Run("a zero-width-only Assisted-by value is a finding, worded as fill-in-or-remove", func(t *testing.T) {
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nAssisted-by: ​ ​\n"), "", false)
+		f, ok := ccFindRule(found, ccRuleAssistedBy)
+		if !ok {
+			t.Fatalf("findings %v, want %s", found, ccRuleAssistedBy)
+		}
+		if !strings.Contains(f.Message, "fill in") || !strings.Contains(f.Message, "remove") {
+			t.Errorf("message %q does not read as fill-in-or-remove", f.Message)
+		}
+	})
+
+	// N6: the robot emoji followed by a variation selector (U+FE0F, forcing
+	// emoji presentation — common when copied out of some renderers) is
+	// still the same 🤖 line.
+	t.Run("a 🤖 line with a trailing variation selector still counts as the marker", func(t *testing.T) {
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\n\U0001F916️ Generated with a tool\n\nAssisted-by: some tool\n"), "", false)
+		if ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("findings %v, want none (well-formed trailer after the marker)", found)
+		}
+	})
+
+	t.Run(`"Generated by", with no Assisted-by line, is a finding`, func(t *testing.T) {
+		found := checkOneCommit(conf, commitWith("Fix the check.\n\nGenerated by a tool.\n"), "", false)
+		if !ccHasRule(found, ccRuleAssistedBy) {
+			t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
+		}
+	})
+
+	for _, tool := range []string{"Cursor", "Gemini", "Codex", "ChatGPT", "OpenAI"} {
+		t.Run("Co-Authored-By naming "+tool+", with no Assisted-by line, is a finding", func(t *testing.T) {
+			msg := "Fix the check.\n\nCo-Authored-By: " + tool + " <" + addr("noreply", "example.invalid") + ">\n"
+			found := checkOneCommit(conf, commitWith(msg), "", false)
+			if !ccHasRule(found, ccRuleAssistedBy) {
+				t.Errorf("want %s, got %v", ccRuleAssistedBy, found)
+			}
+		})
+	}
 }
 
 func TestCommitCheckPullRequestBody(t *testing.T) {
