@@ -71,22 +71,18 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             range="$BASE_SHA..$HEAD_SHA"
             printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.txt"
-            # .imprint/commit.conf is read from the base commit, not the pull
-            # request's own tree: otherwise a pull request could grant
-            # itself an entry by editing the very file it is checked
-            # against. A repository that has never had the file falls back
-            # to the tree's own copy (its first introduction), noted below.
-            conf_path=".imprint/commit.conf"
-            if git show "$BASE_SHA:.imprint/commit.conf" >"$RUNNER_TEMP/commit-base.conf" 2>/dev/null; then
-              conf_path="$RUNNER_TEMP/commit-base.conf"
-            else
-              echo "::notice::.imprint/commit.conf not found at the base commit; using this pull request's own copy (its first introduction)"
-            fi
             same_repo_flag=""
             if [ "$SAME_REPO" = "true" ]; then
               same_repo_flag="--same-repo"
             fi
-            go run ./tools/imprint-dev commit-check --root . --range "$range" --conf "$conf_path" $same_repo_flag \
+            # --conf-rev reads .imprint/commit.conf from the base commit's
+            # own tree, not the pull request's own tree: otherwise a pull
+            # request could grant itself an entry by editing the very file
+            # it is checked against. It fails clearly, rather than falling
+            # back to the pull request's own copy, when the base commit
+            # does not have the file at all (N4): this repository has had
+            # the file on main since #18, so that is no longer expected.
+            go run ./tools/imprint-dev commit-check --root . --range "$range" --conf-rev "$BASE_SHA" $same_repo_flag \
               --pr-author "$PR_AUTHOR" --pr-title "$PR_TITLE" --pr-body-file "$RUNNER_TEMP/pr-body.txt" \
               --sarif "$RUNNER_TEMP/commit-check.sarif"
           else
