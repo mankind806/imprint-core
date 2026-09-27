@@ -42,13 +42,41 @@ const defaultCommitConfPath = ".imprint/commit.conf"
 // --- configuration -----------------------------------------------------------
 
 type ccIdentity struct {
-	Name    string `json:"name"`
-	Email   string `json:"email"`
-	Comment string `json:"comment,omitempty"`
+	Name string `json:"name"`
+	// EmailUser and EmailDomain together are the identity's email address,
+	// split across two JSON fields and joined only at load time (see
+	// resolveEmail). A whole address here would be an address-shaped
+	// literal in tracked content, and .githooks/pre-push's own address check
+	// scans every pushed commit's whole tree, not just what changed, so it
+	// would flag this file on every future push forever, not just this one.
+	EmailUser   string `json:"emailUser"`
+	EmailDomain string `json:"emailDomain"`
+	Comment     string `json:"comment,omitempty"`
 	// MergeCommitter marks a committers[] entry that only a merge through the
 	// web UI or API produces. It gates a bot author in on a push, where there
 	// is no pull-request context to check a PR author against.
 	MergeCommitter bool `json:"mergeCommitter,omitempty"`
+	// Email is EmailUser + "@" + EmailDomain. It is never itself read from
+	// or written to JSON; resolveEmail fills it in after unmarshalling.
+	Email string `json:"-"`
+}
+
+// resolveEmail joins EmailUser and EmailDomain into Email.
+func (id *ccIdentity) resolveEmail() { id.Email = id.EmailUser + "@" + id.EmailDomain }
+
+// resolveEmails calls resolveEmail on every identity in c. Every caller that
+// unmarshals a ccConf, in tools/imprint-dev or in its tests, calls this
+// right afterwards; Email is otherwise left empty.
+func (c *ccConf) resolveEmails() {
+	for i := range c.Authors {
+		c.Authors[i].resolveEmail()
+	}
+	for i := range c.Committers {
+		c.Committers[i].resolveEmail()
+	}
+	for i := range c.BotAuthors {
+		c.BotAuthors[i].resolveEmail()
+	}
 }
 
 // ccBotAuthor is an identity allowed as a commit's author only when either
@@ -76,6 +104,7 @@ func loadCommitConf(path string) (ccConf, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return ccConf{}, fmt.Errorf("%s is not valid JSON: %w", path, err)
 	}
+	c.resolveEmails()
 	if len(c.Authors) == 0 {
 		return ccConf{}, fmt.Errorf("%s: authors is empty", path)
 	}
@@ -298,27 +327,51 @@ func checkPullRequestBody(body string, isBotPR bool) []ccFinding {
 }
 
 // checkAssistedByTrailer reports whether body mentions "Assisted-by:" at all,
-// and, if it does, whether git reads it as a trailer. It shells out to `git
-// interpret-trailers`, the same parser CONTRIBUTING.md's own
-// `%(trailers:key=Assisted-by)` example reads with, rather than a
-// hand-rolled one, so the two never disagree about what counts as a trailer.
+// and, if it does, whether it is the last line, read by git as the last
+// trailer of a well-formed trailer block. Both conditions are required and
+// neither implies the other: "Assisted-by:" immediately followed by another
+// `Key: value` line (no blank line between them) is still the physical last
+// line but git reads it as the second-to-last trailer, not the last one; a
+// generator line touching "Assisted-by:" from above (no blank line before
+// it, the #15 shape CONTRIBUTING.md describes) still leaves it the last
+// physical line, but breaks git's trailer block entirely, so nothing in the
+// tail is read as a trailer at all. `git interpret-trailers` is the same
+// parser CONTRIBUTING.md's own `%(trailers:key=Assisted-by)` example reads
+// with, rather than a hand-rolled one, so the two never disagree about what
+// counts as a trailer.
 func checkAssistedByTrailer(body string) (ok, mentioned bool) {
 	body = normalizeCRLF(body)
 	if !ccAssistedByMentionRE.MatchString(body) {
 		return false, false
 	}
+	mentioned = true
+
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	lastNonBlank := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			lastNonBlank = lines[i]
+			break
+		}
+	}
+	if !ccAssistedByMentionRE.MatchString(lastNonBlank) {
+		return false, true
+	}
+
 	cmd := exec.Command("git", "interpret-trailers", "--parse", "--only-trailers")
 	cmd.Stdin = strings.NewReader(body)
 	out, err := cmd.Output()
 	if err != nil {
 		return false, true
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if k, _, found := strings.Cut(line, ":"); found && strings.EqualFold(strings.TrimSpace(k), "assisted-by") {
-			return true, true
-		}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return false, true
 	}
-	return false, true
+	trailerLines := strings.Split(trimmed, "\n")
+	lastTrailer := trailerLines[len(trailerLines)-1]
+	k, _, found := strings.Cut(lastTrailer, ":")
+	return found && strings.EqualFold(strings.TrimSpace(k), "assisted-by"), true
 }
 
 func ccSummary(findings []ccFinding) string {

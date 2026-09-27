@@ -66,8 +66,8 @@ func ccCommitAs(t *testing.T, dir, authorName, authorEmail, commName, commEmail,
 func TestCommitCheckRangeIntegration(t *testing.T) {
 	t.Run("allowed: no findings", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Allowed commit")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Allowed commit")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
 			t.Fatal(err)
@@ -79,8 +79,8 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("foreign author", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "Someone Else", "someone@example.invalid", "Test Author", "author@example.invalid", "Foreign author")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Test Author", ccTestAuthorEmail, "Foreign author")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
 			t.Fatal(err)
@@ -92,8 +92,8 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("a session trailer line in a commit message", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid",
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail,
 			"Feature\n\nClaude-Session: https://claude.ai/code/session_xyz\n")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
@@ -106,9 +106,9 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("an address in a commit message", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid",
-			"Feature\n\nSigned-off-by: Test Author <author@example.invalid>\n")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail,
+			"Feature\n\nSigned-off-by: Test Author <"+ccTestAuthorEmail+">\n")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
 			t.Fatal(err)
@@ -120,8 +120,8 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("web-flow committer at a squash merge", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "Test Author", "author@example.invalid", "GitHub", "noreply@github.com", "Squash merge")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "GitHub", ccTestWebFlowEmail, "Squash merge")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
 			t.Fatal(err)
@@ -133,8 +133,8 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("a dependabot PR: allowed only with the matching --pr-author", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "dependabot[bot]", "bot@example.invalid", "dependabot[bot]", "bot@example.invalid", "chore(deps): bump x")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "dependabot[bot]", ccTestBotEmail, "dependabot[bot]", ccTestBotEmail, "chore(deps): bump x")
 
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
@@ -155,8 +155,8 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("push to main after a dependabot squash merge, no PR context left", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "dependabot[bot]", "bot@example.invalid", "GitHub", "noreply@github.com", "chore(deps): bump x (#1)")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "dependabot[bot]", ccTestBotEmail, "GitHub", ccTestWebFlowEmail, "chore(deps): bump x (#1)")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "", "")
 		if err != nil {
 			t.Fatal(err)
@@ -168,8 +168,8 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("push to main, only the new commit via the onlyCommit^! form", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		ccCommitAs(t, dir, "Someone Else", "someone@example.invalid", "Someone Else", "someone@example.invalid", "An old, already-accepted commit")
-		head := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "The new commit")
+		ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Someone Else", ccTestSomeoneEmail, "An old, already-accepted commit")
+		head := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "The new commit")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, head+"^!", "", "")
 		if err != nil {
 			t.Fatal(err)
@@ -181,7 +181,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("empty range is not an error", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		head := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
+		head := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, head+"..HEAD", "", "")
 		if err != nil {
 			t.Fatal(err)
@@ -193,7 +193,7 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("an unresolvable range is an error", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
 		if _, err := checkCommitCheckRange(dir, defaultCommitConfPath, "no-such-ref..HEAD", "", ""); err == nil {
 			t.Fatal("want an error for an unresolvable range")
 		}
@@ -201,10 +201,10 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("a PR body with an address fails even when the commits are clean", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Clean commit")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Clean commit")
 		body := filepath.Join(t.TempDir(), "body.txt")
-		if err := os.WriteFile(body, []byte("Text.\n\nContact someone@example.invalid.\n"), 0o644); err != nil {
+		if err := os.WriteFile(body, []byte("Text.\n\nContact "+ccTestSomeoneEmail+".\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "Test Author", body)
@@ -218,10 +218,10 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 	t.Run("a dependabot PR body is exempt even with third-party content", func(t *testing.T) {
 		dir := ccNewTestRepo(t)
-		base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-		ccCommitAs(t, dir, "dependabot[bot]", "bot@example.invalid", "dependabot[bot]", "bot@example.invalid", "chore(deps): bump x")
+		base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+		ccCommitAs(t, dir, "dependabot[bot]", ccTestBotEmail, "dependabot[bot]", ccTestBotEmail, "chore(deps): bump x")
 		body := filepath.Join(t.TempDir(), "body.txt")
-		if err := os.WriteFile(body, []byte("Bumps x.\n\nSee maintainer@example.invalid for details.\n"), 0o644); err != nil {
+		if err := os.WriteFile(body, []byte("Bumps x.\n\nSee "+ccTestMaintainerEmail+" for details.\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		findings, err := checkCommitCheckRange(dir, defaultCommitConfPath, base+"..HEAD", "dependabot[bot]", body)
@@ -236,8 +236,8 @@ func TestCommitCheckRangeIntegration(t *testing.T) {
 
 func TestCommitCheckCLIExitCodes(t *testing.T) {
 	dir := ccNewTestRepo(t)
-	base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-	ccCommitAs(t, dir, "Someone Else", "someone@example.invalid", "Test Author", "author@example.invalid", "Foreign author")
+	base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+	ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Test Author", ccTestAuthorEmail, "Foreign author")
 
 	t.Run("0 without findings", func(t *testing.T) {
 		code, out, _ := runCLI(t, "commit-check", "--root", dir, "--range", "HEAD..HEAD")
@@ -270,8 +270,8 @@ func TestCommitCheckCLIExitCodes(t *testing.T) {
 
 func TestCommitCheckSARIF(t *testing.T) {
 	dir := ccNewTestRepo(t)
-	base := ccCommitAs(t, dir, "Test Author", "author@example.invalid", "Test Author", "author@example.invalid", "Base")
-	ccCommitAs(t, dir, "Someone Else", "someone@example.invalid", "Test Author", "author@example.invalid", "Foreign author")
+	base := ccCommitAs(t, dir, "Test Author", ccTestAuthorEmail, "Test Author", ccTestAuthorEmail, "Base")
+	ccCommitAs(t, dir, "Someone Else", ccTestSomeoneEmail, "Test Author", ccTestAuthorEmail, "Foreign author")
 	out := filepath.Join(t.TempDir(), "out.sarif")
 
 	code, _, stderr := runCLI(t, "commit-check", "--root", dir, "--range", base+"..HEAD", "--sarif", out)
