@@ -625,6 +625,33 @@ func TestUpdateWatchStaysSilentOnFailure(t *testing.T) {
 			t.Errorf("recorded %q; the refused write must leave the record alone", got)
 		}
 	})
+	t.Run("a hard link at the history's path", func(t *testing.T) {
+		// A hard link is a plain file and passes the guard; the history is
+		// rewritten through a new file and renamed, so the other name keeps
+		// its content.
+		dir := t.TempDir()
+		record(t, dir, "2.1.282\n")
+		other := filepath.Join(t.TempDir(), "other")
+		const old = "2026-01-01 2.1.200\n"
+		if err := os.WriteFile(other, []byte(old), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(other, filepath.Join(dir, historyFile)); err != nil {
+			t.Skip("no hard links here: " + err.Error())
+		}
+		if out := runUpdateWatch(t, upgrade(t), dir, startupInput); out == "" {
+			t.Fatal("the upgrade must still be announced")
+		}
+		if raw, _ := os.ReadFile(other); string(raw) != old {
+			t.Errorf("wrote %q through the hard link", raw)
+		}
+		if got := history(t, dir); len(got) != 2 || got[0] != "2.1.200" || got[1] != "2.1.283" {
+			t.Errorf("history %v, want [2.1.200 2.1.283]", got)
+		}
+		if m, _ := filepath.Glob(filepath.Join(dir, historyFile+".tmp.*")); len(m) > 0 {
+			t.Errorf("left temporary files behind: %v", m)
+		}
+	})
 	t.Run("CLAUDE_PLUGIN_DATA unset", func(t *testing.T) {
 		if out := runUpdateWatch(t, upgrade(t), "", startupInput); out != "" {
 			t.Fatalf("printed %q", out)

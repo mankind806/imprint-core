@@ -122,6 +122,30 @@ record() {
   return 1
 }
 
+# add_history LINE - rewrite the history with LINE appended, through a new
+# temporary file written with noclobber and renamed over the old name. The
+# rename replaces the name itself, so neither a link nor a hard link planted
+# there is written through. Only the session holding this version's claim gets
+# here, which serialises the writers.
+add_history() {
+  htmp="$hist.tmp.$$"
+  if (
+    set -C
+    {
+      if [ -f "$hist" ]; then
+        while IFS= read -r l || [ -n "$l" ]; do
+          printf '%s\n' "$l"
+        done <"$hist" || exit 1
+      fi
+      printf '%s\n' "$1"
+    } >"$htmp"
+  ) && mv -f "$htmp" "$hist"; then
+    return 0
+  fi
+  rm -f "$htmp"
+  return 1
+}
+
 on=1
 [ "${IMPRINT_UPDATE_WATCH:-}" = 0 ] && on=''
 
@@ -156,7 +180,7 @@ case "$day" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
   *) rmdir "$claim"; exit 0 ;;
 esac
-if ! printf '%s %s\n' "$day" "$new" >>"$hist"; then
+if ! add_history "$day $new"; then
   rmdir "$claim"
   exit 0
 fi

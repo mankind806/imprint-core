@@ -52,8 +52,8 @@ an unset or unwritable data directory or one whose path holds a control characte
 or history that is a link or not a plain file, a record that cannot be read. A version has
 to match `^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}([-+][0-9A-Za-z.-]+)?$` before it reaches a file
 name or the text; nine digits keep every number within what the shell can compare. The
-record is replaced through a temporary file written with `set -C`, so a write never follows
-a link planted at that name. The hook uses no network and exits 0 on every path. It never
+record and the history are each replaced through a temporary file written with `set -C` and
+renamed, so a write never follows a link planted at either name, nor goes through a hard link. The hook uses no network and exits 0 on every path. It never
 blocks a start, but the first answer waits for it, up to the 10-second timeout; a `claude`
 that hangs is cut off there, which is documented behaviour of the timeout and not tested
 here.
@@ -170,6 +170,9 @@ enforces this*.
   also lists weekly *What's new* pages.
 - **`claude` on the path is taken to be the running Claude Code.** Where it is missing, as it
   may be in an IDE integration that ships its own binary, the hook stays silent.
+- **Input that is two JSON objects back to back** passes the hook's shape check, which looks
+  at the first and last character and the fields, not at the whole payload. Claude Code sends
+  one object; a full JSON parser in `sh` is not attempted.
 - **A claim that outlives a failed run.** If the record cannot be moved after the history
   line is written, the claim stays and the version is not announced; the history line
   without a report shows it, and the next version is read from the old record.
