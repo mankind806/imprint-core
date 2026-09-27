@@ -1,7 +1,7 @@
 {
   "name": "imprint",
-  "description": "Working rules for running several coding agents without them ruining each other's work, and for growing a knowledge store that does not quietly rot. Ships four skills (delegation contract, measuring before asserting, session handover, and knowledge keeping), one read-only foreign-material review agent, a short core card injected at session start and at subagent start, and a hook that logs how long each subagent ran. Every rule states what enforces it, or says plainly that nothing does.",
-  "version": "0.6.0",
+  "description": "Working rules for running several coding agents without them ruining each other's work, and for growing a knowledge store that does not quietly rot. Ships four skills (delegation contract, measuring before asserting, session handover, and knowledge keeping), one read-only foreign-material review agent, a short core card injected at session start and at subagent start, a hook that logs how long each subagent ran, and a hook that watches for Claude Code updates and offers a review after an upgrade. Every rule states what enforces it, or says plainly that nothing does.",
+  "version": "0.7.0",
   "author": {
     "name": "mankind806"
   },

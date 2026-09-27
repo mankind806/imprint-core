@@ -151,7 +151,7 @@ release gate behind `--release`) to `imprint-dev`, and the hook that measures ho
 subagent ran. Released 2026-09-26, without behavioural skill evals; those are the next build
 step.
 
-**0.6.0** (2026-09-27; ships when the owner merges it):
+**0.6.0** (released 2026-09-27):
 
 - Card line: pictures first for anything a person reads (#5).
 - Table of all 12 card lines against their enforcement; check `g` reads it too (#8).
@@ -164,6 +164,16 @@ step.
   card this release ships — see [Core card and checks](#core-card-and-checks).
 
 Not included: the update watcher (PR #12).
+
+**0.7.0** (2026-09-27; ships when the owner merges it):
+
+- Update watcher: on by default, checks once at session start, and only for an upgrade;
+  set `IMPRINT_UPDATE_WATCH=0` to turn it off (#12).
+- Co-browsing exception in the delegation contract: while the person is watching a shared
+  browser session, the lead may drive the one visible tab itself (#15).
+- CONTRIBUTING.md and the pull request template now match the repository's
+  `squash_merge_commit_message: PR_BODY` setting — the pull request text becomes the squash
+  merge commit message (#15).
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had

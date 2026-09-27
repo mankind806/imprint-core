@@ -50,6 +50,14 @@ the merge commit message, not a blank one. The pull request text becomes the com
 
 - The `Assisted-by: <tool or model>` line has to be the **last** line of the pull request
   text — trailers read from the bottom, and a line after it would bury it.
+- If a tool adds its own line above `Assisted-by:` (for example a "🤖 Generated with ..."
+  line), leave a blank line between that line and `Assisted-by:`. Git reads trailers as one
+  unbroken block from the bottom of the text; a non-trailer line touching `Assisted-by:`
+  keeps the whole block from being read as trailers at all, so the line is in the commit but
+  `git log --format='%(trailers)'` comes back empty — this happened silently in #15
+  (`git log -1 --format='%(trailers:key=Assisted-by)' 9736440` returns nothing). Keep
+  `Assisted-by:` alone in the last paragraph, or sharing it only with other `Key: value`
+  trailers.
 - The pull request text carries no addresses, paths, host names or employer terms either,
   same as the rest of the checklist, because it is about to become part of the permanent
   commit history.
