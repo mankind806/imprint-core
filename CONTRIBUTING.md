@@ -87,7 +87,9 @@ push to `main`, the one new commit — never the repository's existing history (
   its own pull request or to a push that squash-merged it.
 - The commit message carries no `Claude-Session:` line, no `claude.ai/code/session_` link,
   and no email address — the same three shapes CONTRIBUTING and the pre-push hook already
-  ask for, now also enforced here, for everyone.
+  ask for, now also enforced here for everyone, except that the address check alone is
+  skipped for a commit whose author or committer was let in only through a `botAuthors`
+  entry (see "bot pull requests" below); the two session-link checks stay on regardless.
 
 On a pull-request event, the same three checks also run over the pull-request body — the text
 that becomes the squash-merge commit message (see "AI assistance and commit messages" above)
