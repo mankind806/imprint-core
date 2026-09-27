@@ -163,6 +163,8 @@ step.
 - `tools/arrival-test.sh`: a release-time check that a fresh session actually receives the
   card this release ships — see [Core card and checks](#core-card-and-checks).
 
+Not included: the update watcher (PR #12).
+
 **0.7.0** (2026-09-27; ships when the owner merges it):
 
 - Update watcher: on by default, checks once at session start, and only for an upgrade;
