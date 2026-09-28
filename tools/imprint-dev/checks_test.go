@@ -496,6 +496,38 @@ func TestOverdueRecheckExitCodes(t *testing.T) {
 
 // --- i -----------------------------------------------------------------------
 
+// rHostV2Script embeds rHostV2Block itself (the production constant, so the
+// fixture cannot drift from what check j actually requires) in a hook script
+// that also calls imprint_host and invokes claude — the shape Codex's
+// integration review asked to be pinned as the passing case for both check i
+// (hook-env-portable) and check j (hook-host-binary).
+const rHostV2Script = "#!/bin/sh\n" + rHostV2Block + "\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"
+
+// rHostV2BlockUnused is rHostV2Block, verbatim, in a script that invokes
+// claude but never calls imprint_host outside its own definition — the
+// "defined but unused" case check j must still fail (P2 review finding).
+const rHostV2BlockUnused = "#!/bin/sh\n" + rHostV2Block + "\nout=\"$(claude --version)\" || exit 0\n"
+
+// rHostV2BlockModified is rHostV2Block with its last statement changed
+// ("echo unknown" to "echo other"), called and paired with a claude
+// invocation — the "defined, called, but not verbatim" case.
+const rHostV2BlockModified = `#!/bin/sh
+# imprint_host prints the host runtime running this hook: codex, claude or unknown (R-HOST v2).
+imprint_host() {
+	codex_home=${CODEX_HOME:-$HOME/.codex}
+	claude_home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+	for p in "${CLAUDE_PLUGIN_DATA:-}" "${CLAUDE_PLUGIN_ROOT:-}"; do
+		case $p in
+		"$codex_home"/*) echo codex; return ;;
+		"$claude_home"/*) echo claude; return ;;
+		esac
+	done
+	echo other
+}
+host=$(imprint_host)
+out="$(claude --version)" || exit 0
+`
+
 func TestCheckHookEnvPortable(t *testing.T) {
 	script := func(content string) func(map[string]string) {
 		return func(f map[string]string) { f["hooks/foo.sh"] = content }
@@ -527,6 +559,16 @@ func TestCheckHookEnvPortable(t *testing.T) {
 		{"hooks.json missing is not this check's problem", func(f map[string]string) {
 			delete(f, "hooks/hooks.json")
 		}, 0, nil},
+		{"CLAUDE_CONFIG_DIR with a default is allowed", script(
+			"#!/bin/sh\nhome=${CLAUDE_CONFIG_DIR:-$HOME/.claude}\n"), 0, nil},
+		{"a bare CLAUDE_CONFIG_DIR is still a finding", script(
+			"#!/bin/sh\necho \"$CLAUDE_CONFIG_DIR\"\n"), 1,
+			[]string{"hooks/foo.sh:2: uses $CLAUDE_CONFIG_DIR"}},
+		{"a braced CLAUDE_CONFIG_DIR without a default is still a finding", script(
+			"#!/bin/sh\necho \"${CLAUDE_CONFIG_DIR}\"\n"), 1, []string{"hooks/foo.sh:2: uses $CLAUDE_CONFIG_DIR"}},
+		{"the default-form exception is only for CLAUDE_CONFIG_DIR", script(
+			"#!/bin/sh\necho \"${CLAUDE_PROJECT_DIR:-x}\"\n"), 1, []string{"hooks/foo.sh:2: uses $CLAUDE_PROJECT_DIR"}},
+		{"R-HOST v2's imprint_host passes on its own", script(rHostV2Script), 0, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -556,10 +598,14 @@ func TestCheckHookHostBinary(t *testing.T) {
 		{"invocation via command substitution without imprint_host is a finding", script(
 			"#!/bin/sh\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"hooks/foo.sh:2: invokes the claude or codex binary"}},
-		{"invocation with imprint_host defined passes", script(
-			"#!/bin/sh\nimprint_host() {\n  echo claude\n}\nout=\"$(claude --version)\" || exit 0\n"), 0, nil},
-		{"bash's function keyword is accepted too", script(
-			"#!/bin/sh\nfunction imprint_host() {\n  echo claude\n}\nout=\"$(claude --version)\" || exit 0\n"), 0, nil},
+		// P2 (Codex review): a bare, unused stub used to pass this check. A
+		// definition — canonical or not — is no longer enough on its own.
+		{"a minimal stub, even if it's called, is not R-HOST v2 verbatim", script(
+			"#!/bin/sh\nimprint_host() {\n  echo claude\n}\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"hooks/foo.sh:6: invokes the claude or codex binary as a command and defines imprint_host(), but not R-HOST v2's canonical block verbatim"}},
+		{"bash's function keyword is not R-HOST v2's own shape either", script(
+			"#!/bin/sh\nfunction imprint_host() {\n  echo claude\n}\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"but not R-HOST v2's canonical block verbatim"}},
 		{"a commented-out definition does not count", script(
 			"#!/bin/sh\n# imprint_host() {\n#   echo claude\n# }\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"hooks/foo.sh:5: invokes"}},
@@ -570,6 +616,13 @@ func TestCheckHookHostBinary(t *testing.T) {
 		{"a non-.sh file under hooks is not scanned", func(f map[string]string) {
 			f["hooks/notes.md"] = "$(claude --version)\n"
 		}, 0, nil},
+		{"the canonical block, verbatim but never called, is a finding", script(rHostV2BlockUnused), 1,
+			[]string{"hooks/foo.sh:14: defines imprint_host() as R-HOST v2's canonical block, verbatim, but never calls it"}},
+		{"the canonical block, called but modified, is still a finding", script(rHostV2BlockModified), 1,
+			[]string{"but not R-HOST v2's canonical block verbatim"}},
+		{"indentation style (tabs vs spaces) does not break the verbatim match", script(
+			strings.ReplaceAll(rHostV2Script, "\t", "    ")), 0, nil},
+		{"R-HOST v2's canonical block, verbatim and called, passes", script(rHostV2Script), 0, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
