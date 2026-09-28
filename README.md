@@ -22,7 +22,7 @@ at a time, with the tests run after each.*
 | Core card, at `SessionStart` and `SubagentStart` | measured 2026-09-26, as additional context | measured 2026-09-28, as developer context, in the root session and in subagents |
 | The four skills | measured 2026-09-26, in the [eval runs](evals/README.md) | measured 2026-09-28: all four arrive |
 | Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set |
-| Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model and effort come from the transcript ([measuring subagents](#measuring-subagents)) |
+| Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model and effort come from the transcript first, the hook's `model` only as a fallback ([measuring subagents](#measuring-subagents)) |
 | Hooks: update watch | host-aware: watches `claude --version` ([update watch](docs/update-watch.md)); end to end not measured | host-aware: watches `codex --version` ([update watch](docs/update-watch.md)); end to end not measured |
 | `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
 
@@ -311,9 +311,14 @@ line `high`.
 three stops, each with an `agent_id`, `agent_type` `default`, an empty effort and no model.
 Start and stop pair by `agent_id`, but one agent can log one start followed by several stops
 (follow-up turns); `measure` gives the first pair a duration and reports the later stops as
-gaps rather than guessing one. Model and effort then come from the transcript's
-`turn_context`, read over the whole file, not per turn, so a reused agent's row can list
-values from other turns.
+gaps rather than guessing one. Model and effort come from the transcript's `turn_context`
+first: every distinct value over the whole file, in order of first appearance and joined by
+commas (an effort of `medium,high`, say), not per turn, so a reused agent's row can list
+values from other turns. A `model` in the hook input is used only when the transcript has
+none, because whether it names the subagent's model or the parent's is not verified; Codex's
+[hooks documentation](https://learn.chatgpt.com/docs/hooks) calls it only the "Active model
+slug" (read 2026-09-28). Under Claude Code nothing changes: the subagent hook input has no
+model, so it comes from the transcript.
 
 **Limits.** Tested with invented input under `sh` in CI and locally. Whether it fires for
 background agents is **not measured**, and neither is native Windows, where the hook needs an
