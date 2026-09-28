@@ -1,0 +1,92 @@
+{
+  "measured_at": "2026-09-28T20:52:30.430366+00:00",
+  "cli_version": "codex-cli 0.157.1",
+  "model_responses": "synthetic local fixture; no model inference",
+  "host_dispatch": "native",
+  "cases": [
+    {
+      "shell_tool": true,
+      "role_binding": true,
+      "native_spawn_result": "{\"task_name\":\"/root/probe\"}",
+      "role_selector": "collaboration.spawn_agent.agent_type=cx015_reader",
+      "role_binding_marker": "CX015_NATIVE_ROLE_BINDING",
+      "parent_tools": [
+        "exec_command",
+        "write_stdin",
+        "request_user_input",
+        "apply_patch",
+        "view_image",
+        "collaboration.followup_task",
+        "collaboration.interrupt_agent",
+        "collaboration.list_agents",
+        "collaboration.send_message",
+        "collaboration.spawn_agent",
+        "collaboration.wait_agent",
+        "get_goal",
+        "create_goal",
+        "update_goal"
+      ],
+      "child_tools": [
+        "exec_command",
+        "write_stdin",
+        "request_user_input",
+        "apply_patch",
+        "view_image",
+        "get_goal",
+        "create_goal",
+        "update_goal"
+      ],
+      "tool_outputs": {
+        "read_via_shell": "Chunk ID: 1c13cd\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 12\nOutput:\nCX015_READ_NEEDLE\nCX015_READ_NEEDLE\nsample.txt\n",
+        "write_via_shell": "Chunk ID: 74d7b6\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 15\nOutput:\n/usr/bin/sh: line 1: shell-sentinel: Read-only file system\n",
+        "patch": "patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings",
+        "read_native": "unsupported call: Read",
+        "grep_native": "unsupported call: Grep",
+        "glob_native": "unsupported call: Glob"
+      },
+      "shell_sentinel_exists": false,
+      "patch_sentinel_exists": false
+    },
+    {
+      "shell_tool": false,
+      "role_binding": true,
+      "native_spawn_result": "{\"task_name\":\"/root/probe\"}",
+      "role_selector": "collaboration.spawn_agent.agent_type=cx015_reader",
+      "role_binding_marker": "CX015_NATIVE_ROLE_BINDING",
+      "parent_tools": [
+        "exec_command",
+        "write_stdin",
+        "request_user_input",
+        "apply_patch",
+        "view_image",
+        "collaboration.followup_task",
+        "collaboration.interrupt_agent",
+        "collaboration.list_agents",
+        "collaboration.send_message",
+        "collaboration.spawn_agent",
+        "collaboration.wait_agent",
+        "get_goal",
+        "create_goal",
+        "update_goal"
+      ],
+      "child_tools": [
+        "request_user_input",
+        "apply_patch",
+        "view_image",
+        "get_goal",
+        "create_goal",
+        "update_goal"
+      ],
+      "tool_outputs": {
+        "read_via_shell": "unsupported call: exec_command",
+        "write_via_shell": "unsupported call: exec_command",
+        "patch": "patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings",
+        "read_native": "unsupported call: Read",
+        "grep_native": "unsupported call: Grep",
+        "glob_native": "unsupported call: Glob"
+      },
+      "shell_sentinel_exists": false,
+      "patch_sentinel_exists": false
+    }
+  ]
+}
