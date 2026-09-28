@@ -28,11 +28,15 @@ at a time, with the tests run after each.*
 
 Codex (OpenAI; measured 2026-09-28 in `codex-tui`, `cli_version` 0.158.0 per its transcript)
 loads the plugin from the same Claude-format manifest; there is no separate Codex manifest.
+That TUI observation is separate from the codex-cli 0.157.1 arrival and isolated
+user-hook trust probes on the same date; their results are recorded below.
 Each host keeps its own data directory, `~/.claude/plugins/data/imprint-imprint` and
 `~/.codex/plugins/data/imprint-imprint`. The hooks tell the two hosts apart by the plugin's
 paths (rule R-HOST): the update watch follows the host's own version and changelog and stays
-silent under an unknown host, and each subagent log line carries the host. Codex asks once to
-approve the hooks, and a change to them may require approval again. Under Codex, the agent's
+silent under an unknown host, and each subagent log line carries the host. Codex requires hook
+definition approval. The isolated user-hook probe found that referenced script bytes
+are not covered; plugin-hook/cache behavior remains untested
+([dated trust measurement](docs/codex-native-boundaries.md)). Under Codex, the agent's
 read-only boundary is a behaviour rule, not a technical tool lock.
 
 ## The picture in 30 seconds
@@ -211,8 +215,11 @@ Not included: the update watcher (PR #12).
   report)". The Codex pass is model-reported arrival (card and skill catalog match), not proof
   that a hook ran; that run also printed one nonfatal CLI error item warning, message not
   captured.
-- Not verified under Codex: the `foreign-material-reviewer` agent's allowlist, and whether
-  hook approval covers the hook scripts (c5e5a3d).
+- Superseding the earlier hook-trust uncertainty (c5e5a3d): the isolated user-hook
+  measurement under codex-cli 0.157.1 on 2026-09-28 binds trust to the definition,
+  not referenced script bytes. Plugin-hook/cache behavior remains untested;
+  [measurement and limits](docs/codex-native-boundaries.md).
+- Still not verified under Codex: the `foreign-material-reviewer` agent's allowlist.
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
@@ -265,10 +272,10 @@ Each limit says what kind of claim it is and when to look again; why each one ma
   schema, and no `[agents]` config; `model: sonnet` is a Claude model name. Until verified,
   the read-only boundary there is a behaviour rule, not a technical tool lock.
   *Re-check by 2026-12-28.*
-- **Whether Codex's hook approval covers the hook scripts' contents: not verified.** Codex
-  keeps a trust hash per hook definition, and its
-  [hooks documentation](https://learn.chatgpt.com/docs/hooks) speaks of "the exact hook
-  definition" (read 2026-09-28). Changes to the hooks may require re-approval in Codex.
+- **Hook trust covers definitions, not referenced script bytes in the measured user-hook
+  case.** Measured 2026-09-28 with codex-cli 0.157.1 and isolated `CODEX_HOME`.
+  Plugin hooks and cache paths remain untested. See the canonical
+  [measurement and limits](docs/codex-native-boundaries.md).
   *Re-check by 2026-12-28.*
 
 ### Core card and checks

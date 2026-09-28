@@ -1,0 +1,74 @@
+{
+  "hook_probe": [
+    {
+      "version": "codex-cli 0.157.1",
+      "utc": "2026-09-28T19:56:19Z",
+      "mode": "isolated CODEX_HOME; no auth copied; turn requested without credentials"
+    },
+    {
+      "key": "<scratch>/codex-home/hooks.json:session_start:0:0",
+      "currentHash": "sha256:94a0bb53f7616b2c8f9499ac00327ff83e46caf5c248584c7b7b2352c02c0a49",
+      "trustStatus": "untrusted",
+      "label": "untrusted",
+      "marker": null
+    },
+    {
+      "key": "<scratch>/codex-home/hooks.json:session_start:0:0",
+      "currentHash": "sha256:94a0bb53f7616b2c8f9499ac00327ff83e46caf5c248584c7b7b2352c02c0a49",
+      "trustStatus": "trusted",
+      "label": "trusted-A",
+      "marker": "A"
+    },
+    {
+      "key": "<scratch>/codex-home/hooks.json:session_start:0:0",
+      "currentHash": "sha256:94a0bb53f7616b2c8f9499ac00327ff83e46caf5c248584c7b7b2352c02c0a49",
+      "trustStatus": "trusted",
+      "label": "same-definition-script-B",
+      "marker": "B"
+    },
+    {
+      "key": "<scratch>/codex-home/hooks.json:session_start:0:0",
+      "currentHash": "sha256:c51e2756ea9fa21ef84a6ac6b78817120bd79233d94b49e09ef917415f3418f0",
+      "trustStatus": "modified",
+      "label": "changed-definition",
+      "marker": "B"
+    }
+  ],
+  "agent_and_sandbox_probe": {
+    "agent-live": [
+      {
+        "id": "item_0",
+        "type": "agent_message",
+        "text": "Native dispatch was not attempted: the available spawn schema cannot select a named custom agent. It supports a task name, but no custom `agent_type` or agent selector.\n\nNeither command was run; no command outcomes are available."
+      }
+    ],
+    "agent-v1": [
+      {
+        "id": "item_0",
+        "type": "agent_message",
+        "text": "Native dispatch could not be attempted: the spawn schema has no `agent_type` or custom-agent `name` selector. Its `task_name` only labels a task; it cannot select `cx014_reader`.\n\nNeither command ran, so there are no command outcomes. No files, network, or configuration were accessed or modified."
+      }
+    ],
+    "sandbox-live": [
+      {
+        "id": "item_0",
+        "type": "agent_message",
+        "text": "I\u2019ll run the two commands in order and report their results.\n"
+      },
+      {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'printf CX014_SHELL_AVAILABLE'",
+        "aggregated_output": "CX014_SHELL_AVAILABLE",
+        "exit_code": 0,
+        "status": "completed"
+      },
+      {
+        "id": "item_2",
+        "type": "agent_message",
+        "text": "`printf CX014_SHELL_AVAILABLE` \u2014 exit code 0\n```text\nCX014_SHELL_AVAILABLE\n```\n\n`printf CX014_WRITE_ATTEMPT > cx014-sentinel` \u2014 exit code 1\n```text\n/bin/bash: line 1: cx014-sentinel: Read-only file system\n```"
+      }
+    ]
+  },
+  "sentinel_exists_after_probe": false
+}
