@@ -820,11 +820,10 @@ func checkHookEnvPortable(e *env) (checkResult, error) {
 // invokes the claude or codex binary also carries R-HOST v2's canonical
 // imprint_host detector, verbatim, and actually calls it — not that every
 // such invocation is itself gated by the result. It cannot read what a script
-// does with imprint_host's output once called; proving that a hook actually
-// behaves differently per host belongs beside the script itself, as a real,
-// host-aware behaviour test (updatewatch_test.go for hooks/update-watch.sh,
-// hookscript_test.go for hooks/log-subagent.sh — as of this writing neither
-// file has a Codex case; R-HOST v2 is what is expected to add one). This
+// does with imprint_host's output once called; that a hook actually behaves
+// differently per host is proven separately, by the real, host-aware
+// behaviour tests next to the scripts themselves (updatewatch_test.go for
+// hooks/update-watch.sh, hookscript_test.go for hooks/log-subagent.sh). This
 // check only closes the narrower gap: a script that invokes claude or codex
 // without the shared detector at all, without it verbatim, or without ever
 // calling it.
@@ -913,13 +912,25 @@ var imprintHostDefRE = regexp.MustCompile(`(?m)^\s*(?:function\s+)?imprint_host\
 // scan below already skips comments itself, so no (?m)^ subtlety is needed).
 var imprintHostDefLineRE = regexp.MustCompile(`^\s*(?:function\s+)?imprint_host\s*\(\s*\)`)
 
-// imprintHostCallRE matches the bare word imprint_host, which is how it reads
-// as a call once it is neither a comment mention nor the def line itself —
-// $(imprint_host), host=$(imprint_host), a bare imprint_host statement, and
-// so on. The scan below checks imprintHostDefLineRE first on every candidate
-// line, so a definition line never also counts as a call just because its own
-// text contains the word.
-var imprintHostCallRE = regexp.MustCompile(`\bimprint_host\b`)
+// imprintHostCallRE matches only the known shapes of an actual imprint_host
+// call, not a bare word match — that let a mention inside quotes, such as
+// echo 'imprint_host is configured' or printf '%s\n' "imprint_host", count as
+// a call (P2 residue in Codex's re-review of the first fix). Three forms
+// count, and nothing else:
+//   - $(imprint_host), the literal substring, with any other text on the line
+//     around it: host="$(imprint_host)", case "$(imprint_host)" in;
+//   - a backtick call, `imprint_host`;
+//   - imprint_host as a bare command: at the start of a command (line start
+//     after optional whitespace, or right after ;, & or |, which also covers
+//     && and ||, since the character immediately before the name is still
+//     one of those three), followed by end of line, whitespace, ;, ), | or >.
+// The scan below checks imprintHostDefLineRE first on every candidate line,
+// so a definition line is never even offered to this regexp.
+var imprintHostCallRE = regexp.MustCompile(
+	`\$\(imprint_host\)` + // $(imprint_host)
+		"|`imprint_host`" + // `imprint_host`
+		`|(?:^|[;&|])\s*imprint_host(?:$|[\s;)|>])`, // a bare command
+)
 
 // rHostV2DiffersMsg is a fixed, greppable phrase: every finding about
 // imprint_host not matching R-HOST v2's canonical block, whichever way it

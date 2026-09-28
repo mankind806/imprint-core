@@ -53,11 +53,10 @@ mere mention of the name (in a comment, say), does not count as a call either. A
 `imprint_host` at all, one that reimplements or edits the block, or one that defines it but
 never calls it, is each its own finding. This check is structural, not behavioural: it proves
 the one shared, canonical detector is present and used, not that every `claude`/`codex`
-invocation it sits next to is actually gated by its result — proving that a hook behaves
-differently per host belongs beside the script itself, as a real, host-aware behaviour test
-(`updatewatch_test.go` for `hooks/update-watch.sh`, `hookscript_test.go` for
-`hooks/log-subagent.sh`; as of this writing neither file has a Codex case yet — R-HOST v2 is
-expected to add one).
+invocation it sits next to is actually gated by its result — that a hook actually behaves
+differently per host is proven separately, by the real, host-aware behaviour tests next to the
+scripts themselves: `updatewatch_test.go` for `hooks/update-watch.sh`, `hookscript_test.go` for
+`hooks/log-subagent.sh`.
 
 ## Every card line, in full
 

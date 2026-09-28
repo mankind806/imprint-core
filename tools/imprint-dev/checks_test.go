@@ -631,6 +631,21 @@ func TestCheckHookHostBinary(t *testing.T) {
 		{"a comment mentioning imprint_host does not count as calling it", script(
 			"#!/bin/sh\n"+rHostV2Block+"\n# imprint_host decides the host\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"never calls it outside its own definition"}},
+		// P2 residue (Codex's re-review of the first fix): a bare word match
+		// still counted a mention inside quotes as a call.
+		{"a quoted echo mentioning imprint_host is not a call", script(
+			"#!/bin/sh\n"+rHostV2Block+"\necho 'imprint_host is configured'\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"never calls it outside its own definition"}},
+		{"a quoted printf mentioning imprint_host is not a call", script(
+			"#!/bin/sh\n"+rHostV2Block+"\nprintf '%s\\n' \"imprint_host\"\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"never calls it outside its own definition"}},
+		{"Codex's exact reproduction: canonical block, a quoted echo, a blind claude call", script(
+			"#!/bin/sh\n"+rHostV2Block+"\necho 'imprint_host is configured'\n$(claude --version)\n"), 1,
+			[]string{"never calls it outside its own definition"}},
+		{"a quoted command substitution assignment is a real call", script(
+			"#!/bin/sh\n"+rHostV2Block+"\nhost=\"$(imprint_host)\"\nout=\"$(claude --version)\" || exit 0\n"), 0, nil},
+		{"a call inside a case subject is a real call", script(
+			"#!/bin/sh\n"+rHostV2Block+"\ncase \"$(imprint_host)\" in\n\tclaude) out=\"$(claude --version)\" ;;\nesac\n"), 0, nil},
 		{"indentation style (tabs vs spaces) does not break the verbatim match", script(
 			strings.ReplaceAll(rHostV2Script, "\t", "    ")), 0, nil},
 		{"R-HOST v2's canonical block, verbatim and called, passes", script(rHostV2Script), 0, nil},
