@@ -5,9 +5,9 @@ The dated state of each limit and its re-check date are in the README under
 
 Each of these says what kind of claim it is — measured here, or merely carried forward — and
 carries a date by which it should be looked at again. A named gap without a date stops being
-a gap and turns into how the system simply is. The horizon is three months for all four:
-Claude Code ships frequently enough that a longer one would be fiction, and often enough
-that a shorter one would be busywork.
+a gap and turns into how the system simply is. The horizon is three months for all of them:
+Claude Code and Codex ship frequently enough that a longer one would be fiction, and often
+enough that a shorter one would be busywork.
 
 ## Plugin hooks in claude.ai cloud sessions
 
@@ -41,6 +41,25 @@ are both honoured — see the `foreign-material-reviewer` entry in the
 that showed the three-tool allowlist also showed the session running on the model the
 frontmatter names rather than the session default. So plugin agent frontmatter is read
 **selectively**, and which fields survive is a per-field question.
+
+## Codex
+
+Codex loads the plugin, and most of it is measured there (measured 2026-09-28; the table is
+in the README under [Runs in Claude Code and Codex](../README.md#runs-in-claude-code-and-codex)).
+Two points are not verified:
+
+- **The `foreign-material-reviewer` agent.** No named plugin agent appeared in Codex's spawn
+  schema, and no `[agents]` config was found, so neither loading the agent nor its `tools:`
+  allowlist is verified there; `model: sonnet` is a Claude model name. This is the one that
+  matters for safety: in Claude Code the allowlist is the enforced control, and the reason
+  the agent exists. Under Codex, treat foreign material by the same procedure, but the
+  read-only boundary is then a behaviour rule, not a technical tool lock.
+- **Hook approval.** Codex keeps a trust hash per hook definition, and the user approves the
+  hooks once. Whether that hash covers the scripts the definitions call is not verified; the
+  documentation speaks of "the exact hook definition". If it covers only the definition, a
+  changed script runs without a new approval; if it covers the script, a release that
+  changes one asks again. So changes to the hooks may require re-approval in Codex, and
+  neither outcome is promised here.
 
 ## A gap named elsewhere
 

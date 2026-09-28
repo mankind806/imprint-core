@@ -16,6 +16,10 @@ mechanism is possible and nobody has built it, **reserved to a person** where th
 content *is* a person's decision rather than a mechanism nobody wrote, and a plain **behaviour
 rule** that holds only as long as the discipline does.
 
+The skills are the same text in Claude Code and Codex. Which parts are measured in which
+host — the core card, the skills, each hook and the agent — is in the README's table under
+[Runs in Claude Code and Codex](../README.md#runs-in-claude-code-and-codex).
+
 The second state is the one usually left out, and it is the most useful one — it is a list of
 the places where a few lines of tooling would pay. The fourth state started as three and gained
 its extra member from a rule that would not fit: the superseding half of `knowledge-keeping`
@@ -95,7 +99,9 @@ last is unusable without the second — and their fuller text now lives under
   write. Its `tools:` frontmatter is an allowlist of `Read`, `Grep` and `Glob`, which is the
   point: a prompt asking an agent to stay read-only is a behaviour rule, and behaviour rules
   are broken by exactly the input this agent exists to handle. What it does *not* close is
-  named in its own description.
+  named in its own description. Under Codex, neither loading it nor its allowlist is verified
+  (2026-09-28), so there the read-only boundary is a behaviour rule, not a technical tool
+  lock; see [Known limits](known-limits.md#codex).
 
 ## The two layers
 

@@ -41,13 +41,15 @@ employer's policies allow it.
 ## AI assistance and commit messages
 
 If an AI tool helped, say so in the commit message or the pull request with one line,
-`Assisted-by: <tool or model>`, naming the tool or model and never an address. This applies
-to everyone, the owner included. Pure handiwork with no AI feature named anywhere in the text
-owes no such line and may go without one; the moment the text already names one — a 🤖 line, a
-`Generated with ...` line, a `Co-Authored-By:` trailer naming an AI tool, or an `Assisted-by:`
-mention at all, filled in or not — the line has to be there, filled in, and last (below). The
-pull request template's own `Assisted-by:` placeholder, left blank, already counts as such a
-mention: fill it in, or delete the line (and the heading above it) if nothing helped.
+`Assisted-by: <tool or model>`, naming the tool or model and never an address — for example
+`Assisted-by: Claude Code`, `Assisted-by: Codex` or `Assisted-by: GitHub Copilot`. This
+applies to everyone, the owner included. Pure handiwork with no AI feature named anywhere in
+the text owes no such line and may go without one; the moment the text already names one — a
+🤖 line, a `Generated with ...` line, a `Co-Authored-By:` trailer naming an AI tool, or an
+`Assisted-by:` mention at all, filled in or not — the line has to be there, filled in, and
+last (below). The pull request template's own `Assisted-by:` placeholder, left blank, already
+counts as such a mention: fill it in, or delete the line (and the heading above it) if nothing
+helped.
 
 The repository setting `squash_merge_commit_message` is `PR_BODY` since 2026-09-27 (checked
 against the GitHub API on that date): a squash merge on `main` uses the pull request body as

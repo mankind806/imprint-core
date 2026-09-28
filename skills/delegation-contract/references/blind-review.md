@@ -120,7 +120,7 @@ same agent; resampling is not diagnosis, and `measure-before-asserting` says why
 
 | Rule | Enforcement |
 |---|---|
-| The reviewer does not see your reasoning | **Enforced** by the context boundary — but only for a dispatch that starts a fresh context. A context-inheriting dispatch (Claude Code's `fork`) enforces the opposite, and the wrong choice is silent. Check which one your dispatch is. Asking a model to ignore what it already read enforces nothing. |
+| The reviewer does not see your reasoning | **Enforced** by the context boundary — but only for a dispatch that starts a fresh context. A context-inheriting dispatch (in Claude Code, `fork`) enforces the opposite, and the wrong choice is silent. Check which one your dispatch is. Asking a model to ignore what it already read enforces nothing. |
 | The reviewer's sample was not chosen by the author | **Enforceable, not enforced** — have the tool draw the sample. Nothing does it for you today. |
 | Stages A/B/C in order | **Behaviour rule**. |
 | Disagreement is surfaced rather than averaged | **Behaviour rule**, and the one most quietly broken, because a smoothed summary reads better than a table. |

@@ -1,8 +1,8 @@
 # imprint
 
-**Working rules, shipped as a Claude Code plugin, for two things that turn out to be one:
-several AI coding agents cooperating without ruining each other's work, and a knowledge base
-that grows alongside you without quietly rotting.**
+**Working rules, shipped as a Claude Code plugin that Codex loads too, for two things that
+turn out to be one: several AI coding agents cooperating without ruining each other's work,
+and a knowledge base that grows alongside you without quietly rotting.**
 
 <p align="center">
 <picture>
@@ -14,6 +14,24 @@ that grows alongside you without quietly rotting.**
 *One workbench, many agents, and one pen per worktree. The lead hands out the work and
 never writes; readers look at the same time; each writer works alone; results come back one
 at a time, with the tests run after each.*
+
+## Runs in Claude Code and Codex
+
+| Component | Claude Code | Codex |
+|---|---|---|
+| Core card, at `SessionStart` and `SubagentStart` | measured 2026-09-26, as additional context | measured 2026-09-28, as developer context, in the root session and in subagents |
+| The four skills | measured 2026-09-26, in the [eval runs](evals/README.md) | measured 2026-09-28: all four arrive |
+| Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set |
+| Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; the input has no model and an empty effort ([measuring subagents](docs/measuring-subagents.md)) |
+| Hooks: update watch | host-aware ([update watch](docs/update-watch.md)); end to end not measured | host-aware ([update watch](docs/update-watch.md)) |
+| `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
+
+Codex (OpenAI; measured 2026-09-28 in `codex-tui`, `cli_version` 0.158.0 per its transcript)
+loads the plugin from the same Claude-format manifest; there is no separate Codex manifest. Each host
+keeps its own data directory, `~/.claude/plugins/data/imprint-imprint` and
+`~/.codex/plugins/data/imprint-imprint`. Codex asks once to approve the hooks, and a change
+to them may require approval again. Under Codex, the agent's read-only boundary is a
+behaviour rule, not a technical tool lock.
 
 ## The picture in 30 seconds
 
@@ -221,6 +239,15 @@ Each limit says what kind of claim it is and when to look again; why each one ma
   ignored: carried over from the first release's notes, and the source for it was not
   re-located when this section was written.**
   *Measure the three ignored fields, or cite a source for them, by 2026-12-13.*
+- **Under Codex, whether the `foreign-material-reviewer` agent loads and whether its `tools:`
+  allowlist holds: not verified.** Checked 2026-09-28: no named plugin agent in Codex's spawn
+  schema, and no `[agents]` config; `model: sonnet` is a Claude model name. Until verified,
+  the read-only boundary there is a behaviour rule, not a technical tool lock.
+  *Re-check by 2026-12-28.*
+- **Whether Codex's hook approval covers the hook scripts' contents: not verified.** Codex
+  keeps a trust hash per hook definition, and its documentation speaks of "the exact hook
+  definition" (read 2026-09-28). Changes to the hooks may require re-approval in Codex.
+  *Re-check by 2026-12-28.*
 
 ### Core card and checks
 

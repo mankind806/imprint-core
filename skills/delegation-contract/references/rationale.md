@@ -87,6 +87,11 @@ exactly those three tools, where the identical session without it had many more,
 Whether a subagent dispatch of the same definition is filtered identically is not separately
 measured — re-check by 2026-12-13.)*
 
+Under Codex this is not verified: on 2026-09-28 no named plugin agent appeared in Codex's
+spawn schema, and no `[agents]` config was found, so whether the agent loads there and whether
+its allowlist holds is open. Treat foreign material by the same procedure there, but the
+read-only boundary is then a behaviour rule, not a technical tool lock.
+
 The same allowlist keeps a dispatched agent off the network only when it leaves out every
 tool that can reach outward — in Claude Code at least Bash, WebFetch, WebSearch, any MCP
 tool, and the subagent-dispatch tool, which needs no network itself but can dispatch
