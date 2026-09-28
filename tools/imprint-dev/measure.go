@@ -33,6 +33,7 @@ type logEntry struct {
 	AgentType      string `json:"agent_type"`
 	SessionID      string `json:"session_id"`
 	Effort         string `json:"effort"`
+	Model          string `json:"model"`
 	TranscriptPath string `json:"agent_transcript_path"`
 
 	time time.Time
@@ -113,9 +114,15 @@ func pairRuns(entries []logEntry, target time.Duration) []measuredRun {
 		}
 		r := measuredRun{AgentID: e.AgentID, AgentType: e.AgentType, SessionID: e.SessionID,
 			Stop: e.TS, stop: e.time, Effort: e.Effort, transcriptPath: e.TranscriptPath}
+		if e.Model != "" {
+			r.Models = []string{e.Model}
+		}
 		if s, ok := pending[e.AgentID]; ok {
 			delete(pending, e.AgentID)
 			r.Start, r.start = s.TS, s.time
+			if s.Model != "" && s.Model != e.Model {
+				r.Models = append([]string{s.Model}, r.Models...)
+			}
 			if r.Effort == "" {
 				r.Effort = s.Effort
 			}
@@ -126,8 +133,12 @@ func pairRuns(entries []logEntry, target time.Duration) []measuredRun {
 		runs = append(runs, r)
 	}
 	for _, s := range pending {
+		var models []string
+		if s.Model != "" {
+			models = []string{s.Model}
+		}
 		runs = append(runs, measuredRun{AgentID: s.AgentID, AgentType: s.AgentType, SessionID: s.SessionID,
-			Start: s.TS, start: s.time, Effort: s.Effort})
+			Start: s.TS, start: s.time, Effort: s.Effort, Models: models})
 	}
 	sort.SliceStable(runs, func(i, j int) bool {
 		a, b := runs[i].first(), runs[j].first()
@@ -146,9 +157,9 @@ func (r measuredRun) first() time.Time {
 	return r.stop
 }
 
-// transcriptInfo reads a subagent transcript and returns, in order of first
-// appearance, the distinct message.model values of its assistant lines and the
-// distinct top-level effort values of the same lines. Nothing else is kept.
+// transcriptInfo reads only known metadata shapes: Claude assistant.message.model
+// and top-level effort, or Codex turn_context.payload.model/effort. Rollout formats
+// are not stable APIs; unknown records supply no model or effort.
 func transcriptInfo(path string) (models, efforts []string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -159,23 +170,33 @@ func transcriptInfo(path string) (models, efforts []string, err error) {
 	br := bufio.NewReader(f)
 	for {
 		line, rerr := br.ReadBytes('\n')
-		if bytes.Contains(line, []byte(`"assistant"`)) {
-			var l struct {
-				Type    string `json:"type"`
-				Effort  any    `json:"effort"`
-				Message struct {
-					Model string `json:"model"`
-				} `json:"message"`
+		var l struct {
+			Type    string `json:"type"`
+			Effort  any    `json:"effort"`
+			Message struct {
+				Model string `json:"model"`
+			} `json:"message"`
+			Payload struct {
+				Model  string `json:"model"`
+				Effort any    `json:"effort"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &l) == nil {
+			var model string
+			var effort any
+			switch l.Type {
+			case "assistant":
+				model, effort = l.Message.Model, l.Effort
+			case "turn_context":
+				model, effort = l.Payload.Model, l.Payload.Effort
 			}
-			if json.Unmarshal(line, &l) == nil && l.Type == "assistant" {
-				if m := l.Message.Model; m != "" && !seenM[m] {
-					seenM[m] = true
-					models = append(models, m)
-				}
-				if ef, ok := l.Effort.(string); ok && ef != "" && !seenE[ef] {
-					seenE[ef] = true
-					efforts = append(efforts, ef)
-				}
+			if model != "" && !seenM[model] {
+				seenM[model] = true
+				models = append(models, model)
+			}
+			if ef, ok := effort.(string); ok && ef != "" && !seenE[ef] {
+				seenE[ef] = true
+				efforts = append(efforts, ef)
 			}
 		}
 		if errors.Is(rerr, io.EOF) {
@@ -236,17 +257,24 @@ func resolveModels(runs []measuredRun, projects string) error {
 			r.Transcript = transcriptMissing
 		}
 		if path == "" {
-			r.Models = []string{unknownModel}
+			if len(r.Models) == 0 {
+				r.Models = []string{unknownModel}
+			}
 			continue
 		}
 		models, efforts, err := transcriptInfo(path)
 		if err != nil {
-			r.Transcript, r.Models = transcriptMissing, []string{unknownModel}
+			r.Transcript = transcriptMissing
+			if len(r.Models) == 0 {
+				r.Models = []string{unknownModel}
+			}
 			continue
 		}
 		r.Transcript = transcriptFound
-		r.Models = models
-		if len(models) == 0 {
+		if len(r.Models) == 0 {
+			r.Models = models
+		}
+		if len(r.Models) == 0 {
 			r.Models = []string{unknownModel}
 		}
 		if r.Effort == "" {

@@ -20,7 +20,7 @@ var hookScript = filepath.Join("..", "..", "hooks", "log-subagent.sh")
 // runHook runs the script with input on stdin and dataDir as CLAUDE_PLUGIN_DATA
 // ("" leaves it unset). It fails the test unless the script exits 0 and prints
 // nothing, since a hook that talks or fails would reach the session.
-func runHook(t *testing.T, dataDir, input string) {
+func runHook(t *testing.T, dataDir, input string, hostEnv ...string) {
 	t.Helper()
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -29,14 +29,16 @@ func runHook(t *testing.T, dataDir, input string) {
 	cmd := exec.Command(sh, hookScript)
 	var env []string
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "CLAUDE_PLUGIN_DATA=") {
+		key, _, _ := strings.Cut(kv, "=")
+		if key != "CLAUDE_PLUGIN_DATA" && key != "CLAUDE_PLUGIN_ROOT" && key != "CODEX_HOME" && key != "CLAUDE_CONFIG_DIR" && key != "HOME" {
 			env = append(env, kv)
 		}
 	}
 	if dataDir != "" {
 		env = append(env, "CLAUDE_PLUGIN_DATA="+dataDir)
 	}
-	cmd.Env = env
+	env = append(env, "HOME="+t.TempDir())
+	cmd.Env = append(env, hostEnv...)
 	cmd.Stdin = strings.NewReader(input)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
@@ -82,7 +84,7 @@ func TestHookLogsStart(t *testing.T) {
 		t.Errorf("ts %q is not UTC ISO 8601 with seconds", l["ts"])
 	}
 	want := map[string]string{"hook_event_name": "SubagentStart", "agent_id": "a1",
-		"agent_type": "general-purpose", "session_id": "s", "effort": "high"}
+		"agent_type": "general-purpose", "session_id": "s", "effort": "high", "host": "unknown"}
 	for k, v := range want {
 		if l[k] != v {
 			t.Errorf("%s = %q, want %q", k, l[k], v)
@@ -170,5 +172,54 @@ func TestHookOutputFeedsMeasure(t *testing.T) {
 	var runs []measuredRun
 	if err := json.Unmarshal([]byte(stdout), &runs); err != nil || len(runs) != 1 || runs[0].Seconds == nil {
 		t.Fatalf("got %v / %s", err, stdout)
+	}
+}
+
+// Host classification is the agreed R-HOST v2 path heuristic, not an attestation.
+func TestHookHostPathsAndOptionalModel(t *testing.T) {
+	for _, tc := range []struct{ name, data, root, codex, claude, want string }{
+		{"codex default", ".codex/plugins/data/p", "", "", "", "codex"},
+		{"claude default", ".claude/plugins/data/p", "", "", "", "claude"},
+		{"custom codex", "custom-cx/data/p", "", "custom-cx", "custom-cl", "codex"},
+		{"custom claude", "custom-cl/data/p", "", "custom-cx", "custom-cl", "claude"},
+		{"unknown", "elsewhere/data/p", "", "", "", "unknown"},
+		{"prefix boundary", ".codex-other/data/p", "", "", "", "unknown"},
+		{"root fallback", "elsewhere/data/p", ".codex/cache/p", "", "", "codex"},
+		{"data wins mixed paths", ".claude/data/p", ".codex/cache/p", "", "", "claude"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := func(s string) string {
+				if s == "" {
+					return ""
+				}
+				return filepath.Join(home, s)
+			}
+			dir := path(tc.data)
+			env := []string{"HOME=" + home, "CODEX_HOME=" + path(tc.codex), "CLAUDE_CONFIG_DIR=" + path(tc.claude), "CLAUDE_PLUGIN_ROOT=" + path(tc.root)}
+			runHook(t, dir, `{"hook_event_name":"SubagentStop","agent_id":"a1","agent_type":"default","session_id":"s","model":"model-measured","last_assistant_message":"DO-NOT-LOG"}`, env...)
+			rows := hookLog(t, dir)
+			if len(rows) != 1 {
+				t.Fatalf("rows = %v", rows)
+			}
+			if rows[0]["host"] != tc.want || rows[0]["model"] != "model-measured" {
+				t.Fatalf("got %v, want host %s and measured model", rows[0], tc.want)
+			}
+			raw, _ := os.ReadFile(filepath.Join(dir, logFileName))
+			if bytes.Contains(raw, []byte("DO-NOT-LOG")) {
+				t.Fatal("copied answer")
+			}
+		})
+	}
+}
+func TestHookDoesNotInventModel(t *testing.T) {
+	dir := t.TempDir()
+	runHook(t, dir, `{"hook_event_name":"SubagentStart","agent_id":"a","agent_type":"default","model":null}`)
+	rows := hookLog(t, dir)
+	if len(rows) != 1 {
+		t.Fatalf("rows %v", rows)
+	}
+	if _, ok := rows[0]["model"]; ok {
+		t.Fatalf("absent model must be omitted: %v", rows[0])
 	}
 }

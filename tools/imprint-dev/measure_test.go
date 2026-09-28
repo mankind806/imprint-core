@@ -233,3 +233,79 @@ func TestHooksJSONAcceptsMeasuringHook(t *testing.T) {
 	root := newTree(t, func(f map[string]string) { f["hooks/hooks.json"] = withLog })
 	expectViolations(t, checkHooksJSON, testEnv(t, root), 0)
 }
+
+func TestCodexTurnContextModelsAndEffort(t *testing.T) {
+	// Synthetic values; structural keys observed in a Codex 0.158.0 rollout on 2026-09-28.
+	tr := filepath.Join(t.TempDir(), "rollout.jsonl")
+	input := `{"type":"session_meta","payload":{"model":"not-a-turn-model"}}
+{"type":"turn_context","payload":{"model":"model-cx-one","effort":"medium"}}
+{"type":"response_item","payload":{"role":"assistant","model":"model-forged"}}
+{"type":"turn_context","payload":{"model":"model-cx-two","effort":"high"}}
+{"type":"turn_context","payload":{"model":"model-cx-one","effort":"medium"}}
+{"type":"unknown","payload":{"model":"model-unknown","effort":"ultra"}}`
+	if err := os.WriteFile(tr, []byte(input), 0600); err != nil {
+		t.Fatal(err)
+	}
+	log := logLine("2026-01-01T10:00:00Z", "SubagentStart", "a", "default", "", "") + logLine("2026-01-01T10:01:00Z", "SubagentStop", "a", "default", "", tr)
+	r := measureRuns(t, log, 5*time.Minute, "")[0]
+	if strings.Join(r.Models, ",") != "model-cx-one,model-cx-two" || r.Effort != "medium,high" || r.Transcript != transcriptFound {
+		t.Fatalf("unexpected run %+v", r)
+	}
+}
+func TestMeasureUsesHookModelsWithoutTranscript(t *testing.T) {
+	log := `{"ts":"2026-01-01T10:00:00Z","hook_event_name":"SubagentStart","agent_id":"a","agent_type":"default","session_id":"s","host":"codex","model":"model-first"}
+{"ts":"2026-01-01T10:01:00Z","hook_event_name":"SubagentStop","agent_id":"a","agent_type":"default","session_id":"s","host":"codex","model":"model-last","agent_transcript_path":""}
+`
+	r := measureRuns(t, log, 5*time.Minute, "")[0]
+	if strings.Join(r.Models, ",") != "model-first,model-last" || r.Transcript != transcriptNotRecorded {
+		t.Fatalf("hook metadata lost: %+v", r)
+	}
+}
+func TestUnknownTranscriptFormatStaysUnknown(t *testing.T) {
+	tr := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(tr, []byte(`{"type":"future_event","payload":{"model":"not-supported","effort":"high"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	log := logLine("2026-01-01T10:01:00Z", "SubagentStop", "a", "default", "", tr)
+	r := measureRuns(t, log, 5*time.Minute, "")[0]
+	if strings.Join(r.Models, ",") != unknownModel || r.Effort != "" {
+		t.Fatalf("invented metadata: %+v", r)
+	}
+}
+func TestOneStartThreeStopsKeepsMissingDurations(t *testing.T) {
+	log := logLine("2026-01-01T10:00:00Z", "SubagentStart", "a", "default", "", "") +
+		logLine("2026-01-01T10:01:00Z", "SubagentStop", "a", "default", "", "") +
+		logLine("2026-01-01T10:02:00Z", "SubagentStop", "a", "default", "", "") +
+		logLine("2026-01-01T10:03:00Z", "SubagentStop", "a", "default", "", "")
+	runs := measureRuns(t, log, 5*time.Minute, "")
+	if len(runs) != 3 || runs[0].Seconds == nil || *runs[0].Seconds != 60 {
+		t.Fatalf("unexpected runs %+v", runs)
+	}
+	for _, r := range runs[1:] {
+		if r.Seconds != nil || r.OverTarget != nil || r.Start != "" {
+			t.Fatalf("invented duration %+v", r)
+		}
+	}
+}
+
+func TestHookModelsTakePrecedenceOverTranscript(t *testing.T) {
+	tr := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(tr, []byte(`{"type":"turn_context","payload":{"model":"other-turn","effort":"high"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, event, path string }{
+		{"existing transcript", "SubagentStop", tr},
+		{"missing transcript", "SubagentStop", tr + "-missing"},
+		{"unreadable transcript", "SubagentStop", filepath.Dir(tr)},
+		{"unfinished start", "SubagentStart", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := map[string]string{"ts": "2026-01-01T10:00:00Z", "hook_event_name": tc.event, "agent_id": "a", "agent_type": "default", "model": "hook-model", "effort": "medium", "agent_transcript_path": tc.path}
+			b, _ := json.Marshal(record)
+			r := measureRuns(t, string(b)+"\n", 5*time.Minute, "")[0]
+			if strings.Join(r.Models, ",") != "hook-model" || r.Effort != "medium" || r.Seconds != nil {
+				t.Fatalf("hook metadata overwritten: %+v", r)
+			}
+		})
+	}
+}
