@@ -1,31 +1,55 @@
 #!/bin/sh
 # Installed Codex context probe; local CLI help verified with 0.157.1 (2026-09-28).
 # Usage: tools/arrival-test-codex.sh [--events <JSONL fixture>]
+#                                  [--diagnostics-dir <new private directory>]
 # Live mode costs one model call and needs a logged-in Codex CLI plus timeout.
 # Expected card and skill names stay here: they are never supplied to the model.
 # A match is model-reported context arrival, NOT proof of hook execution, skill
 # body loading, subagent inheritance, or adherence. Those remain not checked.
 # --events validates saved/fixture output only; it never claims live arrival.
-# No --plugin-dir: tests installed Codex configuration without modifying it.
-# Exit 0: matching report; 1: valid report differs; 2: invalid/unavailable probe.
+# Tests installed configuration. Codex can write state/logs and start MCPs/hooks.
+# --diagnostics-dir preserves raw stderr and JSONL (may contain private context
+# or credentials). Its directory must not exist; it is created with mode 0700.
+# No raw diagnostics are printed. Without this option they are removed on exit.
+# Exit 0: matching report; 1: valid report absent/differs; 2: unavailable probe.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mode=live
 events=
-case $# in
-  0) ;;
-  1) case "$1" in -h|--help) sed -n '2,11p' "$0"; exit 0;; *) echo 'arrival-test-codex: invalid arguments' >&2; exit 2;; esac ;;
-  2) [ "$1" = --events ] || { echo 'arrival-test-codex: expected --events <file>' >&2; exit 2; }
-     mode=fixture; events=$2 ;;
-  *) echo 'arrival-test-codex: invalid arguments' >&2; exit 2 ;;
-esac
+diagnostics=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) sed -n '/^# Usage:/,/^set -eu/{ /^#/p; }' "$0"; exit 0 ;;
+    --events)
+      [ $# -ge 2 ] && [ -n "$2" ] && [ "$mode" = live ] || { echo 'arrival-test-codex: expected one --events <file>' >&2; exit 2; }
+      mode=fixture; events=$2; shift 2 ;;
+    --diagnostics-dir)
+      [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$diagnostics" ] || { echo 'arrival-test-codex: expected one --diagnostics-dir <new directory>' >&2; exit 2; }
+      diagnostics=$2; shift 2 ;;
+    *) echo 'arrival-test-codex: invalid arguments' >&2; exit 2 ;;
+  esac
+done
+[ "$mode" = live ] || [ -z "$diagnostics" ] || { echo 'arrival-test-codex: diagnostics directory requires live mode' >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo 'arrival-test-codex: python3 unavailable' >&2; exit 2; }
 if [ "$mode" = live ]; then
   for dependency in codex timeout; do
     command -v "$dependency" >/dev/null 2>&1 || { echo "arrival-test-codex: $dependency unavailable" >&2; exit 2; }
   done
-  work=$(mktemp -d)
-  trap 'rm -rf "$work"' EXIT
+  umask 077
+  if [ -n "$diagnostics" ]; then
+    mkdir -m 700 -- "$diagnostics" || { echo 'arrival-test-codex: cannot create new diagnostics directory' >&2; exit 2; }
+    work=$(CDPATH= cd -- "$diagnostics" && pwd)
+    echo 'Raw diagnostics will be retained in the requested private directory; do not publish them.' >&2
+  else
+    work=$(mktemp -d)
+  fi
+  # Always use a separate neutral cwd, even when evidence is retained in a repo.
+  neutral=$(mktemp -d)
+  cleanup() {
+    rm -rf "$neutral"
+    if [ -z "$diagnostics" ]; then rm -rf "$work"; fi
+  }
+  trap cleanup EXIT
   trap 'exit 2' INT TERM
   events="$work/events.jsonl"
   version=$(codex --version 2>/dev/null) || { echo 'arrival-test-codex: cannot read CLI version' >&2; exit 2; }
@@ -35,11 +59,16 @@ if [ "$mode" = live ]; then
   # Tool use is forbidden by prompt AND rejected by the event validator below.
   # Read-only sandbox limits shell writes; it does not disable configured MCPs.
   prompt='This is a context arrival observation, not a work task. Do not use any tools, search, filesystem access, or subagents. From the instructions already in your context, return only a JSON object with exactly two keys: "card", the complete verbatim imprint core card text (empty string if absent); and "skills", an array containing the exact catalog names of all available imprint skills (empty array if absent). Do not infer missing content. No code fences or commentary.'
-  if timeout 180 codex exec --cd "$work" --skip-git-repo-check --ephemeral \
+  if timeout 180 codex exec --cd "$neutral" --skip-git-repo-check --ephemeral \
        --sandbox read-only --json "$prompt" >"$events" 2>"$work/stderr" </dev/null; then :
   else
     status=$?
-    echo "arrival-test-codex: unavailable (CLI/timeout exit $status); inspect local CLI auth, network and trust settings" >&2
+    if [ "$status" -eq 124 ]; then
+      echo 'arrival-test-codex: unavailable — timeout after 180 seconds' >&2
+    else
+      echo "arrival-test-codex: unavailable — CLI exit $status; cause not established" >&2
+    fi
+    [ -n "$diagnostics" ] || echo 'Use --diagnostics-dir <new private directory> to retain stderr and events for local diagnosis.' >&2
     exit 2
   fi
 fi
@@ -87,8 +116,14 @@ for event in stream:
         completed = True
     elif kind in ('item.started', 'item.updated', 'item.completed'):
         item = event.get('item')
+        # Codex exec_events.rs defines ErrorItem as non-fatal. Startup warnings
+        # can precede turn.started; successful completion still needs all checks.
         if isinstance(item, dict) and item.get('type') == 'error':
-            unavailable('CLI runtime reported an error; check configured services')
+            if not thread or not isinstance(item.get('message'), str):
+                unavailable('malformed nonfatal warning')
+            print('Warning: nonfatal CLI error item; message withheld from output. '
+                  'Live raw messages require --diagnostics-dir.', file=sys.stderr)
+            continue
         if not started or not isinstance(item, dict):
             unavailable('malformed item')
         if item.get('type') not in ('agent_message', 'reasoning'):
@@ -112,9 +147,10 @@ card_ok = report['card'].rstrip('\n') == expected
 skills_ok = sorted(report['skills']) == skills
 print('Checked UTC:', datetime.datetime.now(datetime.timezone.utc).isoformat())
 print('Mode:', 'fixture validation; live arrival not checked' if mode == 'fixture' else 'live model-reported context')
-print('Card:', 'match' if card_ok else 'mismatch')
+print('Card:', 'match' if card_ok else 'absent' if not report['card'].strip() else 'differs')
 print('Skill catalog:', 'match' if skills_ok else 'mismatch')
 print('Hook execution, skill bodies, subagents and adherence: not checked')
-print('arrival-test-codex:', 'PASS' if card_ok and skills_ok else 'FAIL')
+print('arrival-test-codex:', ('FIXTURE MATCH' if card_ok and skills_ok else 'FIXTURE MISMATCH')
+      if mode == 'fixture' else ('PASS (model report)' if card_ok and skills_ok else 'FAIL (model report)'))
 sys.exit(0 if card_ok and skills_ok else 1)
 PY
