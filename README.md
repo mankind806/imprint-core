@@ -43,10 +43,11 @@ Antigravity (Google DeepMind; measured 2026-09-28 in `agy` CLI 1.2.12) loads the
 Claude-format manifest when imported via `agy plugin import` or installed. Antigravity merges
 `rules/AGENTS.md` into the active rule set, delivering the core card declaratively without requiring
 a `SessionStart` shell hook. Check `k` (`rules-agents-in-sync`) ensures `rules/AGENTS.md` remains
-byte-identical to `hooks/kernkarte.md` on disk. The live arrival test proves model-reported
-context arrival in a root session. Subagent inheritance, tool boundaries, and runtime budget
-persistence (the 20,000-token rules budget can demote over-budget rules to file references) remain
-not checked.
+byte-identical to `hooks/kernkarte.md` on disk. The live arrival test compares the model
+response against the core card; whether the content pre-existed in context or was retrieved
+during execution is not proven ([documented boundary](docs/core-card-and-checks.md)). Subagent
+inheritance, tool boundaries, and runtime budget persistence (the 20,000-token rules budget can
+demote over-budget rules to file references) remain not checked.
 
 ## The picture in 30 seconds
 

@@ -62,10 +62,11 @@ One check guards the Antigravity side (`rules-agents-in-sync`). Antigravity does
 `SessionStart` shell hooks; it delivers the card declaratively through `rules/AGENTS.md` within
 the plugin root, which it automatically merges into the active ruleset. `rules-agents-in-sync`
 enforces that `rules/AGENTS.md` exists and remains byte-identical to `hooks/kernkarte.md` on disk.
-`imprint-dev gen` generates this copy directly from the card. The live arrival test proves
-model-reported context arrival in a root session; subagent inheritance of rules, runtime budget
-demotion (rules exceeding the 20,000-token rules budget can be demoted to file references), and
-tool execution boundaries are not proven by it.
+`imprint-dev gen` generates this copy directly from the card. The live arrival test compares the
+model response against the core card. Whether the content pre-existed in context or was retrieved
+during execution is not proven. Subagent inheritance of rules, runtime budget demotion (rules
+exceeding the 20,000-token rules budget can be demoted to file references), and tool execution
+boundaries are not proven by it.
 
 ## Every card line, in full
 

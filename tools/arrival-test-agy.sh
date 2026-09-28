@@ -4,8 +4,11 @@
 #                                 [--diagnostics-dir <new private directory>]
 # Live mode costs one model call and needs a functioning agy CLI plus timeout.
 # Expected card and skill names stay here: they are never supplied to the model.
-# A match is model-reported context arrival, NOT proof of hook execution, skill
-# body loading, subagent inheritance, or adherence. Those remain not checked.
+# The live probe compares the model response with the core card. Whether the
+# content pre-existed in context or was retrieved during execution is not proven.
+# A match is model-reported card comparison, NOT proof that content pre-existed
+# in context versus being retrieved during execution, nor proof of hook execution,
+# skill body loading, subagent inheritance, or adherence. Those remain not checked.
 # --events validates saved/fixture output only; it never claims live arrival.
 # Tests installed configuration. Antigravity can write state/logs and run plugins.
 # --diagnostics-dir preserves raw stderr and JSON (may contain private context
@@ -158,6 +161,7 @@ print('Checked UTC:', datetime.datetime.now(datetime.timezone.utc).isoformat())
 print('Mode:', 'fixture validation; live arrival not checked' if mode == 'fixture' else 'live model-reported context')
 print('Card:', 'match' if card_ok else 'absent' if not report['card'].strip() else 'differs')
 print('Skill catalog:', 'match' if skills_ok else 'mismatch')
+print('Pre-existing context vs mid-turn retrieval: not proven (model response match only)')
 print('Hook execution, skill bodies, subagents and adherence: not checked')
 print('arrival-test-agy:', ('FIXTURE MATCH' if card_ok and skills_ok else 'FIXTURE MISMATCH')
       if mode == 'fixture' else ('PASS (model report)' if card_ok and skills_ok else 'FAIL (model report)'))
