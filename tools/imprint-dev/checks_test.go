@@ -493,3 +493,87 @@ func TestOverdueRecheckExitCodes(t *testing.T) {
 		}
 	}
 }
+
+// --- i -----------------------------------------------------------------------
+
+func TestCheckHookEnvPortable(t *testing.T) {
+	script := func(content string) func(map[string]string) {
+		return func(f map[string]string) { f["hooks/foo.sh"] = content }
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+		n      int
+		want   []string
+	}{
+		{"valid, no scripts", nil, 0, nil},
+		{"plugin root and data are allowed", script(
+			"#!/bin/sh\ncat \"${CLAUDE_PLUGIN_ROOT}/x\"\necho \"$CLAUDE_PLUGIN_DATA\"\n"), 0, nil},
+		{"any other CLAUDE_* variable is a finding", script(
+			"#!/bin/sh\ncd \"$CLAUDE_PROJECT_DIR\"\n"), 1,
+			[]string{"hooks/foo.sh:2: uses $CLAUDE_PROJECT_DIR"}},
+		{"the braced form is caught too", script(
+			"#!/bin/sh\necho \"${CLAUDE_PROJECT_DIR:-.}\"\n"), 1, []string{"CLAUDE_PROJECT_DIR"}},
+		{"in hooks.json's own command", func(f map[string]string) {
+			f["hooks/hooks.json"] = `{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo $CLAUDE_PROJECT_DIR"}]}]}}` + "\n"
+		}, 1, []string{"hooks/hooks.json:1: uses $CLAUDE_PROJECT_DIR"}},
+		{"two scripts, two findings", func(f map[string]string) {
+			f["hooks/foo.sh"] = "#!/bin/sh\necho \"$CLAUDE_PROJECT_DIR\"\n"
+			f["hooks/bar.sh"] = "#!/bin/sh\necho \"$CLAUDE_SOMETHING\"\n"
+		}, 2, []string{"hooks/foo.sh", "hooks/bar.sh"}},
+		{"a non-.sh file under hooks is not scanned", func(f map[string]string) {
+			f["hooks/notes.md"] = "$CLAUDE_PROJECT_DIR\n"
+		}, 0, nil},
+		{"hooks.json missing is not this check's problem", func(f map[string]string) {
+			delete(f, "hooks/hooks.json")
+		}, 0, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			expectViolations(t, checkHookEnvPortable, testEnv(t, newTree(t, tc.mutate)), tc.n, tc.want...)
+		})
+	}
+}
+
+// --- j -----------------------------------------------------------------------
+
+func TestCheckHookHostBinary(t *testing.T) {
+	script := func(content string) func(map[string]string) {
+		return func(f map[string]string) { f["hooks/foo.sh"] = content }
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+		n      int
+		want   []string
+	}{
+		{"valid, no scripts", nil, 0, nil},
+		{"no mention of claude or codex", script("#!/bin/sh\necho hi\n"), 0, nil},
+		{"a documentation mention in a comment is not an invocation", script(
+			"#!/bin/sh\n# reads the version with `claude --version`\necho hi\n"), 0, nil},
+		{"an existence probe is not an invocation", script(
+			"#!/bin/sh\ncommand -v claude >/dev/null || exit 0\n"), 0, nil},
+		{"invocation via command substitution without imprint_host is a finding", script(
+			"#!/bin/sh\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"hooks/foo.sh:2: invokes the claude or codex binary"}},
+		{"invocation with imprint_host defined passes", script(
+			"#!/bin/sh\nimprint_host() {\n  echo claude\n}\nout=\"$(claude --version)\" || exit 0\n"), 0, nil},
+		{"bash's function keyword is accepted too", script(
+			"#!/bin/sh\nfunction imprint_host() {\n  echo claude\n}\nout=\"$(claude --version)\" || exit 0\n"), 0, nil},
+		{"a commented-out definition does not count", script(
+			"#!/bin/sh\n# imprint_host() {\n#   echo claude\n# }\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"hooks/foo.sh:5: invokes"}},
+		{"codex at the start of a line is caught too", script(
+			"#!/bin/sh\ncodex exec 'do it'\n"), 1, []string{"hooks/foo.sh:2"}},
+		{"after a semicolon", script("#!/bin/sh\ntrue; claude --version\n"), 1, nil},
+		{"after a pipe", script("#!/bin/sh\necho x | claude filter\n"), 1, nil},
+		{"a non-.sh file under hooks is not scanned", func(f map[string]string) {
+			f["hooks/notes.md"] = "$(claude --version)\n"
+		}, 0, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			expectViolations(t, checkHookHostBinary, testEnv(t, newTree(t, tc.mutate)), tc.n, tc.want...)
+		})
+	}
+}

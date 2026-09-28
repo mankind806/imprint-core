@@ -1,8 +1,10 @@
 #!/bin/sh
-# tools/arrival-test.sh — proves whether the imprint core card a fresh session
-# actually receives at SessionStart matches hooks/kernkarte.md in this repo,
-# instead of an older release's card. See docs/core-card-and-checks.md,
-# section "The arrival test", for what this checks, why, and when to run it.
+# tools/arrival-test.sh — Claude Code only. Proves whether the imprint core
+# card a fresh Claude Code session actually receives at SessionStart matches
+# hooks/kernkarte.md in this repo, instead of an older release's card. See
+# docs/core-card-and-checks.md, section "The arrival test", for what this
+# checks, why, and when to run it. For the Codex side, see
+# tools/arrival-test-codex.sh.
 #
 # Usage:
 #   tools/arrival-test.sh [--plugin-dir <path>] [--line <n>]
@@ -123,6 +125,7 @@ if ! output=$("$@" 2>&1); then
   exit 2
 fi
 
+echo "scope: Claude Code only — for Codex, see tools/arrival-test-codex.sh"
 echo "claude --version: $version"
 echo "installed plugin: $installed"
 echo "checked line $line of hooks/kernkarte.md: $expected"
@@ -136,9 +139,9 @@ if [ -z "$output" ]; then
 fi
 
 if printf '%s\n' "$output" | grep -Fxq "$expected"; then
-  echo "arrival-test: PASS — line $line arrived verbatim"
+  echo "arrival-test: PASS (Claude Code only) — line $line arrived verbatim"
   exit 0
 else
-  echo "arrival-test: FAIL — line $line did not arrive verbatim"
+  echo "arrival-test: FAIL (Claude Code only) — line $line did not arrive verbatim"
   exit 1
 fi

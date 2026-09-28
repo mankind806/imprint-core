@@ -34,6 +34,16 @@ clean, `1` on a violation, and `2` if a check itself could not run. `.github/wor
 `go test` and this check on every push and pull request; CI runs wherever GitHub Actions is
 enabled.
 
+Two checks guard the Codex side specifically, since Codex also loads this plugin but only sets
+`CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` from the `CLAUDE_*` family that Claude Code also
+sets. `hook-env-portable` scans `hooks/hooks.json`'s own commands and every `hooks/*.sh`
+script for a `CLAUDE_*` expansion outside those two names — `$CLAUDE_PROJECT_DIR`, for
+instance, which Codex leaves unset. `hook-host-binary` scans the same scripts for a line that
+invokes the `claude` or `codex` binary as a command (a textual heuristic: it looks for one of
+the two names right after something that starts a command, skips whole-line comments, and is
+not a shell parser) and requires that a script doing so also define `imprint_host()`, the
+R-HOST function a hook uses to tell which of the two hosts it is running under.
+
 ## Every card line, in full
 
 The card itself says "Every rule names what enforces it, or says plainly that nothing does."

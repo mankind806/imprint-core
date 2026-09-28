@@ -59,6 +59,8 @@ var checks = []check{
 	{"f", "plugin-version", ".claude-plugin/plugin.json carries a semver version.", checkPluginVersion},
 	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/, and in docs/core-card-and-checks.md, carries at least one known classification, none unknown: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
 	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
+	{"i", "hook-env-portable", "hooks/hooks.json and hooks/*.sh use only CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA from the CLAUDE_* family; Codex sets no other.", checkHookEnvPortable},
+	{"j", "hook-host-binary", "A hooks/*.sh script that invokes the claude or codex binary as a command also defines imprint_host(), the R-HOST function that tells the two hosts apart.", checkHookHostBinary},
 }
 
 // readRel reads a file under root. A missing file is found=false, not an error.
@@ -699,6 +701,151 @@ func checkOverdueRechecks(e *env) (checkResult, error) {
 	} else {
 		res.Note = fmt.Sprintf("%d re-check date(s), %d overdue before %s", dates, overdue, e.Today)
 	}
+	return res, nil
+}
+
+// --- i: hook-env-portable -----------------------------------------------------
+
+// claudeVarRE matches a shell expansion of a CLAUDE_* variable, braced
+// (${CLAUDE_NAME...}) or bare ($CLAUDE_NAME), and captures the variable's own
+// name: the identifier run right after CLAUDE_, stopping at whatever ends a
+// shell identifier (a colon, a closing brace, a slash, and so on).
+var claudeVarRE = regexp.MustCompile(`\$\{?(CLAUDE_[A-Za-z0-9_]*)`)
+
+// codexPluginVars is the CLAUDE_* family Codex actually provides, per R-HOST
+// (the imprint_host shell function, which tells the two hosts apart by
+// exactly this pair): CLAUDE_PROJECT_DIR and every other CLAUDE_* variable a
+// hook might reach for is unset under Codex.
+var codexPluginVars = map[string]bool{
+	"CLAUDE_PLUGIN_ROOT": true,
+	"CLAUDE_PLUGIN_DATA": true,
+}
+
+// hookScriptPaths lists hooks/*.sh, slash-separated and relative to root, in
+// a stable order.
+func hookScriptPaths(root string) ([]string, error) {
+	files, err := regularFilesUnder(root, "hooks")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, f := range files {
+		if strings.HasSuffix(f, ".sh") {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// claudeVarFindings scans raw line by line for a CLAUDE_* expansion outside
+// the two names Codex sets, and reports one finding per occurrence.
+func claudeVarFindings(rule, rel string, raw []byte) []finding {
+	var out []finding
+	for i, line := range splitLines(raw) {
+		for _, m := range claudeVarRE.FindAllStringSubmatch(line, -1) {
+			name := m[1]
+			if codexPluginVars[name] {
+				continue
+			}
+			out = append(out, finding{rule, violation, rel, i + 1,
+				fmt.Sprintf("uses $%s; Codex provides only CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA from the CLAUDE_* family, so this is unset there", name)})
+		}
+	}
+	return out
+}
+
+func checkHookEnvPortable(e *env) (checkResult, error) {
+	const rule = "hook-env-portable"
+	var res checkResult
+	scanned := 0
+	raw, found, err := readRel(e.Root, hooksPath)
+	if err != nil {
+		return checkResult{}, err
+	}
+	if found {
+		res.Findings = append(res.Findings, claudeVarFindings(rule, hooksPath, raw)...)
+		scanned++
+	}
+	scripts, err := hookScriptPaths(e.Root)
+	if err != nil {
+		return checkResult{}, err
+	}
+	for _, rel := range scripts {
+		raw, found, err := readRel(e.Root, rel)
+		if err != nil {
+			return checkResult{}, err
+		}
+		if !found {
+			continue
+		}
+		res.Findings = append(res.Findings, claudeVarFindings(rule, rel, raw)...)
+		scanned++
+	}
+	res.Note = fmt.Sprintf("%d file(s) scanned", scanned)
+	return res, nil
+}
+
+// --- j: hook-host-binary -------------------------------------------------
+
+// hostBinaryInvocationRE is a textual heuristic, not a shell parser. It flags
+// "claude" or "codex" sitting right after something that starts a command: the
+// start of the line, a ;, &, | or backtick, or a $( — so it catches
+// out="$(claude --version)" and codex exec ... but not "command -v claude"
+// (an existence probe, not an invocation: "claude" there follows "-v ", none
+// of those delimiters) and not a backtick-quoted mention inside prose, such as
+// a comment that reads `claude --version` to explain what a later line does
+// (whole-line comments are skipped below before this regex ever sees them).
+// Like any such heuristic it can both miss an invocation shaped some other
+// way (a variable holding the binary name, for one) and flag a stray
+// non-comment mention that only looks like one; it is not a substitute for a
+// human reading the script it flags.
+var hostBinaryInvocationRE = regexp.MustCompile("(^|[;&|`]|\\$\\()\\s*(claude|codex)\\b")
+
+// imprintHostDefRE matches a shell function definition named imprint_host, as
+// R-HOST names it: imprint_host() { ... } or, bash's optional keyword form,
+// function imprint_host() { ... } — the parentheses are required either way,
+// which is the shape every hook script here (POSIX sh) already uses. It does
+// not match inside a comment: ^\s* does not skip a leading #, so a line like
+// "# imprint_host() {" is not read as a definition.
+var imprintHostDefRE = regexp.MustCompile(`(?m)^\s*(?:function\s+)?imprint_host\s*\(\s*\)`)
+
+func checkHookHostBinary(e *env) (checkResult, error) {
+	const rule = "hook-host-binary"
+	scripts, err := hookScriptPaths(e.Root)
+	if err != nil {
+		return checkResult{}, err
+	}
+	var res checkResult
+	scanned := 0
+	for _, rel := range scripts {
+		raw, found, err := readRel(e.Root, rel)
+		if err != nil {
+			return checkResult{}, err
+		}
+		if !found {
+			continue
+		}
+		scanned++
+		invocationLine := 0
+		for i, line := range splitLines(raw) {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if hostBinaryInvocationRE.MatchString(line) {
+				invocationLine = i + 1
+				break
+			}
+		}
+		if invocationLine == 0 {
+			continue
+		}
+		if !imprintHostDefRE.Match(raw) {
+			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine,
+				"invokes the claude or codex binary as a command but does not define imprint_host(); R-HOST needs it to tell the two hosts apart"})
+		}
+	}
+	res.Note = fmt.Sprintf("%d hook script(s) scanned", scanned)
 	return res, nil
 }
 
