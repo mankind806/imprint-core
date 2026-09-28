@@ -223,3 +223,14 @@ func TestHookDoesNotInventModel(t *testing.T) {
 		t.Fatalf("absent model must be omitted: %v", rows[0])
 	}
 }
+
+func TestHookModelEscapesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	const model = "model-\"quoted\"\\path\nline"
+	input, _ := json.Marshal(map[string]string{"hook_event_name": "SubagentStop", "agent_id": "a", "agent_type": "default", "model": model})
+	runHook(t, dir, string(input))
+	rows := hookLog(t, dir)
+	if len(rows) != 1 || rows[0]["model"] != model {
+		t.Fatalf("escaped model changed: %v", rows)
+	}
+}

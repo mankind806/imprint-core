@@ -293,19 +293,46 @@ func TestHookModelsTakePrecedenceOverTranscript(t *testing.T) {
 	if err := os.WriteFile(tr, []byte(`{"type":"turn_context","payload":{"model":"other-turn","effort":"high"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct{ name, event, path string }{
-		{"existing transcript", "SubagentStop", tr},
-		{"missing transcript", "SubagentStop", tr + "-missing"},
-		{"unreadable transcript", "SubagentStop", filepath.Dir(tr)},
-		{"unfinished start", "SubagentStart", ""},
+	for _, tc := range []struct{ name, event, path, transcript string }{
+		{"existing transcript", "SubagentStop", tr, transcriptFound},
+		{"missing transcript", "SubagentStop", tr + "-missing", transcriptMissing},
+		{"unreadable transcript", "SubagentStop", filepath.Dir(tr), transcriptMissing},
+		{"unfinished start", "SubagentStart", "", transcriptNotRecorded},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			record := map[string]string{"ts": "2026-01-01T10:00:00Z", "hook_event_name": tc.event, "agent_id": "a", "agent_type": "default", "model": "hook-model", "effort": "medium", "agent_transcript_path": tc.path}
 			b, _ := json.Marshal(record)
 			r := measureRuns(t, string(b)+"\n", 5*time.Minute, "")[0]
-			if strings.Join(r.Models, ",") != "hook-model" || r.Effort != "medium" || r.Seconds != nil {
+			if strings.Join(r.Models, ",") != "hook-model" || r.Effort != "medium" || r.Seconds != nil || r.Transcript != tc.transcript {
 				t.Fatalf("hook metadata overwritten: %+v", r)
 			}
 		})
+	}
+}
+
+func TestCodexTranscriptModelPrecedesAmbiguousHookModel(t *testing.T) {
+	tr := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(tr, []byte(`{"type":"turn_context","payload":{"model":"child-model","effort":"high"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]string{"ts": "2026-01-01T10:01:00Z", "hook_event_name": "SubagentStop", "agent_id": "a", "agent_type": "default", "host": "codex", "model": "possibly-parent-model", "agent_transcript_path": tr}
+	b, _ := json.Marshal(record)
+	r := measureRuns(t, string(b)+"\n", 5*time.Minute, "")[0]
+	if strings.Join(r.Models, ",") != "child-model" || r.Effort != "high" {
+		t.Fatalf("ambiguous hook field overrides subagent metadata: %+v", r)
+	}
+}
+
+func TestCodexHookModelFallbackRejectsOtherTranscriptShapes(t *testing.T) {
+	tr := filepath.Join(t.TempDir(), "rollout.jsonl")
+	// A known Codex host must not mistake another format for child-model evidence.
+	if err := os.WriteFile(tr, []byte(`{"type":"assistant","message":{"model":"other-format"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]string{"ts": "2026-01-01T10:01:00Z", "hook_event_name": "SubagentStop", "agent_id": "a", "agent_type": "default", "host": "codex", "model": "hook-fallback", "agent_transcript_path": tr}
+	b, _ := json.Marshal(record)
+	r := measureRuns(t, string(b)+"\n", 5*time.Minute, "")[0]
+	if strings.Join(r.Models, ",") != "hook-fallback" {
+		t.Fatalf("unexpected models %+v", r)
 	}
 }

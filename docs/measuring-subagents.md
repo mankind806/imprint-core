@@ -13,7 +13,9 @@ where the limits of this measurement and their re-check date are recorded.
 duration and quality. A third hook takes over the part a program can see.
 `hooks/log-subagent.sh` runs on `SubagentStart` and `SubagentStop` and appends one JSON line
 per event to `${CLAUDE_PLUGIN_DATA}/subagent-log.jsonl`, the plugin's data directory on the
-machine it runs on. Claude normally uses `~/.claude/plugins/data/<id>/`; Codex provides
+machine it runs on. Claude normally uses `~/.claude/plugins/data/<id>/`
+([Claude plugin documentation](https://code.claude.com/docs/en/plugins-reference), read
+2026-09-26); Codex provides
 `CLAUDE_PLUGIN_DATA` as a compatibility alias for its own plugin data directory
 ([OpenAI plugin documentation](https://developers.openai.com/plugins/build/plugins), read
 2026-09-28). The plugin ships no measurements of its own.
@@ -33,14 +35,18 @@ nothing, adds no context and exits 0 on every path.
 `$CLAUDE_PLUGIN_DATA/subagent-log.jsonl`; outside a hook, pass `--log`). It pairs each stop
 with the latest unused start of the same `agent_id` — some runtimes emit another start on resume —
 and prints one row per run: start, agent type, model, effort, duration, and whether the run
-went over the target (`--target`, default `5m`). Distinct models recorded by the paired
-start/stop hooks take precedence. When neither hook records a model, the transcript supplies a fallback: Claude `assistant.message.model`, or
-Codex `turn_context.payload.model`. Effort missing from the hooks falls back to Claude's
+went over the target (`--target`, default `5m`). For `host=codex`, the subagent rollout
+`turn_context.payload.model` takes precedence; the hook model is a fallback. The common
+Codex hook field is documented as the active slug, but whether it names the parent or child
+is not yet measured. For Claude and older logs without a host, distinct hook models take
+precedence and recognised transcript metadata is the fallback. Effort missing from the hooks falls back to Claude's
 top-level `effort` or Codex's `turn_context.payload.effort`. Unknown record shapes supply
 nothing; a missing transcript leaves the model `unknown` unless a hook recorded it.
-Transcript fallback lists distinct metadata values from the entire file, not a verified
+Transcript metadata lists distinct values in first-occurrence order (efforts are
+comma-separated) from the entire file, not a verified
 per-turn history; a reused agent's file can contain other turns. `--projects DIR` searches `DIR` for
-`agent-<id>.jsonl` when the logged path is missing. `--format json` gives the same rows as
+`agent-<id>.jsonl` when the logged path is missing. That filename fallback is Claude-specific;
+it does not discover Codex rollout files, which require their recorded path. `--format json` gives the same rows as
 JSON. An overrun is reported, not treated as a failure: the command exits 0 whatever it finds.
 The **quality** column stays empty: whether the acceptance criterion was met is a judgement,
 and the lead enters it by hand. So does the task kind, of which `agent_type` is only a proxy.
@@ -63,7 +69,9 @@ The same read observed `model` and `effort` in structured Codex `turn_context.pa
 records. Tests use synthetic values with that shape and retain Claude fixtures.
 [OpenAI's hooks reference](https://learn.chatgpt.com/docs/hooks), read 2026-09-28,
 documents the common hook `model` input and warns that transcript formats are not stable.
-Direct hook metadata avoids depending on that format when available. These observations
+The old installed logger omitted `model` unconditionally, so absence in its log does not
+prove absence in hook input. The parent/child meaning of the common model field remains
+unverified; the Codex rollout therefore takes precedence when readable. These observations
 prove the inspected events, not every Codex surface or version.
 
 `host` follows the shared R-HOST v2 path heuristic: check `CLAUDE_PLUGIN_DATA`, then
@@ -72,6 +80,11 @@ prove the inspected events, not every Codex surface or version.
 attestation. Mixed paths use the first match; symlinks, overlapping homes and trailing
 slashes can misclassify or miss a host. No runtime identity is inferred from an absent
 Codex signal alone. Host classification does not select a model or confer permissions.
+
+The shell field extractor is not a full JSON parser: an unexpected nested object with
+a `model` key can be mistaken for the top-level field. The documented subagent payload
+is the input contract; arbitrary nested payloads are not validated. No new parser
+dependency was introduced for that unobserved shape.
 
 Hook registration, trust, and actual invocation remain separate checks. No tool allowlist,
 model mapping, or hook trust guarantee follows from the measurement log.
