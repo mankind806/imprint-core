@@ -19,8 +19,8 @@ import (
 
 // measure reads the log that hooks/log-subagent.sh writes, pairs each
 // SubagentStop with the latest SubagentStart of the same agent_id, and reports
-// one row per run: when it started, agent type, the model(s) its transcript
-// records, effort, duration and whether the duration went over the target.
+// one row per observed run: start, agent type, model metadata, effort, duration
+// when paired and whether that duration went over the target.
 // Quality is a column the tool cannot fill; the lead enters it by hand.
 
 const logFileName = "subagent-log.jsonl"
@@ -33,6 +33,8 @@ type logEntry struct {
 	AgentType      string `json:"agent_type"`
 	SessionID      string `json:"session_id"`
 	Effort         string `json:"effort"`
+	Model          string `json:"model"`
+	Host           string `json:"host"`
 	TranscriptPath string `json:"agent_transcript_path"`
 
 	time time.Time
@@ -54,6 +56,7 @@ type measuredRun struct {
 
 	start, stop    time.Time
 	transcriptPath string
+	host           string
 }
 
 const (
@@ -96,8 +99,8 @@ func readLog(r io.Reader) (entries []logEntry, skipped int, err error) {
 }
 
 // pairRuns pairs each stop with the latest start of the same agent_id before
-// it. A start that a later start replaces before any stop is dropped: a resumed
-// agent starts again under the same id. A start with no stop and a stop with
+// it. A start that a later start replaces before any stop is dropped. Some
+// runtimes emit another start on resume, others only another stop. A start with no stop and a stop with
 // no start still become rows, so that a gap in the log shows.
 func pairRuns(entries []logEntry, target time.Duration) []measuredRun {
 	sorted := make([]logEntry, len(entries))
@@ -112,10 +115,19 @@ func pairRuns(entries []logEntry, target time.Duration) []measuredRun {
 			continue
 		}
 		r := measuredRun{AgentID: e.AgentID, AgentType: e.AgentType, SessionID: e.SessionID,
-			Stop: e.TS, stop: e.time, Effort: e.Effort, transcriptPath: e.TranscriptPath}
+			Stop: e.TS, stop: e.time, Effort: e.Effort, transcriptPath: e.TranscriptPath, host: e.Host}
+		if e.Model != "" {
+			r.Models = []string{e.Model}
+		}
 		if s, ok := pending[e.AgentID]; ok {
 			delete(pending, e.AgentID)
 			r.Start, r.start = s.TS, s.time
+			if r.host == "" {
+				r.host = s.Host
+			}
+			if s.Model != "" && s.Model != e.Model {
+				r.Models = append([]string{s.Model}, r.Models...)
+			}
 			if r.Effort == "" {
 				r.Effort = s.Effort
 			}
@@ -126,8 +138,12 @@ func pairRuns(entries []logEntry, target time.Duration) []measuredRun {
 		runs = append(runs, r)
 	}
 	for _, s := range pending {
+		var models []string
+		if s.Model != "" {
+			models = []string{s.Model}
+		}
 		runs = append(runs, measuredRun{AgentID: s.AgentID, AgentType: s.AgentType, SessionID: s.SessionID,
-			Start: s.TS, start: s.time, Effort: s.Effort})
+			Start: s.TS, start: s.time, Effort: s.Effort, Models: models, host: s.Host})
 	}
 	sort.SliceStable(runs, func(i, j int) bool {
 		a, b := runs[i].first(), runs[j].first()
@@ -146,10 +162,12 @@ func (r measuredRun) first() time.Time {
 	return r.stop
 }
 
-// transcriptInfo reads a subagent transcript and returns, in order of first
-// appearance, the distinct message.model values of its assistant lines and the
-// distinct top-level effort values of the same lines. Nothing else is kept.
-func transcriptInfo(path string) (models, efforts []string, err error) {
+// transcriptInfo reads only known metadata shapes: Claude assistant.message.model
+// and top-level effort, or Codex turn_context.payload.model/effort. Rollout formats
+// are not stable APIs; unknown records supply no model or effort. For a known
+// Codex host only turn_context records identify the subagent model. Distinct
+// values retain first-occurrence order.
+func transcriptInfo(path string, codexOnly bool) (models, efforts []string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
@@ -159,23 +177,45 @@ func transcriptInfo(path string) (models, efforts []string, err error) {
 	br := bufio.NewReader(f)
 	for {
 		line, rerr := br.ReadBytes('\n')
-		if bytes.Contains(line, []byte(`"assistant"`)) {
-			var l struct {
-				Type    string `json:"type"`
-				Effort  any    `json:"effort"`
-				Message struct {
-					Model string `json:"model"`
-				} `json:"message"`
+		// Skip unrelated payloads before decoding; selection below is still structural.
+		if !bytes.Contains(line, []byte(`"assistant"`)) && !bytes.Contains(line, []byte(`"turn_context"`)) {
+			if errors.Is(rerr, io.EOF) {
+				return models, efforts, nil
 			}
-			if json.Unmarshal(line, &l) == nil && l.Type == "assistant" {
-				if m := l.Message.Model; m != "" && !seenM[m] {
-					seenM[m] = true
-					models = append(models, m)
+			if rerr != nil {
+				return nil, nil, rerr
+			}
+			continue
+		}
+		var l struct {
+			Type    string `json:"type"`
+			Effort  any    `json:"effort"`
+			Message struct {
+				Model string `json:"model"`
+			} `json:"message"`
+			Payload struct {
+				Model  string `json:"model"`
+				Effort any    `json:"effort"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &l) == nil {
+			var model string
+			var effort any
+			switch l.Type {
+			case "assistant":
+				if !codexOnly {
+					model, effort = l.Message.Model, l.Effort
 				}
-				if ef, ok := l.Effort.(string); ok && ef != "" && !seenE[ef] {
-					seenE[ef] = true
-					efforts = append(efforts, ef)
-				}
+			case "turn_context":
+				model, effort = l.Payload.Model, l.Payload.Effort
+			}
+			if model != "" && !seenM[model] {
+				seenM[model] = true
+				models = append(models, model)
+			}
+			if ef, ok := effort.(string); ok && ef != "" && !seenE[ef] {
+				seenE[ef] = true
+				efforts = append(efforts, ef)
 			}
 		}
 		if errors.Is(rerr, io.EOF) {
@@ -236,17 +276,26 @@ func resolveModels(runs []measuredRun, projects string) error {
 			r.Transcript = transcriptMissing
 		}
 		if path == "" {
-			r.Models = []string{unknownModel}
+			if len(r.Models) == 0 {
+				r.Models = []string{unknownModel}
+			}
 			continue
 		}
-		models, efforts, err := transcriptInfo(path)
+		models, efforts, err := transcriptInfo(path, r.host == "codex")
 		if err != nil {
-			r.Transcript, r.Models = transcriptMissing, []string{unknownModel}
+			r.Transcript = transcriptMissing
+			if len(r.Models) == 0 {
+				r.Models = []string{unknownModel}
+			}
 			continue
 		}
 		r.Transcript = transcriptFound
-		r.Models = models
-		if len(models) == 0 {
+		// Codex hook model is documented only as the active slug; parent versus
+		// child meaning is unmeasured. Prefer the subagent rollout when available.
+		if len(r.Models) == 0 || (r.host == "codex" && len(models) > 0) {
+			r.Models = models
+		}
+		if len(r.Models) == 0 {
 			r.Models = []string{unknownModel}
 		}
 		if r.Effort == "" {

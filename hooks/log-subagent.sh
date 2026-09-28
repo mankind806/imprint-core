@@ -6,7 +6,7 @@
 # hook input from standard input and appends one JSON line to
 #     ${CLAUDE_PLUGIN_DATA}/subagent-log.jsonl
 # carrying only: ts (UTC), hook_event_name, agent_id, agent_type, session_id,
-# effort (its level) and, on a stop, agent_transcript_path.
+# effort (its level), host, model when present and, on a stop, agent_transcript_path.
 #
 # WHAT IT NEVER COPIES. The agent's answer (last_assistant_message) or any other
 # text a subagent wrote. Only the named fields are pulled out by pattern; the
@@ -24,6 +24,19 @@
 exec >/dev/null 2>&1
 
 [ -n "${CLAUDE_PLUGIN_DATA:-}" ] || exit 0
+
+# imprint_host prints the host runtime running this hook: codex, claude or unknown (R-HOST v2).
+imprint_host() {
+	codex_home=${CODEX_HOME:-$HOME/.codex}
+	claude_home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+	for p in "${CLAUDE_PLUGIN_DATA:-}" "${CLAUDE_PLUGIN_ROOT:-}"; do
+		case $p in
+		"$codex_home"/*) echo codex; return ;;
+		"$claude_home"/*) echo claude; return ;;
+		esac
+	done
+	echo unknown
+}
 
 input=''
 while IFS= read -r line || [ -n "$line" ]; do
@@ -59,9 +72,15 @@ esac
 
 session_id="$(field session_id)"
 effort="$(effort_level)"
+model="$(field model)"
+host="$(imprint_host)"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 0
 
 out="{\"ts\":\"$ts\",\"hook_event_name\":\"$event\",\"agent_id\":\"$agent_id\",\"agent_type\":\"$agent_type\",\"session_id\":\"$session_id\",\"effort\":\"$effort\""
+out="$out,\"host\":\"$host\""
+if [ -n "$model" ]; then
+  out="$out,\"model\":\"$model\""
+fi
 if [ "$event" = SubagentStop ]; then
   out="$out,\"agent_transcript_path\":\"$(field agent_transcript_path)\""
 fi
