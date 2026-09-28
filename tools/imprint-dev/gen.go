@@ -9,13 +9,16 @@ import (
 	"strings"
 )
 
-// The core card has exactly one canonical place. Both hook payloads are
-// generated from it and are never edited by hand; check c holds them to that.
+// The core card has exactly one canonical place. Both hook payloads and
+// rules/AGENTS.md are generated from it and are never edited by hand;
+// checks c and k hold them to that.
 const (
 	cardPath          = "hooks/kernkarte.md"
 	sessionStartPath  = "hooks/session-start.json"
 	subagentStartPath = "hooks/subagent-start.json"
+	rulesAgentsPath   = "rules/AGENTS.md"
 )
+
 
 type hookTarget struct {
 	Event string
@@ -86,8 +89,15 @@ func generate(root string) (files []generatedFile, found bool, err error) {
 	return files, true, nil
 }
 
-// writeGenerated writes the hook payloads and returns their paths.
+// writeGenerated writes the hook payloads and rules/AGENTS.md, returning their paths.
 func writeGenerated(root string) ([]string, error) {
+	raw, found, err := readRel(root, cardPath)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("%s not found under %s", cardPath, root)
+	}
 	files, found, err := generate(root)
 	if err != nil {
 		return nil, err
@@ -95,9 +105,14 @@ func writeGenerated(root string) ([]string, error) {
 	if !found {
 		return nil, fmt.Errorf("%s not found under %s", cardPath, root)
 	}
+	files = append(files, generatedFile{Path: rulesAgentsPath, Data: raw})
 	var written []string
 	for _, f := range files {
-		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(f.Path)), f.Data, 0o644); err != nil {
+		target := filepath.Join(root, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return written, err
+		}
+		if err := os.WriteFile(target, f.Data, 0o644); err != nil {
 			return written, err
 		}
 		written = append(written, f.Path)

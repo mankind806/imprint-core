@@ -72,7 +72,7 @@ func TestRunGen(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
-	for _, p := range []string{sessionStartPath, subagentStartPath} {
+	for _, p := range []string{sessionStartPath, subagentStartPath, rulesAgentsPath} {
 		if !strings.Contains(stdout, "wrote "+p) {
 			t.Errorf("stdout does not name %s:\n%s", p, stdout)
 		}

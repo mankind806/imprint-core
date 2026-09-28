@@ -68,7 +68,7 @@ func TestCardText(t *testing.T) {
 	}
 }
 
-func TestGenWritesBothPayloadsDeterministically(t *testing.T) {
+func TestGenWritesPayloadsAndRulesDeterministically(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{"hooks/kernkarte.md": testCard})
 
@@ -76,7 +76,7 @@ func TestGenWritesBothPayloadsDeterministically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(written) != 2 || written[0] != sessionStartPath || written[1] != subagentStartPath {
+	if len(written) != 3 || written[0] != sessionStartPath || written[1] != subagentStartPath || written[2] != rulesAgentsPath {
 		t.Fatalf("wrote %v", written)
 	}
 	first := map[string][]byte{}
@@ -91,6 +91,9 @@ func TestGenWritesBothPayloadsDeterministically(t *testing.T) {
 	if string(first[sessionStartPath]) != want {
 		t.Fatalf("session-start.json:\ngot  %s\nwant %s", first[sessionStartPath], want)
 	}
+	if string(first[rulesAgentsPath]) != testCard {
+		t.Fatalf("rules/AGENTS.md:\ngot  %s\nwant %s", first[rulesAgentsPath], testCard)
+	}
 
 	if _, err := writeGenerated(root); err != nil {
 		t.Fatal(err)
@@ -102,22 +105,31 @@ func TestGenWritesBothPayloadsDeterministically(t *testing.T) {
 		}
 	}
 
-	// A CRLF checkout of the same card generates the same bytes.
+	// A CRLF checkout of the same card generates the same bytes for hook payloads,
+	// and preserves card bytes for rules/AGENTS.md.
 	crlf := t.TempDir()
-	writeFiles(t, crlf, map[string]string{"hooks/kernkarte.md": "First line of the fixture card.\r\nSecond line.\r\n"})
+	crlfCard := "First line of the fixture card.\r\nSecond line.\r\n"
+	writeFiles(t, crlf, map[string]string{"hooks/kernkarte.md": crlfCard})
 	if _, err := writeGenerated(crlf); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range written {
+	for _, p := range []string{sessionStartPath, subagentStartPath} {
 		other, _ := os.ReadFile(filepath.Join(crlf, filepath.FromSlash(p)))
 		if !bytes.Equal(other, first[p]) {
 			t.Fatalf("%s differs between LF and CRLF cards", p)
 		}
 	}
+	crlfRules, _ := os.ReadFile(filepath.Join(crlf, filepath.FromSlash(rulesAgentsPath)))
+	if !bytes.Equal(crlfRules, []byte(crlfCard)) {
+		t.Fatalf("rules/AGENTS.md does not match card on CRLF checkout")
+	}
 
-	// And what gen wrote is what check c accepts.
+	// And what gen wrote is what check c and check k accept.
 	if res, err := checkCardGenerated(testEnv(t, root)); err != nil || len(violations(res.Findings)) != 0 {
 		t.Fatalf("check c after gen: %v %+v", err, res.Findings)
+	}
+	if res, err := checkRulesAgentsInSync(testEnv(t, root)); err != nil || len(violations(res.Findings)) != 0 {
+		t.Fatalf("check k after gen: %v %+v", err, res.Findings)
 	}
 }
 

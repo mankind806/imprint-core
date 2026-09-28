@@ -6,9 +6,9 @@
 //	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
 //	    [--pr-body-file file] [--same-repo] [--sarif file]
 //
-// gen writes the SessionStart and SubagentStart hook payloads from their one
-// canonical source, hooks/kernkarte.md. check runs the invariants a program can
-// decide over the plugin tree and reports every finding. measure reports the
+// gen writes the SessionStart and SubagentStart hook payloads, and rules/AGENTS.md,
+// from their one canonical source, hooks/kernkarte.md. check runs the invariants a
+// program can decide over the plugin tree and reports every finding. measure reports the
 // subagent runs that hooks/log-subagent.sh logged: duration, model, effort and
 // whether a run went over the target; it exits 0 whatever it reports. commit-check
 // checks a range of new commits, and on a pull request its body, against
@@ -50,7 +50,7 @@ const usageText = `usage:
   imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
       [--pr-body-file file] [--same-repo] [--sarif file]
 
-gen      writes hooks/session-start.json and hooks/subagent-start.json from hooks/kernkarte.md
+gen      writes hooks/session-start.json, hooks/subagent-start.json and rules/AGENTS.md from hooks/kernkarte.md
 check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run;
          an overdue re-check date warns, and fails only with --release
 measure  reports subagent runs from the hook's log (default $CLAUDE_PLUGIN_DATA/subagent-log.jsonl);
