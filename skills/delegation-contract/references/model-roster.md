@@ -13,6 +13,15 @@ number, and it would go stale without anything saying so.
 | Judgement before an irreversible step | Opus family | Not yet measured | Review before anything final or outward-facing, a security boundary, a consistency guarantee, an architectural commitment. |
 | Cheap mechanical work | Haiku family — **only once measured** | Not yet measured | Work whose output a schema, a test or a comparison can judge. The family is used only after a dispatch to it has been measured to actually run on it. |
 
+## Not in this roster yet: Codex and OpenAI models
+
+> **Note, not a roster row.** Every family above is a Claude family. Codex and OpenAI models
+> are not in this roster yet, and no routing rule for them is written here. The one runtime
+> observation so far: a Codex transcript on 2026-09-28 recorded model `gpt-6-astra` at effort
+> `medium` — one observation of what ran, not a measurement of any role. Measuring these
+> models per dispatch, as for the families above, is future work. The agent's `model: sonnet`
+> is a Claude model name; what Codex does with it is not verified.
+
 ## Task → model → effort, from measurement
 
 The rows above assign roles to families. The finer assignment — which kind of
