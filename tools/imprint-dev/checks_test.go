@@ -656,3 +656,30 @@ func TestCheckHookHostBinary(t *testing.T) {
 		})
 	}
 }
+
+// --- k -----------------------------------------------------------------------
+
+func TestCheckRulesAgentsInSync(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+		n      int
+		want   []string
+	}{
+		{"valid", nil, 0, nil},
+		{"rules/AGENTS.md missing", func(f map[string]string) {
+			delete(f, "rules/AGENTS.md")
+		}, 1, []string{"rules/AGENTS.md: missing; run: imprint-dev gen"}},
+		{"rules/AGENTS.md differs", func(f map[string]string) {
+			f["rules/AGENTS.md"] = "Modified card line.\n"
+		}, 1, []string{"rules/AGENTS.md: differs from hooks/kernkarte.md; run: imprint-dev gen"}},
+		{"card missing", func(f map[string]string) {
+			delete(f, "hooks/kernkarte.md")
+		}, 1, []string{"hooks/kernkarte.md: missing, so rules/AGENTS.md has no source"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			expectViolations(t, checkRulesAgentsInSync, testEnv(t, newTree(t, tc.mutate)), tc.n, tc.want...)
+		})
+	}
+}

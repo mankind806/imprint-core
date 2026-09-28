@@ -46,6 +46,10 @@ jobs:
         # Fixtures and stub codex/timeout binaries only: no account, no model
         # call. Needs python3 on the runner.
         run: sh tools/test-arrival-codex.sh
+      - name: Antigravity arrival test (offline)
+        # Fixtures and stub agy/timeout binaries only: no account, no model
+        # call. Needs python3 on the runner.
+        run: sh tools/test-arrival-agy.sh
       - name: imprint-dev check
         run: go run ./tools/imprint-dev check --root . --sarif "$RUNNER_TEMP/imprint-dev.sarif"
       - name: imprint-dev commit-check

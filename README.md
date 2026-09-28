@@ -1,6 +1,6 @@
 # imprint
 
-**Working rules, shipped as a Claude Code plugin that Codex loads too, for two things that
+**Working rules, shipped as a Claude Code plugin that Codex and Antigravity load too, for two things that
 turn out to be one: several AI coding agents cooperating without ruining each other's work,
 and a knowledge base that grows alongside you without quietly rotting.**
 
@@ -15,16 +15,16 @@ and a knowledge base that grows alongside you without quietly rotting.**
 never writes; readers look at the same time; each writer works alone; results come back one
 at a time, with the tests run after each.*
 
-## Runs in Claude Code and Codex
+## Runs in Claude Code, Codex, and Antigravity
 
-| Component | Claude Code | Codex |
-|---|---|---|
-| Core card, at `SessionStart` and `SubagentStart` | measured 2026-09-26, as additional context | measured 2026-09-28, as developer context, in the root session and in subagents |
-| The four skills | measured 2026-09-26, in the [eval runs](evals/README.md) | measured 2026-09-28: all four arrive |
-| Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set |
-| Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model from the transcript first, the hook's `model` only as a fallback; effort from the hook, the transcript only where it is empty ([measuring subagents](#measuring-subagents)) |
-| Hooks: update watch | host-aware: watches `claude --version` ([update watch](docs/update-watch.md)); end to end not measured | host-aware: watches `codex --version` ([update watch](docs/update-watch.md)); end to end not measured, but the state file `codex-version` was written (measured 2026-09-28) |
-| `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
+| Component | Claude Code | Codex | Antigravity |
+|---|---|---|---|
+| Core card, at `SessionStart` and `SubagentStart` | measured 2026-09-26, as additional context | measured 2026-09-28, as developer context, in the root session and in subagents | measured 2026-09-28, via `rules/AGENTS.md` (plugin rules merge) |
+| The four skills | measured 2026-09-26, in the [eval runs](evals/README.md) | measured 2026-09-28: all four arrive | measured 2026-09-28: all four arrive |
+| Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set | **not supported**: agy ignores shell hooks in hooks.json; card delivered natively via `rules/AGENTS.md` |
+| Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model from the transcript first, the hook's `model` only as a fallback; effort from the hook, the transcript only where it is empty ([measuring subagents](#measuring-subagents)) | not yet integrated (planned for AG-004) |
+| Hooks: update watch | host-aware: watches `claude --version` ([update watch](docs/update-watch.md)); end to end not measured | host-aware: watches `codex --version` ([update watch](docs/update-watch.md)); end to end not measured, but the state file `codex-version` was written (measured 2026-09-28) | not yet integrated (planned for AG-004) |
+| `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
 
 Codex (OpenAI; measured 2026-09-28 in `codex-tui`, `cli_version` 0.158.0 per its transcript)
 loads the plugin from the same Claude-format manifest; there is no separate Codex manifest.
@@ -38,6 +38,12 @@ definition approval. The isolated user-hook probe found that referenced script b
 are not covered; plugin-hook/cache behavior remains untested
 ([dated trust measurement](docs/codex-native-boundaries.md)). Under Codex, the agent's
 read-only boundary is a behaviour rule, not a technical tool lock.
+
+Antigravity (Google DeepMind; measured 2026-09-28 in `agy` CLI 1.2.12) loads the plugin from the
+Claude-format manifest when imported via `agy plugin import` or installed. Antigravity merges
+`rules/AGENTS.md` into the active rule set, delivering the core card natively without requiring
+a `SessionStart` shell hook. Check `k` (`rules-agents-in-sync`) ensures `rules/AGENTS.md` remains
+byte-identical to `hooks/kernkarte.md`.
 
 ## The picture in 30 seconds
 

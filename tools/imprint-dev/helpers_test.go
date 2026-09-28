@@ -60,6 +60,7 @@ func validFiles(t *testing.T) map[string]string {
 		"hooks/kernkarte.md":                    testCard,
 		"hooks/hooks.json":                      validHooksJSON,
 		".claude-plugin/plugin.json":            `{"name": "fixture", "version": "1.2.3"}`,
+		rulesAgentsPath:                         testCard,
 		"README.md":                             "# fixture\n",
 	}
 	for _, h := range hookTargets {

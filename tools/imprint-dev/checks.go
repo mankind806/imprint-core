@@ -61,6 +61,7 @@ var checks = []check{
 	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
 	{"i", "hook-env-portable", "hooks/hooks.json and hooks/*.sh use only CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA from the CLAUDE_* family, plus CLAUDE_CONFIG_DIR but only as ${CLAUDE_CONFIG_DIR:-...}; Codex leaves the rest unset.", checkHookEnvPortable},
 	{"j", "hook-host-binary", "A hooks/*.sh script that invokes the claude or codex binary as a command also carries R-HOST v2's canonical imprint_host() block verbatim and calls it; structural only, not a proof every call is gated.", checkHookHostBinary},
+	{"k", "rules-agents-in-sync", "rules/AGENTS.md exists and is byte-identical to hooks/kernkarte.md.", checkRulesAgentsInSync},
 }
 
 // readRel reads a file under root. A missing file is found=false, not an error.
@@ -1015,6 +1016,33 @@ func checkHookHostBinary(e *env) (checkResult, error) {
 	}
 	res.Note = fmt.Sprintf("%d hook script(s) scanned", scanned)
 	return res, nil
+}
+
+// --- k: rules-agents-in-sync -------------------------------------------------
+
+func checkRulesAgentsInSync(e *env) (checkResult, error) {
+	const rule = "rules-agents-in-sync"
+	cardBytes, cardFound, err := readRel(e.Root, cardPath)
+	if err != nil {
+		return checkResult{}, err
+	}
+	if !cardFound {
+		return checkResult{Findings: []finding{{rule, violation, cardPath, 0,
+			"missing, so " + rulesAgentsPath + " has no source"}}}, nil
+	}
+	rulesBytes, rulesFound, err := readRel(e.Root, rulesAgentsPath)
+	if err != nil {
+		return checkResult{}, err
+	}
+	if !rulesFound {
+		return checkResult{Findings: []finding{{rule, violation, rulesAgentsPath, 0,
+			"missing; run: imprint-dev gen"}}}, nil
+	}
+	if !bytes.Equal(rulesBytes, cardBytes) {
+		return checkResult{Findings: []finding{{rule, violation, rulesAgentsPath, 0,
+			"differs from " + cardPath + "; run: imprint-dev gen"}}}, nil
+	}
+	return checkResult{Note: "byte-identical to " + cardPath}, nil
 }
 
 // --- running and reporting ---------------------------------------------------
