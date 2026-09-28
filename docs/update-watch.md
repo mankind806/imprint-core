@@ -31,6 +31,9 @@ files and the same note, byte for byte, which `TestUpdateWatchClaudePathUnchange
 Claims (`.claim-<version>`) and reports (`update-reports/<version>.md`) keep their names on
 both hosts, since each host has its own data directory.
 
+A `claude-code-version` file that 0.7.0 left in the Codex data directory is not removed; it is
+harmless, since under Codex the hook reads and writes only `codex-version` (`hooks/update-watch.sh`).
+
 **R-HOST.** `imprint_host` in the script is the rule. It prints `codex` if
 `CLAUDE_PLUGIN_DATA`, or else `CLAUDE_PLUGIN_ROOT`, lies below the Codex home (`CODEX_HOME`,
 by default `~/.codex`), `claude` if it lies below the Claude home (`CLAUDE_CONFIG_DIR`, by
