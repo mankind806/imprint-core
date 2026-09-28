@@ -23,7 +23,7 @@ at a time, with the tests run after each.*
 | The four skills | measured 2026-09-26, in the [eval runs](evals/README.md) | measured 2026-09-28: all four arrive |
 | Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set |
 | Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model from the transcript first, the hook's `model` only as a fallback; effort from the hook, the transcript only where it is empty ([measuring subagents](#measuring-subagents)) |
-| Hooks: update watch | host-aware: watches `claude --version` ([update watch](docs/update-watch.md)); end to end not measured | host-aware: watches `codex --version` ([update watch](docs/update-watch.md)); end to end not measured |
+| Hooks: update watch | host-aware: watches `claude --version` ([update watch](docs/update-watch.md)); end to end not measured | host-aware: watches `codex --version` ([update watch](docs/update-watch.md)); end to end not measured, but the state file `codex-version` was written (measured 2026-09-28) |
 | `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
 
 Codex (OpenAI; measured 2026-09-28 in `codex-tui`, `cli_version` 0.158.0 per its transcript)
@@ -205,9 +205,14 @@ Not included: the update watcher (PR #12).
 - Checks `i` (`hook-env-portable`) and `j` (`hook-host-binary`) (5abc4df).
 - `tools/arrival-test-codex.sh`, a Codex arrival test (45c3b8d); its offline fixture test runs
   in CI (499f56f).
-- Not verified under Codex: the arrival test's live run (45c3b8d), the
-  `foreign-material-reviewer` agent's allowlist, and whether hook approval covers the hook
-  scripts (c5e5a3d).
+- Live arrival runs, measured 2026-09-28 at worktree HEAD bccb4b7 with 0.8.0 installed:
+  Claude Code 2.1.284, `tools/arrival-test.sh` exit 0, "PASS (Claude Code only)", also with
+  `--plugin-dir .`; codex-cli 0.157.1, `tools/arrival-test-codex.sh` exit 0, "PASS (model
+  report)". The Codex pass is model-reported arrival (card and skill catalog match), not proof
+  that a hook ran; that run also printed one nonfatal CLI error item warning, message not
+  captured.
+- Not verified under Codex: the `foreign-material-reviewer` agent's allowlist, and whether
+  hook approval covers the hook scripts (c5e5a3d).
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
