@@ -21,7 +21,7 @@ def events(value, status='SUCCESS'):
 cases = [
     ('matching report', events(report), 0),
     ('matching report with imprint prefixes', events({'card': card, 'skills': ['imprint:' + s for s in skills]}), 0),
-    ('markdown fenced response', json.dumps({'conversation_id': 'fixture', 'status': 'SUCCESS', 'response': '```json\n' + json.dumps(report) + '\n```'}), 0),
+    ('markdown fenced response', events('```json\n' + json.dumps(report) + '\n```'), 0),
     ('stale card', events(dict(report, card=card.replace('Every rule', 'Each rule'))), 1),
     ('missing skill', events(dict(report, skills=skills[:-1])), 1),
     ('no arrival', events({'card': '', 'skills': []}), 1),
@@ -32,6 +32,9 @@ cases = [
     ('duplicate skills', events(dict(report, skills=skills + skills[:1])), 2),
     ('extra skill', events(dict(report, skills=skills + ['unexpected-skill'])), 1),
     ('CLI failure status', events(report, status='ERROR'), 2),
+    ('tool call detected', json.dumps({'status': 'SUCCESS', 'num_turns': 1, 'response': json.dumps(report), 'tool_calls': [{'name': 'view_file'}]}), 2),
+    ('multiple turns detected', json.dumps({'status': 'SUCCESS', 'num_turns': 2, 'response': json.dumps(report)}), 2),
+    ('private status token not leaked', json.dumps({'status': {'detail': 'PRIVATE_STATUS_TOKEN'}, 'response': ''}), 2),
     ('empty output', '', 2),
 ]
 
@@ -99,10 +102,8 @@ sys.exit(int(os.environ.get('STUB_EXIT', '0')))
 
     retained = pathlib.Path(tmp) / 'diagnostics'
     failed = run_live('--diagnostics-dir', str(retained), STUB_EXIT='7')
-    if failed.returncode != 2 or 'CLI exit 7; cause not established' in failed.stderr:
-        pass
-    else:
-        raise AssertionError('CLI failure must return code 2')
+    if failed.returncode != 2 or 'CLI exit 7; cause not established' not in failed.stderr:
+        raise AssertionError(f'CLI failure must return code 2 and expected message, got {failed.returncode}: {failed.stderr}')
     if 'PRIVATE_' in failed.stdout + failed.stderr:
         raise AssertionError('PRIVATE_ token must not leak')
     if (retained.stat().st_mode & 0o777) != 0o700:

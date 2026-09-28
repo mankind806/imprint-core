@@ -116,7 +116,14 @@ else:
 
 status = result_obj.get('status')
 if status != 'SUCCESS':
-    unavailable(f'CLI run status was {status!r}, expected SUCCESS')
+    unavailable('CLI run status was not SUCCESS')
+
+num_turns = result_obj.get('num_turns')
+if num_turns != 1:
+    unavailable('tool use or multiple turns detected; no arrival claim')
+
+if result_obj.get('tool_calls'):
+    unavailable('tool use detected; no arrival claim')
 
 response_text = result_obj.get('response')
 if not isinstance(response_text, str) or not response_text.strip():

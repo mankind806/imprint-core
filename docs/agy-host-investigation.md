@@ -30,8 +30,8 @@
 
 2. **Kernkarten-Ankunft (Unterschied zu Claude Code)**:
    - In Claude Code injiziert der `SessionStart`-Hook die Kernkarte als temporären Reminder-Text (`session-start.json`).
-   - In Antigravity existiert kein `SessionStart`-Hook-Event. Die native und robuste Methode ist **`rules/AGENTS.md`**. Antigravity liest `rules/` des aktiven Plugins ein und stellt die Kernkarte im Systemprompt bereit.
-   - Gemessen am 2026-09-28: `tools/arrival-test-agy.sh` belegt die 100%ige bytegleiche Ankunft der Kernkarte und die Erkennung aller 4 Skills im Modellkontext.
+   - In Antigravity existiert kein `SessionStart`-Hook-Event. Die native Methode ist **`rules/AGENTS.md`**. Antigravity liest `rules/` des aktiven Plugins ein und stellt die Kernkarte im Systemprompt bereit.
+   - Gemessen am 2026-09-28: `tools/arrival-test-agy.sh` belegt die zeilengenaue Übereinstimmung der Modellantwort mit `hooks/kernkarte.md` und die Erkennung aller 4 Skills im Modellreport der Wurzel-Sitzung. Subagenten-Vererbung, Laufzeitgrenzen und Budget-Demotion (das 20.000-Token-Rules-Budget demotiert überzählige Regeln zu Dateiverweisen) bleiben ungeprüft.
 
 3. **Integritätsprüfung (Check `k` in `imprint-dev`)**:
    - Prüfung `k` (`rules-agents-in-sync`) prüft Existenz und Bytegleichheit von `rules/AGENTS.md` mit `hooks/kernkarte.md`.

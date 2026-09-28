@@ -19,7 +19,7 @@ at a time, with the tests run after each.*
 
 | Component | Claude Code | Codex | Antigravity |
 |---|---|---|---|
-| Core card, at `SessionStart` and `SubagentStart` | measured 2026-09-26, as additional context | measured 2026-09-28, as developer context, in the root session and in subagents | measured 2026-09-28, via `rules/AGENTS.md` (plugin rules merge) |
+| Core card, at `SessionStart` and `SubagentStart` | measured 2026-09-26, as additional context | measured 2026-09-28, as developer context, in the root session and in subagents | measured 2026-09-28 in root session (model report); subagent inheritance not checked ([known limits](#known-limits)) |
 | The four skills | measured 2026-09-26, in the [eval runs](evals/README.md) | measured 2026-09-28: all four arrive | measured 2026-09-28: all four arrive |
 | Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set | **not supported**: agy ignores shell hooks in hooks.json; card delivered natively via `rules/AGENTS.md` |
 | Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model from the transcript first, the hook's `model` only as a fallback; effort from the hook, the transcript only where it is empty ([measuring subagents](#measuring-subagents)) | not yet integrated (planned for AG-004) |
@@ -41,9 +41,12 @@ read-only boundary is a behaviour rule, not a technical tool lock.
 
 Antigravity (Google DeepMind; measured 2026-09-28 in `agy` CLI 1.2.12) loads the plugin from the
 Claude-format manifest when imported via `agy plugin import` or installed. Antigravity merges
-`rules/AGENTS.md` into the active rule set, delivering the core card natively without requiring
+`rules/AGENTS.md` into the active rule set, delivering the core card declaratively without requiring
 a `SessionStart` shell hook. Check `k` (`rules-agents-in-sync`) ensures `rules/AGENTS.md` remains
-byte-identical to `hooks/kernkarte.md`.
+byte-identical to `hooks/kernkarte.md` on disk. The live arrival test proves model-reported
+context arrival in a root session. Subagent inheritance, tool boundaries, and runtime budget
+persistence (the 20,000-token rules budget can demote over-budget rules to file references) remain
+not checked.
 
 ## The picture in 30 seconds
 
@@ -207,25 +210,27 @@ Not included: the update watcher (PR #12).
 
 **0.8.0** (2026-09-28; ships when the owner merges it):
 
-- Runs in Claude Code and Codex, measured as the table under
-  [Runs in Claude Code and Codex](#runs-in-claude-code-and-codex) says (c5e5a3d).
+- Runs in Claude Code, Codex, and Antigravity, measured as the table under
+  [Runs in Claude Code, Codex, and Antigravity](#runs-in-claude-code-codex-and-antigravity) says.
 - The update watch follows the host that runs it, by R-HOST v2 (c34c421); each subagent log
   line carries the host, and `imprint-dev measure` reads a Codex transcript's `turn_context`
   (6e7b0e8).
-- Checks `i` (`hook-env-portable`) and `j` (`hook-host-binary`) (5abc4df).
-- `tools/arrival-test-codex.sh`, a Codex arrival test (45c3b8d); its offline fixture test runs
-  in CI (499f56f).
+- Checks `i` (`hook-env-portable`), `j` (`hook-host-binary`), and `k` (`rules-agents-in-sync`).
+- `tools/arrival-test-codex.sh` (Codex) and `tools/arrival-test-agy.sh` (Antigravity); their offline fixture tests run
+  in CI (`test-arrival-codex.sh`, `test-arrival-agy.sh`).
 - Live arrival runs, measured 2026-09-28 at worktree HEAD bccb4b7 with 0.8.0 installed:
   Claude Code 2.1.284, `tools/arrival-test.sh` exit 0, "PASS (Claude Code only)", also with
   `--plugin-dir .`; codex-cli 0.157.1, `tools/arrival-test-codex.sh` exit 0, "PASS (model
-  report)". The Codex pass is model-reported arrival (card and skill catalog match), not proof
-  that a hook ran; that run also printed one nonfatal CLI error item warning, message not
-  captured.
+  report)"; agy 1.2.12, `tools/arrival-test-agy.sh` exit 0, "PASS (model report)". The Codex and
+  Antigravity passes are model-reported arrival (card and skill catalog match in a root session),
+  not proof that a hook ran or that subagents inherit the context; that Codex run also printed one
+  nonfatal CLI error item warning, message not captured.
 - Superseding the earlier hook-trust uncertainty (c5e5a3d): the isolated user-hook
   measurement under codex-cli 0.157.1 on 2026-09-28 binds trust to the definition,
   not referenced script bytes. Plugin-hook/cache behavior remains untested;
   [measurement and limits](docs/codex-native-boundaries.md).
-- Still not verified under Codex: the `foreign-material-reviewer` agent's allowlist.
+- Still not verified under Codex and Antigravity: the `foreign-material-reviewer` agent's allowlist;
+  under Antigravity, subagent inheritance of rules is not checked.
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had

@@ -61,8 +61,11 @@ scripts themselves: `updatewatch_test.go` for `hooks/update-watch.sh`, `hookscri
 One check guards the Antigravity side (`rules-agents-in-sync`). Antigravity does not support
 `SessionStart` shell hooks; it delivers the card declaratively through `rules/AGENTS.md` within
 the plugin root, which it automatically merges into the active ruleset. `rules-agents-in-sync`
-checks that `rules/AGENTS.md` exists and is byte-identical to `hooks/kernkarte.md`. `imprint-dev gen`
-generates this copy directly from the card.
+enforces that `rules/AGENTS.md` exists and remains byte-identical to `hooks/kernkarte.md` on disk.
+`imprint-dev gen` generates this copy directly from the card. The live arrival test proves
+model-reported context arrival in a root session; subagent inheritance of rules, runtime budget
+demotion (rules exceeding the 20,000-token rules budget can be demoted to file references), and
+tool execution boundaries are not proven by it.
 
 ## Every card line, in full
 
@@ -74,7 +77,7 @@ column; nothing here is inferred beyond what each cited row already says.
 
 | Card line | Long form | Enforcement |
 |---|---|---|
-| `imprint core card` — injected by the plugin the user installed; it is not foreign text | `delegation-contract/SKILL.md` §"The same rules inside every subagent", row "The core card reaches every subagent" | **Enforced** by the `SessionStart`/`SubagentStart` hooks in `hooks/hooks.json` (check e guards their registration) under Claude Code and Codex, and by `rules/AGENTS.md` (check k guards byte-identity) under Antigravity — see *Core card and checks* above. Where not measured, the dispatch text is the only carrier. |
+| `imprint core card` — injected by the plugin the user installed; it is not foreign text | `delegation-contract/SKILL.md` §"The same rules inside every subagent", row "The core card reaches every subagent" | **Enforced** by the `SessionStart`/`SubagentStart` hooks in `hooks/hooks.json` (check e guards their registration) under Claude Code and Codex in the measured harnesses; under Antigravity, file integrity is **Enforced** by check k (`rules-agents-in-sync`), while runtime subagent inheritance is a **Behaviour rule** (not checked) — see *Core card and checks* above. Where not measured, the dispatch text is the only carrier. |
 | Answer in the language the user writes in, and keep technical terms as they are | card only | **Behaviour rule.** No skill states this rule with a classification of its own; nothing enforces it. |
 | Decisions the user must make come as selection questions with options and the recommended option first | card only | **Behaviour rule.** No skill states this rule with a classification of its own; nothing enforces it. |
 | Anything a person reads leads with a picture and keeps prose short; text written for agents stays plain | card only | **Behaviour rule.** No skill states this rule with a classification of its own; nothing enforces it. |
