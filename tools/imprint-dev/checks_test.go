@@ -602,10 +602,10 @@ func TestCheckHookHostBinary(t *testing.T) {
 		// definition — canonical or not — is no longer enough on its own.
 		{"a minimal stub, even if it's called, is not R-HOST v2 verbatim", script(
 			"#!/bin/sh\nimprint_host() {\n  echo claude\n}\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"), 1,
-			[]string{"hooks/foo.sh:6: invokes the claude or codex binary as a command and defines imprint_host(), but not R-HOST v2's canonical block verbatim"}},
+			[]string{"hooks/foo.sh:6: invokes the claude or codex binary as a command; imprint_host differs from R-HOST v2"}},
 		{"bash's function keyword is not R-HOST v2's own shape either", script(
 			"#!/bin/sh\nfunction imprint_host() {\n  echo claude\n}\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"), 1,
-			[]string{"but not R-HOST v2's canonical block verbatim"}},
+			[]string{"imprint_host differs from R-HOST v2"}},
 		{"a commented-out definition does not count", script(
 			"#!/bin/sh\n# imprint_host() {\n#   echo claude\n# }\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"hooks/foo.sh:5: invokes"}},
@@ -619,7 +619,18 @@ func TestCheckHookHostBinary(t *testing.T) {
 		{"the canonical block, verbatim but never called, is a finding", script(rHostV2BlockUnused), 1,
 			[]string{"hooks/foo.sh:14: defines imprint_host() as R-HOST v2's canonical block, verbatim, but never calls it"}},
 		{"the canonical block, called but modified, is still a finding", script(rHostV2BlockModified), 1,
-			[]string{"but not R-HOST v2's canonical block verbatim"}},
+			[]string{"imprint_host differs from R-HOST v2"}},
+		// P2 follow-up (advisor review): a mere word match is not a call. A
+		// second, shadowing definition outside the canonical block must not
+		// count as satisfying it, and a comment merely mentioning the name
+		// must not count as a call either — both used to slip past the
+		// "called" scan below since it matched \bimprint_host\b unconditionally.
+		{"a second definition outside the canonical block does not count as calling it", script(
+			"#!/bin/sh\n"+rHostV2Block+"\nimprint_host() { echo claude; }\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"imprint_host differs from R-HOST v2", "a second imprint_host definition sits outside the canonical block"}},
+		{"a comment mentioning imprint_host does not count as calling it", script(
+			"#!/bin/sh\n"+rHostV2Block+"\n# imprint_host decides the host\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			[]string{"never calls it outside its own definition"}},
 		{"indentation style (tabs vs spaces) does not break the verbatim match", script(
 			strings.ReplaceAll(rHostV2Script, "\t", "    ")), 0, nil},
 		{"R-HOST v2's canonical block, verbatim and called, passes", script(rHostV2Script), 0, nil},

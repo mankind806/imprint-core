@@ -820,12 +820,14 @@ func checkHookEnvPortable(e *env) (checkResult, error) {
 // invokes the claude or codex binary also carries R-HOST v2's canonical
 // imprint_host detector, verbatim, and actually calls it — not that every
 // such invocation is itself gated by the result. It cannot read what a script
-// does with imprint_host's output once called; that a hook actually behaves
-// differently per host is proven separately, by the real, host-aware
-// behaviour tests in updatewatch_test.go and hookscript_test.go, which run
-// the real scripts. This check only closes the narrower gap: a script that
-// invokes claude or codex without the shared detector at all, without it
-// verbatim, or without ever calling it.
+// does with imprint_host's output once called; proving that a hook actually
+// behaves differently per host belongs beside the script itself, as a real,
+// host-aware behaviour test (updatewatch_test.go for hooks/update-watch.sh,
+// hookscript_test.go for hooks/log-subagent.sh — as of this writing neither
+// file has a Codex case; R-HOST v2 is what is expected to add one). This
+// check only closes the narrower gap: a script that invokes claude or codex
+// without the shared detector at all, without it verbatim, or without ever
+// calling it.
 
 // rHostV2Block is R-HOST v2's canonical imprint_host definition, its
 // explanatory comment line included. check j requires a hook script that
@@ -907,10 +909,23 @@ var hostBinaryInvocationRE = regexp.MustCompile("(^|[;&|`]|\\$\\()\\s*(claude|co
 // ^\s* does not skip a leading #, so "# imprint_host() {" is not a definition.
 var imprintHostDefRE = regexp.MustCompile(`(?m)^\s*(?:function\s+)?imprint_host\s*\(\s*\)`)
 
+// imprintHostDefLineRE is imprintHostDefRE applied one line at a time (the
+// scan below already skips comments itself, so no (?m)^ subtlety is needed).
+var imprintHostDefLineRE = regexp.MustCompile(`^\s*(?:function\s+)?imprint_host\s*\(\s*\)`)
+
 // imprintHostCallRE matches the bare word imprint_host, which is how it reads
-// as a call once it is not the def line itself — $(imprint_host),
-// host=$(imprint_host), a bare imprint_host statement, and so on.
+// as a call once it is neither a comment mention nor the def line itself —
+// $(imprint_host), host=$(imprint_host), a bare imprint_host statement, and
+// so on. The scan below checks imprintHostDefLineRE first on every candidate
+// line, so a definition line never also counts as a call just because its own
+// text contains the word.
 var imprintHostCallRE = regexp.MustCompile(`\bimprint_host\b`)
+
+// rHostV2DiffersMsg is a fixed, greppable phrase: every finding about
+// imprint_host not matching R-HOST v2's canonical block, whichever way it
+// doesn't, says this, so a wider search (by the owner, by Codex, by the other
+// writer) finds every such case with one string.
+const rHostV2DiffersMsg = "imprint_host differs from R-HOST v2"
 
 func checkHookHostBinary(e *env) (checkResult, error) {
 	const rule = "hook-host-binary"
@@ -947,22 +962,42 @@ func checkHookHostBinary(e *env) (checkResult, error) {
 		if !ok {
 			msg := "invokes the claude or codex binary as a command but does not define imprint_host(); R-HOST v2's canonical block is needed to tell the two hosts apart"
 			if imprintHostDefRE.MatchString(string(raw)) {
-				msg = "invokes the claude or codex binary as a command and defines imprint_host(), but not R-HOST v2's canonical block verbatim (only each line's own leading/trailing whitespace may differ); copy it exactly rather than reimplementing it"
+				msg = fmt.Sprintf(
+					"invokes the claude or codex binary as a command; %s (its canonical block, comment line included, must appear verbatim — only each line's own leading/trailing whitespace may differ); copy it exactly rather than reimplementing it",
+					rHostV2DiffersMsg)
 			}
 			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine, msg})
 			continue
 		}
-		called := false
+		// A call must sit outside the canonical block's own lines, on a line
+		// that is not itself a comment (a mention like "# imprint_host
+		// decides the host" is prose, not a call) and not another imprint_host
+		// definition (a second definition shadows the canonical one at run
+		// time and violates the single shared definition this check exists to
+		// hold to, whether or not it also happens to contain the word as a
+		// call would).
+		called, redefined := false, false
 		for i, line := range lines {
 			if i >= start && i < end {
-				continue // inside the definition's own block; a call must sit outside it
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if imprintHostDefLineRE.MatchString(line) {
+				redefined = true
+				continue
 			}
 			if imprintHostCallRE.MatchString(line) {
 				called = true
-				break
 			}
 		}
-		if !called {
+		switch {
+		case redefined:
+			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine, fmt.Sprintf(
+				"invokes the claude or codex binary as a command; %s (a second imprint_host definition sits outside the canonical block) — keep exactly one, shared, verbatim definition",
+				rHostV2DiffersMsg)})
+		case !called:
 			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine,
 				"defines imprint_host() as R-HOST v2's canonical block, verbatim, but never calls it outside its own definition; this invocation of the claude or codex binary is not actually gated by it"})
 		}

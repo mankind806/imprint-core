@@ -48,12 +48,16 @@ the two names right after something that starts a command, skips whole-line comm
 not a shell parser) and, when it finds one, requires the script to carry R-HOST v2's canonical
 `imprint_host()` block verbatim (only each line's own leading/trailing whitespace may differ —
 indentation style is free, the words on each line are not) and to call it somewhere outside its
-own definition. A script with no `imprint_host` at all, one that reimplements or edits the
-block, or one that defines it but never calls it, is each its own finding. This check is
-structural, not behavioural: it proves the one shared, canonical detector is present and used,
-not that every `claude`/`codex` invocation it sits next to is actually gated by its result —
-that a hook behaves differently per host is proven separately, by the real, host-aware scripts
-run in `updatewatch_test.go` and `hookscript_test.go`.
+own definition. A second `imprint_host` definition sitting outside the canonical block, or a
+mere mention of the name (in a comment, say), does not count as a call either. A script with no
+`imprint_host` at all, one that reimplements or edits the block, or one that defines it but
+never calls it, is each its own finding. This check is structural, not behavioural: it proves
+the one shared, canonical detector is present and used, not that every `claude`/`codex`
+invocation it sits next to is actually gated by its result — proving that a hook behaves
+differently per host belongs beside the script itself, as a real, host-aware behaviour test
+(`updatewatch_test.go` for `hooks/update-watch.sh`, `hookscript_test.go` for
+`hooks/log-subagent.sh`; as of this writing neither file has a Codex case yet — R-HOST v2 is
+expected to add one).
 
 ## Every card line, in full
 
