@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Bounded, auth-free native hook trust probe. Writes only a new temporary directory."""
+"""Bounded, auth-free native hook trust probe.
+
+Writes only a new temporary directory, retained afterward for inspection.
+"""
 import json, os, pathlib, select, subprocess, tempfile, time
 
 root = pathlib.Path(tempfile.mkdtemp(prefix='imprint-codex-hook-probe-'))

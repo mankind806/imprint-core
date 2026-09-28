@@ -42,10 +42,12 @@ cache behavior, transitive sourced files, symlinks and every hook event remain
 test the interactive human review UI. No bypass flag was used.
 
 The committed [safe observations](probes/codex-native-2026-09-28.json) retain hashes,
-statuses and outputs, replacing only temporary root paths. Original measurement:
+statuses and outputs, replacing only temporary root paths. The hook hash includes
+the temporary path, so its literal value differs between runs; compare equality
+and changes within each run. Original measurement:
 2026-09-28 19:56:19 UTC. An independent reviewer reran the unchanged script at
 19:56:54 UTC with exit 0, and a stricter variant resetting the marker before each
-phase also passed. Script SHA-256:
+phase also passed. Reviewed executable version SHA-256 (before the later docstring-only clarification):
 `7570e020937c96588fc33cdc6c2b2fec0d31b3215fb08de0ee74e1a6245c3a5a`. The assertions enforce these fixture results; they do not
 make the plugin scripts immutable.
 

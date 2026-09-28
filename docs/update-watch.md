@@ -218,9 +218,10 @@ imperative and the hook had no switch.
   by the tests in `tools/imprint-dev/updatewatch_test.go`, which run the real script, not by
   a live run.
 - **A live Codex session with this script:** whether Codex shows the Codex note, and whether a
-  changed script needs a new trust review. The hooks page says trust is recorded against the
-  hook's hash; whether that hash covers the script's content or only the `hooks.json` entry
-  is not checked.
+  changed plugin script needs a new trust review. The separate 2026-09-28
+  codex-cli 0.157.1 isolated user-hook probe found that trust covers the definition,
+  not script bytes; plugin hooks/cache paths remain untested. See the canonical
+  [measurement and limits](codex-native-boundaries.md).
 - **`IMPRINT_UPDATE_WATCH` under Codex.**
 - **End to end:** whether a session offers the review, whether a subagent then reads the
   changelog and pages, and whether a report of the shape above is written. Nothing here has
