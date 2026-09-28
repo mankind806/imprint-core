@@ -29,6 +29,7 @@ cases = [
     ('non-object event', '[]\n', 2),
     ('duplicate event key', '{"type":"thread.started","type":"turn.started"}\n', 2),
     ('duplicate skills', events(dict(report, skills=skills + skills[:1])), 2),
+    ('runtime initialization error', events(report)[:1] + [{'type':'item.completed','item':{'type':'error','message':'fixture runtime failure'}}] + events(report)[1:], 2),
     ('empty stream', '', 2),
 ]
 with tempfile.TemporaryDirectory() as tmp:

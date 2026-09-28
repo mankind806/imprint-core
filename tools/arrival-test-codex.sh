@@ -87,6 +87,8 @@ for event in stream:
         completed = True
     elif kind in ('item.started', 'item.updated', 'item.completed'):
         item = event.get('item')
+        if isinstance(item, dict) and item.get('type') == 'error':
+            unavailable('CLI runtime reported an error; check configured services')
         if not started or not isinstance(item, dict):
             unavailable('malformed item')
         if item.get('type') not in ('agent_message', 'reasoning'):
