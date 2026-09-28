@@ -8,13 +8,17 @@ Four skills and one agent, in the two layers described below, plus two plugin ho
 inject a summary of them at session and subagent start (see [Core card and
 checks](core-card-and-checks.md)), a hook that records how long each subagent ran (see
 [Measuring subagents](measuring-subagents.md)) and, since 2026-09-27, a hook that notes after
-a Claude Code upgrade that a review is due (see [Watching Claude Code
-updates](update-watch.md)). Each skill carries a section
+an upgrade of the host that runs the session, Claude Code or Codex, that a review is due (see
+[Watching Claude Code and Codex updates](update-watch.md)). Each skill carries a section
 on what actually enforces it, and sorts every rule it holds into one of four states:
 **enforced** by something that really stops you, **enforceable, not enforced** where a
 mechanism is possible and nobody has built it, **reserved to a person** where the rule's
 content *is* a person's decision rather than a mechanism nobody wrote, and a plain **behaviour
 rule** that holds only as long as the discipline does.
+
+The skills are the same text in Claude Code and Codex. Which parts are measured in which
+host — the core card, the skills, each hook and the agent — is in the README's table under
+[Runs in Claude Code and Codex](../README.md#runs-in-claude-code-and-codex).
 
 The second state is the one usually left out, and it is the most useful one — it is a list of
 the places where a few lines of tooling would pay. The fourth state started as three and gained
@@ -95,7 +99,9 @@ last is unusable without the second — and their fuller text now lives under
   write. Its `tools:` frontmatter is an allowlist of `Read`, `Grep` and `Glob`, which is the
   point: a prompt asking an agent to stay read-only is a behaviour rule, and behaviour rules
   are broken by exactly the input this agent exists to handle. What it does *not* close is
-  named in its own description.
+  named in its own description. Under Codex, neither loading it nor its allowlist is verified
+  (2026-09-28), so there the read-only boundary is a behaviour rule, not a technical tool
+  lock; see [Known limits](known-limits.md#codex).
 
 ## The two layers
 
