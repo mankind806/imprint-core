@@ -59,6 +59,8 @@ var checks = []check{
 	{"f", "plugin-version", ".claude-plugin/plugin.json carries a semver version.", checkPluginVersion},
 	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/, and in docs/core-card-and-checks.md, carries at least one known classification, none unknown: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
 	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
+	{"i", "hook-env-portable", "hooks/hooks.json and hooks/*.sh use only CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA from the CLAUDE_* family, plus CLAUDE_CONFIG_DIR but only as ${CLAUDE_CONFIG_DIR:-...}; Codex leaves the rest unset.", checkHookEnvPortable},
+	{"j", "hook-host-binary", "A hooks/*.sh script that invokes the claude or codex binary as a command also carries R-HOST v2's canonical imprint_host() block verbatim and calls it; structural only, not a proof every call is gated.", checkHookHostBinary},
 }
 
 // readRel reads a file under root. A missing file is found=false, not an error.
@@ -699,6 +701,319 @@ func checkOverdueRechecks(e *env) (checkResult, error) {
 	} else {
 		res.Note = fmt.Sprintf("%d re-check date(s), %d overdue before %s", dates, overdue, e.Today)
 	}
+	return res, nil
+}
+
+// --- i: hook-env-portable -----------------------------------------------------
+
+// claudeVarRE matches a shell expansion of a CLAUDE_* variable, braced
+// (${CLAUDE_NAME...}) or bare ($CLAUDE_NAME), and captures the variable's own
+// name: the identifier run right after CLAUDE_, stopping at whatever ends a
+// shell identifier (a colon, a closing brace, a slash, and so on).
+var claudeVarRE = regexp.MustCompile(`\$\{?(CLAUDE_[A-Za-z0-9_]*)`)
+
+// codexPluginVars is the CLAUDE_* family Codex sets unconditionally, per
+// R-HOST (the imprint_host shell function, which tells the two hosts apart):
+// every other CLAUDE_* variable a hook might reach for is unset under Codex.
+var codexPluginVars = map[string]bool{
+	"CLAUDE_PLUGIN_ROOT": true,
+	"CLAUDE_PLUGIN_DATA": true,
+}
+
+// claudeConfigDirDefaultRE matches the one CLAUDE_CONFIG_DIR shape this check
+// allows: the expansion-with-default form ${CLAUDE_CONFIG_DIR:-...}. Codex
+// never sets CLAUDE_CONFIG_DIR, so a hook reading it bare, or braced without a
+// fallback, gets an empty string there; the default form is how R-HOST v2's
+// imprint_host locates Claude Code's config dir while still working, via the
+// fallback, under Codex. A bare $CLAUDE_CONFIG_DIR or a braced
+// ${CLAUDE_CONFIG_DIR} without ":-" is still a finding — the exception covers
+// only the one shape that is safe under both hosts.
+var claudeConfigDirDefaultRE = regexp.MustCompile(`\$\{CLAUDE_CONFIG_DIR:-[^{}]*\}`)
+
+// withinAny reports whether pos falls inside one of spans, each a
+// [start, end) pair as FindAllStringIndex returns them.
+func withinAny(spans [][]int, pos int) bool {
+	for _, s := range spans {
+		if pos >= s[0] && pos < s[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// hookScriptPaths lists hooks/*.sh, slash-separated and relative to root, in
+// a stable order.
+func hookScriptPaths(root string) ([]string, error) {
+	files, err := regularFilesUnder(root, "hooks")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, f := range files {
+		if strings.HasSuffix(f, ".sh") {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// claudeVarFindings scans raw line by line for a CLAUDE_* expansion outside
+// the two names Codex sets unconditionally, or CLAUDE_CONFIG_DIR outside its
+// one allowed default-expansion shape, and reports one finding per occurrence.
+func claudeVarFindings(rule, rel string, raw []byte) []finding {
+	var out []finding
+	for i, line := range splitLines(raw) {
+		allowedConfigDir := claudeConfigDirDefaultRE.FindAllStringIndex(line, -1)
+		for _, m := range claudeVarRE.FindAllStringSubmatchIndex(line, -1) {
+			name := line[m[2]:m[3]]
+			if codexPluginVars[name] {
+				continue
+			}
+			if name == "CLAUDE_CONFIG_DIR" && withinAny(allowedConfigDir, m[0]) {
+				continue
+			}
+			msg := fmt.Sprintf("uses $%s; Codex provides only CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA from the CLAUDE_* family, so this is unset there", name)
+			if name == "CLAUDE_CONFIG_DIR" {
+				msg = "uses $CLAUDE_CONFIG_DIR without the ${CLAUDE_CONFIG_DIR:-...} default form; Codex never sets it, so this is unset there"
+			}
+			out = append(out, finding{rule, violation, rel, i + 1, msg})
+		}
+	}
+	return out
+}
+
+func checkHookEnvPortable(e *env) (checkResult, error) {
+	const rule = "hook-env-portable"
+	var res checkResult
+	scanned := 0
+	raw, found, err := readRel(e.Root, hooksPath)
+	if err != nil {
+		return checkResult{}, err
+	}
+	if found {
+		res.Findings = append(res.Findings, claudeVarFindings(rule, hooksPath, raw)...)
+		scanned++
+	}
+	scripts, err := hookScriptPaths(e.Root)
+	if err != nil {
+		return checkResult{}, err
+	}
+	for _, rel := range scripts {
+		raw, found, err := readRel(e.Root, rel)
+		if err != nil {
+			return checkResult{}, err
+		}
+		if !found {
+			continue
+		}
+		res.Findings = append(res.Findings, claudeVarFindings(rule, rel, raw)...)
+		scanned++
+	}
+	res.Note = fmt.Sprintf("%d file(s) scanned", scanned)
+	return res, nil
+}
+
+// --- j: hook-host-binary -------------------------------------------------
+//
+// check j is structural, not behavioural: it proves that a hook script which
+// invokes the claude or codex binary also carries R-HOST v2's canonical
+// imprint_host detector, verbatim, and actually calls it — not that every
+// such invocation is itself gated by the result. It cannot read what a script
+// does with imprint_host's output once called; that a hook actually behaves
+// differently per host is proven separately, by the real, host-aware
+// behaviour tests next to the scripts themselves (updatewatch_test.go for
+// hooks/update-watch.sh, hookscript_test.go for hooks/log-subagent.sh). This
+// check only closes the narrower gap: a script that invokes claude or codex
+// without the shared detector at all, without it verbatim, or without ever
+// calling it.
+
+// rHostV2Block is R-HOST v2's canonical imprint_host definition, its
+// explanatory comment line included. check j requires a hook script that
+// invokes claude or codex to carry this block verbatim — normalized only by
+// trimming each line's own leading and trailing whitespace, so indentation
+// style (tabs vs spaces, how many) is free but the words on each line are
+// not — rather than some ad hoc reimplementation, so the plugin has exactly
+// one place this logic lives and every host-invoking hook shares it.
+const rHostV2Block = `# imprint_host prints the host runtime running this hook: codex, claude or unknown (R-HOST v2).
+imprint_host() {
+	codex_home=${CODEX_HOME:-$HOME/.codex}
+	claude_home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+	for p in "${CLAUDE_PLUGIN_DATA:-}" "${CLAUDE_PLUGIN_ROOT:-}"; do
+		case $p in
+		"$codex_home"/*) echo codex; return ;;
+		"$claude_home"/*) echo claude; return ;;
+		esac
+	done
+	echo unknown
+}`
+
+// rHostV2Lines is rHostV2Block's own lines, each already trimmed — the form
+// findRHostV2Block compares a candidate run of lines against.
+var rHostV2Lines = normalizeLines(splitLines([]byte(rHostV2Block)))
+
+// normalizeLines trims each line's leading and trailing whitespace. This is
+// the only normalization findRHostV2Block allows before comparing a line
+// against rHostV2Block's own text.
+func normalizeLines(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = strings.TrimSpace(l)
+	}
+	return out
+}
+
+// findRHostV2Block looks for rHostV2Block inside lines (a script's own lines,
+// unnormalized) and returns the matched block's [start, end) line range,
+// 0-based, or ok=false if no contiguous run of lines matches once each side
+// is normalized the same way.
+func findRHostV2Block(lines []string) (start, end int, ok bool) {
+	norm := normalizeLines(lines)
+	n := len(rHostV2Lines)
+	for i := 0; i+n <= len(norm); i++ {
+		match := true
+		for k := 0; k < n; k++ {
+			if norm[i+k] != rHostV2Lines[k] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i, i + n, true
+		}
+	}
+	return 0, 0, false
+}
+
+// hostBinaryInvocationRE is a textual heuristic, not a shell parser. It flags
+// "claude" or "codex" sitting right after something that starts a command: the
+// start of the line, a ;, &, | or backtick, or a $( — so it catches
+// out="$(claude --version)" and codex exec ... but not "command -v claude"
+// (an existence probe, not an invocation: "claude" there follows "-v ", none
+// of those delimiters) and not a backtick-quoted mention inside prose, such as
+// a comment that reads `claude --version` to explain what a later line does
+// (whole-line comments are skipped below before this regex ever sees them).
+// Like any such heuristic it can both miss an invocation shaped some other
+// way (a variable holding the binary name, for one) and flag a stray
+// non-comment mention that only looks like one; it is not a substitute for a
+// human reading the script it flags.
+var hostBinaryInvocationRE = regexp.MustCompile("(^|[;&|`]|\\$\\()\\s*(claude|codex)\\b")
+
+// imprintHostDefRE matches any shell function definition named imprint_host,
+// canonical or not: imprint_host() { ... } or, bash's optional keyword form,
+// function imprint_host() { ... }. It exists only to tell apart, for the
+// finding's own wording, a script with no imprint_host at all from one whose
+// imprint_host does not match rHostV2Block; findRHostV2Block, not this,
+// decides whether the check passes. It does not match inside a comment:
+// ^\s* does not skip a leading #, so "# imprint_host() {" is not a definition.
+var imprintHostDefRE = regexp.MustCompile(`(?m)^\s*(?:function\s+)?imprint_host\s*\(\s*\)`)
+
+// imprintHostDefLineRE is imprintHostDefRE applied one line at a time (the
+// scan below already skips comments itself, so no (?m)^ subtlety is needed).
+var imprintHostDefLineRE = regexp.MustCompile(`^\s*(?:function\s+)?imprint_host\s*\(\s*\)`)
+
+// imprintHostCallRE matches only the known shapes of an actual imprint_host
+// call, not a bare word match — that let a mention inside quotes, such as
+// echo 'imprint_host is configured' or printf '%s\n' "imprint_host", count as
+// a call (P2 residue in Codex's re-review of the first fix). Three forms
+// count, and nothing else:
+//   - $(imprint_host), the literal substring, with any other text on the line
+//     around it: host="$(imprint_host)", case "$(imprint_host)" in;
+//   - a backtick call, `imprint_host`;
+//   - imprint_host as a bare command: at the start of a command (line start
+//     after optional whitespace, or right after ;, & or |, which also covers
+//     && and ||, since the character immediately before the name is still
+//     one of those three), followed by end of line, whitespace, ;, ), | or >.
+// The scan below checks imprintHostDefLineRE first on every candidate line,
+// so a definition line is never even offered to this regexp.
+var imprintHostCallRE = regexp.MustCompile(
+	`\$\(imprint_host\)` + // $(imprint_host)
+		"|`imprint_host`" + // `imprint_host`
+		`|(?:^|[;&|])\s*imprint_host(?:$|[\s;)|>])`, // a bare command
+)
+
+// rHostV2DiffersMsg is a fixed, greppable phrase: every finding about
+// imprint_host not matching R-HOST v2's canonical block, whichever way it
+// doesn't, says this, so a wider search (by the owner, by Codex, by the other
+// writer) finds every such case with one string.
+const rHostV2DiffersMsg = "imprint_host differs from R-HOST v2"
+
+func checkHookHostBinary(e *env) (checkResult, error) {
+	const rule = "hook-host-binary"
+	scripts, err := hookScriptPaths(e.Root)
+	if err != nil {
+		return checkResult{}, err
+	}
+	var res checkResult
+	scanned := 0
+	for _, rel := range scripts {
+		raw, found, err := readRel(e.Root, rel)
+		if err != nil {
+			return checkResult{}, err
+		}
+		if !found {
+			continue
+		}
+		scanned++
+		lines := splitLines(raw)
+		invocationLine := 0
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if hostBinaryInvocationRE.MatchString(line) {
+				invocationLine = i + 1
+				break
+			}
+		}
+		if invocationLine == 0 {
+			continue
+		}
+		start, end, ok := findRHostV2Block(lines)
+		if !ok {
+			msg := "invokes the claude or codex binary as a command but does not define imprint_host(); R-HOST v2's canonical block is needed to tell the two hosts apart"
+			if imprintHostDefRE.MatchString(string(raw)) {
+				msg = fmt.Sprintf(
+					"invokes the claude or codex binary as a command; %s (its canonical block, comment line included, must appear verbatim — only each line's own leading/trailing whitespace may differ); copy it exactly rather than reimplementing it",
+					rHostV2DiffersMsg)
+			}
+			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine, msg})
+			continue
+		}
+		// A call must sit outside the canonical block's own lines, on a line
+		// that is not itself a comment (a mention like "# imprint_host
+		// decides the host" is prose, not a call) and not another imprint_host
+		// definition (a second definition shadows the canonical one at run
+		// time and violates the single shared definition this check exists to
+		// hold to, whether or not it also happens to contain the word as a
+		// call would).
+		called, redefined := false, false
+		for i, line := range lines {
+			if i >= start && i < end {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if imprintHostDefLineRE.MatchString(line) {
+				redefined = true
+				continue
+			}
+			if imprintHostCallRE.MatchString(line) {
+				called = true
+			}
+		}
+		switch {
+		case redefined:
+			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine, fmt.Sprintf(
+				"invokes the claude or codex binary as a command; %s (a second imprint_host definition sits outside the canonical block) — keep exactly one, shared, verbatim definition",
+				rHostV2DiffersMsg)})
+		case !called:
+			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine,
+				"defines imprint_host() as R-HOST v2's canonical block, verbatim, but never calls it outside its own definition; this invocation of the claude or codex binary is not actually gated by it"})
+		}
+	}
+	res.Note = fmt.Sprintf("%d hook script(s) scanned", scanned)
 	return res, nil
 }
 

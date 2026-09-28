@@ -34,6 +34,30 @@ clean, `1` on a violation, and `2` if a check itself could not run. `.github/wor
 `go test` and this check on every push and pull request; CI runs wherever GitHub Actions is
 enabled.
 
+Two checks guard the Codex side specifically, since Codex also loads this plugin but only sets
+`CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` from the `CLAUDE_*` family that Claude Code also
+sets. `hook-env-portable` scans `hooks/hooks.json`'s own commands and every `hooks/*.sh`
+script for a `CLAUDE_*` expansion outside those two names — `$CLAUDE_PROJECT_DIR`, for
+instance, which Codex leaves unset. `CLAUDE_CONFIG_DIR` gets one narrow exception: only the
+expansion-with-default form `${CLAUDE_CONFIG_DIR:-...}` passes, because Codex never sets it
+either and R-HOST v2's `imprint_host` reads it exactly that way, with a fallback, to find
+Claude Code's config directory; a bare `$CLAUDE_CONFIG_DIR` or a braced `${CLAUDE_CONFIG_DIR}`
+without the default is still a finding. `hook-host-binary` scans the same scripts for a line that
+invokes the `claude` or `codex` binary as a command (a textual heuristic: it looks for one of
+the two names right after something that starts a command, skips whole-line comments, and is
+not a shell parser) and, when it finds one, requires the script to carry R-HOST v2's canonical
+`imprint_host()` block verbatim (only each line's own leading/trailing whitespace may differ —
+indentation style is free, the words on each line are not) and to call it somewhere outside its
+own definition. A second `imprint_host` definition sitting outside the canonical block, or a
+mere mention of the name (in a comment, say), does not count as a call either. A script with no
+`imprint_host` at all, one that reimplements or edits the block, or one that defines it but
+never calls it, is each its own finding. This check is structural, not behavioural: it proves
+the one shared, canonical detector is present and used, not that every `claude`/`codex`
+invocation it sits next to is actually gated by its result — that a hook actually behaves
+differently per host is proven separately, by the real, host-aware behaviour tests next to the
+scripts themselves: `updatewatch_test.go` for `hooks/update-watch.sh`, `hookscript_test.go` for
+`hooks/log-subagent.sh`.
+
 ## Every card line, in full
 
 The card itself says "Every rule names what enforces it, or says plainly that nothing does."
