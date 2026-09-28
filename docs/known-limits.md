@@ -56,7 +56,8 @@ Two points are not verified:
   read-only boundary is then a behaviour rule, not a technical tool lock.
 - **Hook approval.** Codex keeps a trust hash per hook definition, and the user approves the
   hooks once. Whether that hash covers the scripts the definitions call is not verified; the
-  documentation speaks of "the exact hook definition". If it covers only the definition, a
+  [hooks documentation](https://learn.chatgpt.com/docs/hooks) speaks of "the exact hook
+  definition" (read 2026-09-28). If it covers only the definition, a
   changed script runs without a new approval; if it covers the script, a release that
   changes one asks again. So changes to the hooks may require re-approval in Codex, and
   neither outcome is promised here.

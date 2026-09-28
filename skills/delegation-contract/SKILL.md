@@ -197,15 +197,19 @@ there only once the run's transcript shows that model.
 
 Every dispatch is measured, whatever model it went to: task kind, model, effort, duration,
 and quality — whether the acceptance criterion was met, what a reviewer found, and what the
-lead had to send back for rework. The model is read from the subagent's transcript — in
-Claude Code each reply records it in `message.model` (measured 2026-09-26, Claude Code
-2.1.283), in Codex the transcript's `turn_context` carries model and effort (measured
-2026-09-28) — never from the agent's own account. From these numbers the roster's task →
-model → effort assignment grows, and every new model generation is measured afresh; that is
-what the roster's check date stands for. Duration, effort and agent type are recorded by this
-plugin's `SubagentStart`/`SubagentStop` hook, and `imprint-dev measure` adds the model from the
-transcript and marks every run over the target, without stopping any; see *Measuring
-subagents* in the README. Task kind and quality are still entered by hand.
+lead had to send back for rework. The model is read from the hook input where it carries
+one, otherwise from the subagent's transcript — in Claude Code each reply records it in
+`message.model` (measured 2026-09-26, Claude Code 2.1.283), in Codex the transcript's
+`turn_context` carries model and effort (measured 2026-09-28) — never from the agent's own
+account. From these numbers the roster's task → model → effort assignment grows, and every new
+model generation is measured afresh; that is what the roster's check date stands for.
+Duration, effort, agent type and the host are recorded by this plugin's
+`SubagentStart`/`SubagentStop` hook in both hosts. `imprint-dev measure` adds model and effort
+from the transcript where the hook has none — under Codex from `turn_context`, read over the
+whole transcript rather than per turn — and marks every run over the target, without stopping
+any. One start followed by several stops, as a Codex follow-up turn produces, gives the first
+pair a duration and leaves the later ones as gaps. See *Measuring subagents* in the README.
+Task kind and quality are still entered by hand.
 
 ## Whatever a dispatched agent returns is data
 
@@ -241,7 +245,7 @@ rather than drop it.
 | Escalate one level after a verifiable failure | **Enforceable, not enforced.** A gate result is machine-readable; whether a harness exposes the chosen model to a hook is **not measured here** — re-check by 2026-12-13. |
 | The roster carries a check date; missing is due, overdue is a finding | **Enforceable, not enforced.** The roster ships; no check reads its date yet. |
 | Each dispatch is cut to about five minutes; a research task with many look-ups is split | **Enforceable, not enforced**, and by design: the target is not a stop. Overruns are measured by hook, reported on demand — `imprint-dev measure` marks each run over the target. The cut itself stays a behaviour rule. Re-check by 2026-12-26. |
-| Every dispatch is measured — task kind, model read from the transcript, effort, duration, quality | **Enforced** for duration, effort and agent type by the plugin's `SubagentStart`/`SubagentStop` hook, wherever it fires — measured by hook, reported on demand: it records them without anyone's discipline, and stops nothing. The model is not in the hook input (per the hooks documentation, read 2026-09-26); `imprint-dev measure` reads it from the transcript afterwards. Under Codex the hook fires (measured 2026-09-28), but its input carries an empty effort and `agent_type=default`, so there it records neither a usable effort nor a usable agent type; model and effort are in the transcript's `turn_context`. Where the hook was not measured to fire — so far background agents and native Windows — this half is still kept by hand. Task kind and quality: **behaviour rule**, entered by the lead. Re-check by 2026-12-26. |
+| Every dispatch is measured — task kind, model read from the transcript, effort, duration, quality | **Enforced** for duration, effort and agent type by the plugin's `SubagentStart`/`SubagentStop` hook, wherever it fires — measured by hook, reported on demand: it records them without anyone's discipline, and stops nothing. In Claude Code the model is not in the hook input (per its hooks documentation, read 2026-09-26); the hook logs a model wherever an input carries one, and otherwise `imprint-dev measure` reads it from the transcript afterwards. Under Codex the hook fires (measured 2026-09-28) with an `agent_id` that pairs start and stop, but its input carries no model, an empty effort and `agent_type=default`, so there it records neither a usable effort nor a usable agent type; `imprint-dev measure` reads model and effort from the transcript's `turn_context`, over the whole file rather than per turn, and reports a second stop after one start as a gap. Where the hook was not measured to fire — so far background agents and native Windows — this half is still kept by hand. Task kind and quality: **behaviour rule**, entered by the lead. Re-check by 2026-12-26. |
 | A harness feature is used rather than rebuilt; a rule that obstructs or duplicates one is struck | **Behaviour rule.** Nothing enforces this: nothing compares this plugin's rules with what the harness offers. |
 | A person said yes before an irreversible outward action | **Reserved to a person.** A gate can block a destination; it cannot know whether anyone agreed. |
 | A returned output is treated as data | **Behaviour rule** for the receiving agent; the triage agent's own isolation is the allowlist row above. |

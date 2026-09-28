@@ -8,8 +8,8 @@ Four skills and one agent, in the two layers described below, plus two plugin ho
 inject a summary of them at session and subagent start (see [Core card and
 checks](core-card-and-checks.md)), a hook that records how long each subagent ran (see
 [Measuring subagents](measuring-subagents.md)) and, since 2026-09-27, a hook that notes after
-a Claude Code upgrade that a review is due (see [Watching Claude Code
-updates](update-watch.md)). Each skill carries a section
+an upgrade of the host that runs the session, Claude Code or Codex, that a review is due (see
+[Watching Claude Code and Codex updates](update-watch.md)). Each skill carries a section
 on what actually enforces it, and sorts every rule it holds into one of four states:
 **enforced** by something that really stops you, **enforceable, not enforced** where a
 mechanism is possible and nobody has built it, **reserved to a person** where the rule's

@@ -22,16 +22,18 @@ at a time, with the tests run after each.*
 | Core card, at `SessionStart` and `SubagentStart` | measured 2026-09-26, as additional context | measured 2026-09-28, as developer context, in the root session and in subagents |
 | The four skills | measured 2026-09-26, in the [eval runs](evals/README.md) | measured 2026-09-28: all four arrive |
 | Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set |
-| Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; the input has no model and an empty effort ([measuring subagents](docs/measuring-subagents.md)) |
-| Hooks: update watch | host-aware ([update watch](docs/update-watch.md)); end to end not measured | host-aware ([update watch](docs/update-watch.md)) |
+| Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model and effort come from the transcript ([measuring subagents](#measuring-subagents)) |
+| Hooks: update watch | host-aware: watches `claude --version` ([update watch](docs/update-watch.md)); end to end not measured | host-aware: watches `codex --version` ([update watch](docs/update-watch.md)); end to end not measured |
 | `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
 
 Codex (OpenAI; measured 2026-09-28 in `codex-tui`, `cli_version` 0.158.0 per its transcript)
-loads the plugin from the same Claude-format manifest; there is no separate Codex manifest. Each host
-keeps its own data directory, `~/.claude/plugins/data/imprint-imprint` and
-`~/.codex/plugins/data/imprint-imprint`. Codex asks once to approve the hooks, and a change
-to them may require approval again. Under Codex, the agent's read-only boundary is a
-behaviour rule, not a technical tool lock.
+loads the plugin from the same Claude-format manifest; there is no separate Codex manifest.
+Each host keeps its own data directory, `~/.claude/plugins/data/imprint-imprint` and
+`~/.codex/plugins/data/imprint-imprint`. The hooks tell the two hosts apart by the plugin's
+paths (rule R-HOST): the update watch follows the host's own version and changelog and stays
+silent under an unknown host, and each subagent log line carries the host. Codex asks once to
+approve the hooks, and a change to them may require approval again. Under Codex, the agent's
+read-only boundary is a behaviour rule, not a technical tool lock.
 
 ## The picture in 30 seconds
 
@@ -64,14 +66,14 @@ still work best when you invoke them deliberately at the start of multi-agent wo
 
 ```mermaid
 sequenceDiagram
-    participant CC as Claude Code
+    participant CC as Host (Claude Code or Codex)
     participant H as imprint hooks
     participant L as Lead session
     participant S as Subagent
     participant Log as subagent-log.jsonl
     CC->>H: SessionStart
-    H-->>L: core card, as additional context
-    H-->>L: if Claude Code was upgraded:<br/>a note that an update review is due
+    H-->>L: core card, as context
+    H-->>L: if the host was upgraded:<br/>a note that an update review is due
     Note over L: a skill loads when the task matches it,<br/>or when you invoke it
     L->>CC: dispatch a subagent
     CC->>H: SubagentStart
@@ -117,7 +119,7 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 | `foreign-material-reviewer` | agent | Read-only triage of material you did not write; its tools are an allowlist of `Read`, `Grep` and `Glob` |
 | Core card | hooks on `SessionStart`, `SubagentStart` | Inject `hooks/kernkarte.md` as additional context |
 | Measuring hook | hook on `SubagentStart`, `SubagentStop` | Appends one JSON line per event to the plugin's data directory |
-| Update watch | hook on `SessionStart`, on by default; `IMPRINT_UPDATE_WATCH=0` turns it off | After a Claude Code upgrade, notes that a review of the changelog is due ([docs/update-watch.md](docs/update-watch.md)) |
+| Update watch | hook on `SessionStart`, on by default; `IMPRINT_UPDATE_WATCH=0` turns it off | After an upgrade of the host that runs the session, Claude Code or Codex, notes that a review of its changelog is due ([docs/update-watch.md](docs/update-watch.md)) |
 | `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs |
 | Pre-push hook | `.githooks/pre-push`, this repository, opt-in | Refuses undeclared identities and the shapes personal data takes |
 
@@ -245,7 +247,8 @@ Each limit says what kind of claim it is and when to look again; why each one ma
   the read-only boundary there is a behaviour rule, not a technical tool lock.
   *Re-check by 2026-12-28.*
 - **Whether Codex's hook approval covers the hook scripts' contents: not verified.** Codex
-  keeps a trust hash per hook definition, and its documentation speaks of "the exact hook
+  keeps a trust hash per hook definition, and its
+  [hooks documentation](https://learn.chatgpt.com/docs/hooks) speaks of "the exact hook
   definition" (read 2026-09-28). Changes to the hooks may require re-approval in Codex.
   *Re-check by 2026-12-28.*
 
@@ -303,6 +306,14 @@ with `--plugin-dir`: one general-purpose subagent produced one start and one sto
 installed from the marketplace, in a fresh session: one subagent again produced a start and a
 stop line in the plugin's data directory; the start line carries an empty effort, the stop
 line `high`.
+
+**Under Codex.** Measured 2026-09-28 from the log in Codex's data directory: three starts and
+three stops, each with an `agent_id`, `agent_type` `default`, an empty effort and no model.
+Start and stop pair by `agent_id`, but one agent can log one start followed by several stops
+(follow-up turns); `measure` gives the first pair a duration and reports the later stops as
+gaps rather than guessing one. Model and effort then come from the transcript's
+`turn_context`, read over the whole file, not per turn, so a reused agent's row can list
+values from other turns.
 
 **Limits.** Tested with invented input under `sh` in CI and locally. Whether it fires for
 background agents is **not measured**, and neither is native Windows, where the hook needs an
