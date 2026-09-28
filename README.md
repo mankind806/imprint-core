@@ -24,7 +24,7 @@ at a time, with the tests run after each.*
 | Hooks: session start | measured 2026-09-26 | measured 2026-09-28: `hooks/hooks.json` runs, with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set | **not supported**: agy does not support `SessionStart` hooks; card delivered natively via `rules/AGENTS.md` |
 | Hooks: subagent log | measured 2026-09-26 | measured 2026-09-28: fires at start and stop; model from the transcript first, the hook's `model` only as a fallback; effort from the hook, the transcript only where it is empty ([measuring subagents](#measuring-subagents)) | not yet integrated (planned for AG-004) |
 | Hooks: update watch | host-aware: watches `claude --version` ([update watch](docs/update-watch.md)); end to end not measured | host-aware: watches `codex --version` ([update watch](docs/update-watch.md)); end to end not measured, but the state file `codex-version` was written (measured 2026-09-28) | not yet integrated (planned for AG-004) |
-| `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
+| `foreign-material-reviewer` agent | measured 2026-09-13: the `tools:` allowlist holds, at session scope | native child roles enforce read-only sandbox, but native Read/Grep/Glob are absent; complete reviewer parity not verified ([agent tool boundaries](docs/codex-agent-tools.md)) | **not verified**: neither that it loads nor that its allowlist holds ([known limits](#known-limits)) |
 
 Codex (OpenAI; measured 2026-09-28 in `codex-tui`, `cli_version` 0.158.0 per its transcript)
 loads the plugin from the same Claude-format manifest; there is no separate Codex manifest.
@@ -37,7 +37,10 @@ silent under an unknown host, and each subagent log line carries the host. Codex
 definition approval. The isolated user-hook probe found that referenced script bytes
 are not covered; plugin-hook/cache behavior remains untested
 ([dated trust measurement](docs/codex-native-boundaries.md)). Under Codex, the agent's
-read-only boundary is a behaviour rule, not a technical tool lock.
+read-only boundary is a behaviour rule, not a technical tool lock; native child tool
+boundaries measured on 2026-09-28 show sandbox write blocking, but text reading requires
+shell access as native read tools are absent ([agent tool boundaries](docs/codex-agent-tools.md)).
+Codex remains a supported host for plugin users across all tooling and CI checks.
 
 Antigravity (Google DeepMind; measured 2026-09-28 in `agy` CLI 1.2.12) loads the plugin from the
 Claude-format manifest when imported via `agy plugin import` or installed. Antigravity merges
@@ -209,29 +212,33 @@ Not included: the update watcher (PR #12).
   `squash_merge_commit_message: PR_BODY` setting — the pull request text becomes the squash
   merge commit message (#15).
 
-**0.8.0** (2026-09-28; ships when the owner merges it):
+**0.8.0** (released 2026-09-28):
 
-- Runs in Claude Code, Codex, and Antigravity, measured as the table under
-  [Runs in Claude Code, Codex, and Antigravity](#runs-in-claude-code-codex-and-antigravity) says.
-- The update watch follows the host that runs it, by R-HOST v2 (c34c421); each subagent log
-  line carries the host, and `imprint-dev measure` reads a Codex transcript's `turn_context`
-  (6e7b0e8).
-- Checks `i` (`hook-env-portable`), `j` (`hook-host-binary`), and `k` (`rules-agents-in-sync`).
-- `tools/arrival-test-codex.sh` (Codex) and `tools/arrival-test-agy.sh` (Antigravity); their offline fixture tests run
-  in CI (`test-arrival-codex.sh`, `test-arrival-agy.sh`).
+- Initial multi-host release: runs in Claude Code and Codex (#21).
+- Host detection by shared rule R-HOST v2: update watch follows the host that runs it;
+  each subagent log line carries the host; `imprint-dev measure` reads a Codex transcript's
+  `turn_context`.
+- Checks `i` (`hook-env-portable`) and `j` (`hook-host-binary`).
+- `tools/arrival-test-codex.sh` probes the core card and skill catalog in Codex; offline fixture
+  runs in CI (`test-arrival-codex.sh`).
 - Live arrival runs, measured 2026-09-28 at worktree HEAD bccb4b7 with 0.8.0 installed:
-  Claude Code 2.1.284, `tools/arrival-test.sh` exit 0, "PASS (Claude Code only)", also with
-  `--plugin-dir .`; codex-cli 0.157.1, `tools/arrival-test-codex.sh` exit 0, "PASS (model
-  report)"; agy 1.2.12, `tools/arrival-test-agy.sh` exit 0, "PASS (model report)". The Codex and
-  Antigravity passes are model-reported arrival (card and skill catalog match in a root session),
-  not proof that a hook ran or that subagents inherit the context; that Codex run also printed one
-  nonfatal CLI error item warning, message not captured.
-- Superseding the earlier hook-trust uncertainty (c5e5a3d): the isolated user-hook
-  measurement under codex-cli 0.157.1 on 2026-09-28 binds trust to the definition,
-  not referenced script bytes. Plugin-hook/cache behavior remains untested;
-  [measurement and limits](docs/codex-native-boundaries.md).
-- Still not verified under Codex and Antigravity: the `foreign-material-reviewer` agent's allowlist;
-  under Antigravity, subagent inheritance of rules is not checked.
+  Claude Code 2.1.284, `tools/arrival-test.sh` exit 0, "PASS (Claude Code only)";
+  codex-cli 0.157.1, `tools/arrival-test-codex.sh` exit 0, "PASS (model report)".
+
+**0.9.0** (2026-09-28; ships when the owner merges it):
+
+Runs in Claude Code, Codex, and Antigravity. Codex remains a supported host for plugin users across all tooling and CI checks even when authoring or subscription environments change.
+
+- **Antigravity support (PR #24):** Delivers the core card declaratively via `rules/AGENTS.md` (byte-identical copy of `hooks/kernkarte.md`, verified by Check `k`). Ships `tools/arrival-test-agy.sh` live probe and `tools/test-arrival-agy.sh` deterministic CI fixture. Live arrival measured 2026-09-28 in agy 1.2.12: exit 0, "PASS (model report)".
+- **Codex native child agent tool boundaries (PR #25):** Local reproducible probe (`tools/probes/codex-agent-tools.py`) measuring Codex CLI 0.157.1 native child tool dispatch and routing. Explicit `[agents.<name>]` TOML configuration exposes role selector; `sandbox_mode = "read-only"` blocks shell writes and patch application; `shell_tool = false` rejects shell calls; native `Read`, `Grep`, `Glob` are absent in child agents ([documented](docs/codex-agent-tools.md)).
+- **Codex user-hook trust boundaries (PR #23):** Isolated probe established that hook approval binds to definition rather than referenced script bytes ([documented](docs/codex-native-boundaries.md)).
+- **Live arrival evidence (PR #22, PR #24):** Recorded live arrival runs across all three hosts (Claude Code 2.1.284, Codex CLI 0.157.1, Antigravity CLI 1.2.12).
+- **Manifests & Marketplace:** Updated descriptions and versions across `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` to reflect three-host support.
+- **What is not verified:**
+  - Pre-existing context vs. mid-turn retrieval in Antigravity arrival tests is not proven (model-response match only).
+  - Subagent rule inheritance, tool boundaries, and runtime budget persistence under Antigravity remain not checked.
+  - Complete reviewer parity for `foreign-material-reviewer` without shell access under Codex is not achieved (disabling shell removes text reading entirely).
+  - Codex Code Mode, MCP/plugin tools, alternate tool routes, and live model behaviors remain unverified.
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had

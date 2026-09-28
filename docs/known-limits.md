@@ -45,20 +45,37 @@ frontmatter names rather than the session default. So plugin agent frontmatter i
 ## Codex
 
 Codex loads the plugin, and most of it is measured there (measured 2026-09-28; the table is
-in the README under [Runs in Claude Code and Codex](../README.md#runs-in-claude-code-and-codex)).
-Agent enforcement remains unverified; hook trust has the following measured limit:
+in the README under [Runs in Claude Code, Codex, and Antigravity](../README.md#runs-in-claude-code-codex-and-antigravity)).
+Hook trust and agent tool enforcement have the following measured limits:
 
-- **The `foreign-material-reviewer` agent.** No named plugin agent appeared in Codex's spawn
-  schema, and no `[agents]` config was found, so neither loading the agent nor its `tools:`
-  allowlist is verified there; `model: sonnet` is a Claude model name. This is the one that
-  matters for safety: in Claude Code the allowlist is the enforced control, and the reason
-  the agent exists. Under Codex, treat foreign material by the same procedure, but the
-  read-only boundary is then a behaviour rule, not a technical tool lock.
+- **The `foreign-material-reviewer` agent and tool boundaries.** Native child agent tool
+  boundaries measured against Codex CLI 0.157.1 (2026-09-28, PR #25; [documented](codex-agent-tools.md))
+  show that explicit `[agents.<name>]` TOML configuration exposes the role selector, and
+  setting `sandbox_mode = "read-only"` blocks shell writes and patch application. However,
+  native `Read`, `Grep`, and `Glob` tools are absent in Codex child agents. Disabling the
+  shell (`shell_tool = false`) prevents text reading entirely. Therefore, complete reviewer
+  parity with Claude Code's tool allowlists without shell access is not achieved. Code Mode,
+  MCP/plugin tools, and alternate tool routes remain unverified.
 - **Hook approval.** The earlier uncertainty is superseded by the 2026-09-28
   codex-cli 0.157.1 isolated user-hook measurement: trust covers the definition,
   not referenced script bytes. Plugin hooks and cache paths remain untested.
   The canonical [measurement and limits](codex-native-boundaries.md) contain the
   reproducible probe and distinguish native evidence from model reports.
+
+## Antigravity
+
+Antigravity (Google DeepMind; measured 2026-09-28 in `agy` CLI 1.2.12) merges `rules/AGENTS.md`
+into the active ruleset, delivering the core card declaratively without `SessionStart` hooks.
+Check `k` ensures `rules/AGENTS.md` remains in sync with `hooks/kernkarte.md`.
+Measured limits:
+
+- **Arrival verification:** The live arrival test matches the model response against the core card;
+  whether the content pre-existed in context or was retrieved during execution is not proven
+  ([documented boundary](core-card-and-checks.md)).
+- **Subagents and allowlists:** Subagent rule inheritance and tool allowlist enforcement remain
+  not checked.
+- **Runtime budget:** Antigravity's 20,000-token rules budget can demote over-budget rules to file
+  references; runtime persistence across extended turns is not verified.
 
 ## A gap named elsewhere
 
