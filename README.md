@@ -308,17 +308,19 @@ stop line in the plugin's data directory; the start line carries an empty effort
 line `high`.
 
 **Under Codex.** Measured 2026-09-28 from the log in Codex's data directory: three starts and
-three stops, each with an `agent_id`, `agent_type` `default`, an empty effort and no model.
-Start and stop pair by `agent_id`, but one agent can log one start followed by several stops
-(follow-up turns); `measure` gives the first pair a duration and reports the later stops as
-gaps rather than guessing one. Model and effort come from the transcript's `turn_context`
+three stops. The lines, written by the 0.7.0 hook, held an `agent_id`, `agent_type` `default`
+and an empty effort; that logger did not record a model, so whether Codex's subagent hook
+input carries one is not verified. Start and stop pair by `agent_id`, but one agent can log
+one start followed by several stops (follow-up turns); `measure` gives the first pair a
+duration and reports the later stops as gaps rather than guessing one. Model and effort come from the transcript's `turn_context`
 first: every distinct value over the whole file, in order of first appearance and joined by
 commas (an effort of `medium,high`, say), not per turn, so a reused agent's row can list
 values from other turns. A `model` in the hook input is used only when the transcript has
 none, because whether it names the subagent's model or the parent's is not verified; Codex's
 [hooks documentation](https://learn.chatgpt.com/docs/hooks) calls it only the "Active model
 slug" (read 2026-09-28). Under Claude Code nothing changes: the subagent hook input has no
-model, so it comes from the transcript.
+model (per Claude Code's hooks documentation, read 2026-09-26), so it comes from the
+transcript.
 
 **Limits.** Tested with invented input under `sh` in CI and locally. Whether it fires for
 background agents is **not measured**, and neither is native Windows, where the hook needs an
