@@ -1,9 +1,9 @@
 # Antigravity (agy) als dritter Host für Imprint
 
-**Untersuchungs- und Integrationsbericht für Pakete `imprint-AG-002` und `imprint-core-AG-003`**  
-**Datum:** 2026-09-28  
-**Host & Version:** Antigravity CLI `1.2.12` (Linux x86_64, Executable `/home/linuxbrew/.linuxbrew/Caskroom/antigravity-cli-linux/1.2.12,5784551402897408/antigravity`)  
-**Modell:** Gemini 3.8 Flash (High)  
+**Untersuchungs- und Integrationsbericht für Pakete `imprint-AG-002` und `imprint-core-AG-003`**
+**Datum:** 2026-09-28
+**Host & Version:** Antigravity CLI `1.2.12` (Linux x86_64, Executable `/home/linuxbrew/.linuxbrew/Caskroom/antigravity-cli-linux/1.2.12,5784551402897408/antigravity`)
+**Modell:** Gemini 3.8 Flash (High)
 **Referenz-Dokumentation:** `~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/` (`plugins.md`, `rules.md`, `skills.md`, `hooks.md`, `mcp_servers.md`, `json_configs.md`)
 
 ---

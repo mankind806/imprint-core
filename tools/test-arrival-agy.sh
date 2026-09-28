@@ -33,7 +33,10 @@ cases = [
     ('extra skill', events(dict(report, skills=skills + ['unexpected-skill'])), 1),
     ('CLI failure status', events(report, status='ERROR'), 2),
     ('tool call detected', json.dumps({'status': 'SUCCESS', 'num_turns': 1, 'response': json.dumps(report), 'tool_calls': [{'name': 'view_file'}]}), 2),
+    ('outer tool call in wrapper detected', json.dumps({'event': 'result', 'tool_calls': [{'name': 'view_file'}], 'result': {'status': 'SUCCESS', 'num_turns': 1, 'response': json.dumps(report)}}), 2),
     ('multiple turns detected', json.dumps({'status': 'SUCCESS', 'num_turns': 2, 'response': json.dumps(report)}), 2),
+    ('boolean num_turns rejected', json.dumps({'status': 'SUCCESS', 'num_turns': True, 'response': json.dumps(report)}), 2),
+    ('outer num_turns multiple detected', json.dumps({'event': 'result', 'num_turns': 2, 'result': {'status': 'SUCCESS', 'num_turns': 1, 'response': json.dumps(report)}}), 2),
     ('private status token not leaked', json.dumps({'status': {'detail': 'PRIVATE_STATUS_TOKEN'}, 'response': ''}), 2),
     ('empty output', '', 2),
 ]

@@ -119,10 +119,14 @@ if status != 'SUCCESS':
     unavailable('CLI run status was not SUCCESS')
 
 num_turns = result_obj.get('num_turns')
-if num_turns != 1:
+if type(num_turns) is not int or num_turns != 1:
     unavailable('tool use or multiple turns detected; no arrival claim')
 
-if result_obj.get('tool_calls'):
+outer_turns = raw_event.get('num_turns')
+if outer_turns is not None and (type(outer_turns) is not int or outer_turns != 1):
+    unavailable('tool use or multiple turns detected; no arrival claim')
+
+if raw_event.get('tool_calls') or result_obj.get('tool_calls'):
     unavailable('tool use detected; no arrival claim')
 
 response_text = result_obj.get('response')
