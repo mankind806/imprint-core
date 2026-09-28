@@ -35,6 +35,11 @@ if [ "$mode" = live ]; then
   for dependency in codex timeout; do
     command -v "$dependency" >/dev/null 2>&1 || { echo "arrival-test-codex: $dependency unavailable" >&2; exit 2; }
   done
+  # Status can contain formatted credentials. Read status only; never initiate login.
+  if ! codex login status >/dev/null 2>&1; then
+    echo 'arrival-test-codex: unavailable — not logged in (or login status unreadable)' >&2
+    exit 2
+  fi
   umask 077
   if [ -n "$diagnostics" ]; then
     mkdir -m 700 -- "$diagnostics" || { echo 'arrival-test-codex: cannot create new diagnostics directory' >&2; exit 2; }

@@ -60,6 +60,9 @@ with tempfile.TemporaryDirectory() as tmp:
     capture = pathlib.Path(tmp) / 'args.json'
     stub = bindir / 'codex'
     stub.write_text('#!' + sys.executable + '\n' + '''import json, os, pathlib, sys
+if sys.argv[1:] == ['login', 'status']:
+    print('PRIVATE_LOGIN_TOKEN'); print('PRIVATE_LOGIN_TOKEN', file=sys.stderr)
+    sys.exit(int(os.environ.get('STUB_LOGIN_EXIT', '0')))
 if sys.argv[1:] == ['--version']:
     print('codex-cli fixture'); sys.exit(0)
 pathlib.Path(os.environ['CAPTURE']).write_text(json.dumps(sys.argv[1:]))
@@ -77,34 +80,60 @@ sys.exit(int(os.environ.get('STUB_EXIT', '0')))
     def run_live(*args, **overrides):
         return subprocess.run(['sh', script, *args], env=dict(env, **overrides),
                               capture_output=True, text=True)
+    for login_exit in ['1', '7']:
+        no_login = run_live(STUB_LOGIN_EXIT=login_exit)
+        if no_login.returncode != 2 or 'not logged in (or login status unreadable)' not in no_login.stderr:
+            raise AssertionError('failed login status must stop live execution explicitly')
+        if capture.exists() or 'PRIVATE_' in no_login.stdout + no_login.stderr:
+            raise AssertionError('failed login status must not execute or expose credentials')
+    print('PASS: missing/unreadable login status stops execution without credential output')
     live = run_live()
-    assert live.returncode == 0, live.stderr
-    assert 'PASS (model report)' in live.stdout
-    assert 'PRIVATE_' not in live.stdout + live.stderr
+    if not (live.returncode == 0):
+        raise AssertionError(live.stderr)
+    if not ('PASS (model report)' in live.stdout):
+        raise AssertionError("test assertion failed: 'PASS (model report)' in live.stdout")
+    if not ('PRIVATE_' not in live.stdout + live.stderr):
+        raise AssertionError("test assertion failed: 'PRIVATE_' not in live.stdout + live.stderr")
     args = json.loads(capture.read_text())
-    assert args[0] == 'exec' and args[args.index('--sandbox')+1] == 'read-only'
-    assert '--skip-git-repo-check' in args and '--ephemeral' in args and '--json' in args
-    assert not any('dangerously' in a for a in args)
-    assert card not in args[-1] and not any(skill in args[-1] for skill in skills)
+    if not (args[0] == 'exec' and args[args.index('--sandbox') + 1] == 'read-only'):
+        raise AssertionError("test assertion failed: args[0] == 'exec' and args[args.index('--sandbox') + 1] == 'read-only'")
+    if not ('--skip-git-repo-check' in args and '--ephemeral' in args and ('--json' in args)):
+        raise AssertionError("test assertion failed: '--skip-git-repo-check' in args and '--ephemeral' in args and ('--json' in args)")
+    if not (not any(('dangerously' in a for a in args))):
+        raise AssertionError("test assertion failed: not any(('dangerously' in a for a in args))")
+    if not (card not in args[-1] and (not any((skill in args[-1] for skill in skills)))):
+        raise AssertionError('test assertion failed: card not in args[-1] and (not any((skill in args[-1] for skill in skills)))')
     cwd = pathlib.Path(args[args.index('--cd')+1])
-    assert cwd != root and not cwd.exists(), 'neutral temporary cwd must be cleaned'
+    if not (cwd != root and (not cwd.exists())):
+        raise AssertionError('neutral temporary cwd must be cleaned')
     print('PASS: live stub arguments, no expectation leakage, warning, cleanup')
     retained = pathlib.Path(tmp) / 'diagnostics'
     failed = run_live('--diagnostics-dir', str(retained), STUB_EXIT='7')
-    assert failed.returncode == 2 and 'CLI exit 7; cause not established' in failed.stderr
-    assert 'PRIVATE_' not in failed.stdout + failed.stderr
-    assert retained.stat().st_mode & 0o777 == 0o700
-    assert (retained/'stderr').read_text().strip() == 'PRIVATE_STDERR_TOKEN'
-    assert (retained/'events.jsonl').read_text() == fixture.read_text()
-    assert (retained/'stderr').stat().st_mode & 0o777 == 0o600
-    assert run_live('--diagnostics-dir', str(retained)).returncode == 2
+    if not (failed.returncode == 2 and 'CLI exit 7; cause not established' in failed.stderr):
+        raise AssertionError("test assertion failed: failed.returncode == 2 and 'CLI exit 7; cause not established' in failed.stderr")
+    if not ('PRIVATE_' not in failed.stdout + failed.stderr):
+        raise AssertionError("test assertion failed: 'PRIVATE_' not in failed.stdout + failed.stderr")
+    if not (retained.stat().st_mode & 511 == 448):
+        raise AssertionError('test assertion failed: retained.stat().st_mode & 511 == 448')
+    if not ((retained / 'stderr').read_text().strip() == 'PRIVATE_STDERR_TOKEN'):
+        raise AssertionError("test assertion failed: (retained / 'stderr').read_text().strip() == 'PRIVATE_STDERR_TOKEN'")
+    if not ((retained / 'events.jsonl').read_text() == fixture.read_text()):
+        raise AssertionError("test assertion failed: (retained / 'events.jsonl').read_text() == fixture.read_text()")
+    if not ((retained / 'stderr').stat().st_mode & 511 == 384):
+        raise AssertionError("test assertion failed: (retained / 'stderr').stat().st_mode & 511 == 384")
+    if not (run_live('--diagnostics-dir', str(retained)).returncode == 2):
+        raise AssertionError("test assertion failed: run_live('--diagnostics-dir', str(retained)).returncode == 2")
     print('PASS: CLI failure preserves private evidence only on explicit request')
     timed = run_live(STUB_TIMEOUT='1')
-    assert timed.returncode == 2 and 'timeout after 180 seconds' in timed.stderr
+    if not (timed.returncode == 2 and 'timeout after 180 seconds' in timed.stderr):
+        raise AssertionError("test assertion failed: timed.returncode == 2 and 'timeout after 180 seconds' in timed.stderr")
     print('PASS: timeout classification')
     help_result = run_live('--help')
-    assert help_result.returncode == 0 and 'set -eu' not in help_result.stdout
-    assert run_live('--events').returncode == 2
-    assert run_live('--events', str(fixture), '--diagnostics-dir', str(retained)).returncode == 2
+    if not (help_result.returncode == 0 and 'set -eu' not in help_result.stdout):
+        raise AssertionError("test assertion failed: help_result.returncode == 0 and 'set -eu' not in help_result.stdout")
+    if not (run_live('--events').returncode == 2):
+        raise AssertionError("test assertion failed: run_live('--events').returncode == 2")
+    if not (run_live('--events', str(fixture), '--diagnostics-dir', str(retained)).returncode == 2):
+        raise AssertionError("test assertion failed: run_live('--events', str(fixture), '--diagnostics-dir', str(retained)).returncode == 2")
     print('PASS: help and invalid option handling')
 PY
