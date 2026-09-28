@@ -195,6 +195,20 @@ Not included: the update watcher (PR #12).
   `squash_merge_commit_message: PR_BODY` setting — the pull request text becomes the squash
   merge commit message (#15).
 
+**0.8.0** (2026-09-28; ships when the owner merges it):
+
+- Runs in Claude Code and Codex, measured as the table under
+  [Runs in Claude Code and Codex](#runs-in-claude-code-and-codex) says (c5e5a3d).
+- The update watch follows the host that runs it, by R-HOST v2 (c34c421); each subagent log
+  line carries the host, and `imprint-dev measure` reads a Codex transcript's `turn_context`
+  (6e7b0e8).
+- Checks `i` (`hook-env-portable`) and `j` (`hook-host-binary`) (5abc4df).
+- `tools/arrival-test-codex.sh`, a Codex arrival test (45c3b8d); its offline fixture test runs
+  in CI (499f56f).
+- Not verified under Codex: the arrival test's live run (45c3b8d), the
+  `foreign-material-reviewer` agent's allowlist, and whether hook approval covers the hook
+  scripts (c5e5a3d).
+
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
 one.** **Not read yet:** `session-handover` as rewritten
