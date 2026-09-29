@@ -25,14 +25,16 @@ exec >/dev/null 2>&1
 
 [ -n "${CLAUDE_PLUGIN_DATA:-}" ] || exit 0
 
-# imprint_host prints the host runtime running this hook: codex, claude or unknown (R-HOST v2).
+# imprint_host prints the host runtime running this hook: codex, claude, agy or unknown (R-HOST v3).
 imprint_host() {
 	codex_home=${CODEX_HOME:-$HOME/.codex}
 	claude_home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+	agy_home=${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini}
 	for p in "${CLAUDE_PLUGIN_DATA:-}" "${CLAUDE_PLUGIN_ROOT:-}"; do
 		case $p in
 		"$codex_home"/*) echo codex; return ;;
 		"$claude_home"/*) echo claude; return ;;
+		"$agy_home"/*) echo agy; return ;;
 		esac
 	done
 	echo unknown
@@ -60,8 +62,17 @@ effort_level() {
 }
 
 event="$(field hook_event_name)"
+[ -z "$event" ] && event="$(field hookEventName)"
+if [ -z "$event" ]; then
+  case "$input" in
+    *invoke_subagent*) event=SubagentStop ;;
+  esac
+fi
 agent_id="$(field agent_id)"
+[ -z "$agent_id" ] && agent_id="$(field Role)"
+[ -z "$agent_id" ] && agent_id="$(field conversationId)"
 agent_type="$(field agent_type)"
+[ -z "$agent_type" ] && agent_type="$(field TypeName)"
 
 case "$event" in
   SubagentStart|SubagentStop) ;;
