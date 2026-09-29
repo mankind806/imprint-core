@@ -35,25 +35,48 @@ Textplatzhalter in den Vorlagen-Inhalten; sie werden nicht vom Werkzeug ersetzt,
 oder mit `envsubst` beim Anwenden. Deshalb zeigt `setup --plan` diese beiden Einträge immer als
 `abweichend` — das ist erwartet, nicht ein Fehler der Vorlage (siehe Abweichungen unten).
 
-`statusLine.command` in `agy-settings.json` zeigt auf die mitgelieferte
-`${PROJEKTE}/imprint-core/setup/vorlagen/statusline.py` — die Kopie läuft direkt aus dem
-Checkout, es muss nichts zusätzlich nach `~/.gemini/antigravity-cli/` kopiert werden.
+`statusLine.command` in `agy-settings.json` zeigt auf `${HOME}/.gemini/antigravity-cli/statusline.py`,
+nicht auf einen Checkout-Pfad: agy läuft das Kommando direkt aus, und ein Checkout-Pfad wäre nach
+einem `git worktree remove` oder einem Verschieben des Klons weg. Beim Anwenden kopiert der Mensch
+`setup/vorlagen/statusline.py` selbst dorthin (siehe „Anwenden" unten); das Inventar trägt dafür
+den Eintrag `agy-statusline` (Typ `copy`, `rechte: false` — das Skript selbst ist kein
+Sicherheits- oder Rechte-Inhalt, nur sein Aufrufpfad in `agy-settings.json` ist es).
 
 ## Anwenden (nur der Mensch)
 
 ```sh
-pkill -f 'agy --hub'   # sonst schreiben laufende Hubs den alten Stand zurück (gemessen 2026-09-30)
+pkill -f 'agy --hub'   # sonst schreiben laufende Hubs den alten Stand zurück (gemessen 2026-09-30,
+                         # 00:49; die beendete Prozesszeile lautete "…/.gemini/bin/agy --hub …")
+pgrep -af -- '--hub'    # Kontrolle: muss leer sein - sonst die angezeigten PIDs gezielt beenden
+                         # statt erneut pkill zu raten
 
-cp ~/.gemini/antigravity-cli/settings.json ~/.gemini/antigravity-cli/settings.json.bak-$(date +%F)
-cp ~/.claude/settings.json ~/.claude/settings.json.bak-$(date +%F)
+ts="$(date +%Y%m%d-%H%M%S)"
+cp -n ~/.gemini/antigravity-cli/settings.json "$HOME/.gemini/antigravity-cli/settings.json.bak-$ts"
+cp -n ~/.claude/settings.json "$HOME/.claude/settings.json.bak-$ts"
+[ -f ~/.gemini/antigravity-cli/statusline.py ] && \
+  cp -n ~/.gemini/antigravity-cli/statusline.py "$HOME/.gemini/antigravity-cli/statusline.py.bak-$ts"
 
-HOME="$HOME" PROJEKTE="$HOME/Projekte" TRUSTED_WORKSPACE="$HOME" \
+: "${PROJEKTE:?PROJEKTE muss gesetzt sein}" "${TRUSTED_WORKSPACE:?TRUSTED_WORKSPACE muss gesetzt sein}" && \
+  HOME="$HOME" PROJEKTE="$PROJEKTE" TRUSTED_WORKSPACE="$TRUSTED_WORKSPACE" \
   envsubst '${HOME} ${PROJEKTE} ${TRUSTED_WORKSPACE}' \
   < setup/vorlagen/agy-settings.json > ~/.gemini/antigravity-cli/settings.json
+
+install -m 0755 setup/vorlagen/statusline.py ~/.gemini/antigravity-cli/statusline.py
 
 # claude-rechte.json liefert nur den permissions-Block; von Hand in die bestehende
 # ~/.claude/settings.json einfügen/mergen (z. B. mit jq), nicht überschreiben.
 ```
+
+Die Sicherungen laufen vor der `:?`-Prüfung, weil sie selbst nichts überschreiben, das nicht schon
+da ist (`cp -n`), und weil sie unabhängig von `PROJEKTE`/`TRUSTED_WORKSPACE` sinnvoll sind. Die
+`:?`-Prüfung selbst steht in derselben `&&`-Kette wie der `envsubst`-Aufruf: bricht sie ab, läuft
+die Kette dahinter nicht weiter, und `>` truncatet die Zieldatei nicht erst und scheitert dann erst
+an einem leeren `PROJEKTE` — ein `:?` in einer eigenen, vorangehenden Zeile würde das nicht
+verhindern, weil eine interaktive Shell nach dessen Fehlermeldung einfach mit der nächsten Zeile
+weiterläuft. `$HOME` selbst ist immer gesetzt; der Mensch wählt bewusst, wie weit
+`TRUSTED_WORKSPACE` reicht (siehe Platzhalter oben) — es wird hier absichtlich nicht auf `$HOME`
+vorbelegt. `cp -n` überschreibt eine schon vorhandene Sicherung mit demselben Zeitstempel nicht;
+derselbe `$ts` für alle drei Kopien hält sie zusammen.
 
 `envsubst` mit der eingeschränkten Variablenliste lässt jedes andere `$`-Zeichen in den Dateien
 unverändert.
@@ -63,29 +86,44 @@ unverändert.
 ```sh
 pkill -f 'agy --hub'   # wieder zuerst, sonst schreibt ein laufender Hub die soeben
                          # zurückgespielte Sicherung erneut mit dem angewendeten Stand zurück
-cp ~/.gemini/antigravity-cli/settings.json.bak-<Datum> ~/.gemini/antigravity-cli/settings.json
-cp ~/.claude/settings.json.bak-<Datum> ~/.claude/settings.json
+pgrep -af -- '--hub'    # Kontrolle: muss leer sein - sonst die angezeigten PIDs gezielt beenden
+cp ~/.gemini/antigravity-cli/settings.json.bak-<Zeitstempel> ~/.gemini/antigravity-cli/settings.json
+cp ~/.claude/settings.json.bak-<Zeitstempel> ~/.claude/settings.json
+# statusline.py.bak-<Zeitstempel> existiert nur, wenn beim Anwenden schon eine Datei da war
+# (siehe "Anwenden" oben); dann ebenso zurückkopieren, sonst die Kopie einfach entfernen:
+[ -f ~/.gemini/antigravity-cli/statusline.py.bak-<Zeitstempel> ] \
+  && cp ~/.gemini/antigravity-cli/statusline.py.bak-<Zeitstempel> ~/.gemini/antigravity-cli/statusline.py \
+  || rm -f ~/.gemini/antigravity-cli/statusline.py
 ```
 
 ## Testskript
 
 `agy-rechte-test.sh` prüft eine bereits angewendete `agy-settings.json` gegen die Fälle T1–T8
 (Lesen erlaubt/verweigert, Schreiben erlaubt/verweigert, `systemctl`-Teilfreigabe, `git push
---force` verweigert). Es wendet selbst nichts an. Alle Pfade kommen über Pflicht-Umgebungsvariablen
-herein (Aufruf und Variablen stehen im Skriptkopf) — das Skript liegt in einem öffentlichen
-Repository und trägt deshalb keinen Rechner- oder Projektnamen fest eincodiert. T5 läuft
-ausdrücklich unter `--mode accept-edits`, weil genau dieser Modus die `write_file`-Regeln umgeht
-(siehe nächster Abschnitt).
+--force` verweigert). Es wendet selbst nichts an. Nur drei Pflicht-Umgebungsvariablen kommen von
+außen (Aufruf und Variablen stehen im Skriptkopf) — das Skript liegt in einem öffentlichen
+Repository und trägt deshalb keinen Rechner- oder Projektnamen fest eincodiert. Die Zielpfade für
+T2, T5, T6, T7 und T8 (Köder-Dateien, Wegwerf-Repo, Schreibziele) erzeugt das Skript sich selbst
+mit `mktemp`, prüft für T6 vorher, dass der generierte Pfad noch nicht existiert, und löscht danach
+nur, was es selbst nachweislich angelegt hat — nie eine echte, vom Menschen mitgegebene Datei. T5
+läuft ausdrücklich unter `--mode accept-edits`, weil genau dieser Modus die `write_file`-Regeln
+umgeht (siehe nächster Abschnitt).
 
 ```sh
 AGY_TEST_WORKDIR=~/Projekte/imprint \
 AGY_TEST_ALLOWED_DIR=~/Projekte/imprint-wt \
-AGY_TEST_DENIED_WRITE=~/agy-rechte-test-verboten.txt \
-AGY_TEST_DENIED_READ_1=/pfad/ausserhalb/jeder/allow-liste \
-AGY_TEST_DENIED_READ_2=/anderer/pfad/ausserhalb/jeder/allow-liste \
 AGY_TEST_SERVICE=imprint-oberflaeche.service \
   setup/vorlagen/agy-rechte-test.sh
 ```
+
+Leere oder nicht als JSON lesbare `agy`-Ausgabe zählt in keinem der acht Fälle als Ablehnung: das
+Skript verlangt zuerst gültiges JSON mit einem gesetzten `status`-Feld, und prüft für die
+Lese-Verweigerungen (T2, T8) und die Kommando-Verweigerungen (T4, T7) zusätzlich, dass die
+zurückgemeldeten `denied_actions` tatsächlich `read_file` beziehungsweise `command` erkennen
+lassen. Das genaue Feldlayout von `denied_actions` ist dabei nicht dokumentiert bekannt — nur gegen
+eine reale `agy`-Ausgabe als Bestehen/Nichtbestehen gemessen, nie gegen ein Schema —, deshalb prüft
+das Skript das per Teilstring-Test auf die stringifizierte Form, nicht auf einen konkreten
+Schlüssel.
 
 ## Was welche Regel durchsetzt
 
@@ -99,11 +137,30 @@ AGY_TEST_SERVICE=imprint-oberflaeche.service \
   läuft an dieser Regel vorbei; dagegen steht die generische `command(bash -c)`/`command(sh -c)`
   -Deny-Regel in `agy-settings.json`, aber `claude-rechte.json` selbst hat kein generisches
   `Bash(bash -c:*)`-Deny.
-* Die `command(imprint-dev setup --apply)`- und `Bash(imprint-dev setup --apply:*)`-Deny-Regeln
-  sind vorsorglich: den Unterbefehl `--apply` gibt es im Werkzeug noch nicht (Stand 2026-09-30,
-  nur `--plan`). Beide Regeln matchen zudem nur den exakten Präfix; eine andere Flag-Reihenfolge
-  (z. B. `imprint-dev setup --root . --apply`) träfe die Regel nicht — das ist eine
-  Präfix-Regel, kein Parser.
+* Die `command(imprint-dev setup --apply)`-/`command(go run ./tools/imprint-dev setup --apply)`-
+  und die `Bash(imprint-dev setup *--apply*)`-/`Bash(go run ./tools/imprint-dev setup *--apply*)`-
+  Deny-Regeln sind vorsorglich: den Unterbefehl `--apply` gibt es im Werkzeug noch nicht (Stand
+  2026-09-30, nur `--plan`). Auf der `agy`-Seite matchen die Regeln nur den exakten, wörtlichen
+  Präfix (**nicht geprüft**, ob agy Glob-Wildcards in `command(...)` überhaupt unterstützt); ein
+  anderer Aufrufweg zum selben Unterbefehl (ein drittes Verzeichnis-Präfix, ein Alias, ein
+  Wrapper-Skript) träfe keine der beiden Formen. Auf der `claude-rechte.json`-Seite nutzen die
+  Regeln dieselbe Mid-String-Wildcard-Schreibweise wie `Bash(gh pr merge *--admin*)` und decken
+  damit auch eine andere Flag-Reihenfolge ab (z. B. `imprint-dev setup --root . --apply`) — auch
+  das ist nur nach demselben, ungeprüften Muster gebaut, nicht an echtem Claude-Code-Verhalten
+  gemessen.
+* Dieses Tor ist Hygiene, keine Sandbox: mit den oben stehenden `allow`-Einträgen bleiben mehrere
+  Umgehungen offen, keine davon durch eine Regel in einer der beiden Vorlagen verhindert.
+  * `find … -fprintf out %p\n` und `sort -o <ziel>` schreiben Dateien über zwei erlaubte Befehle,
+    an jeder `write_file`-Regel vorbei.
+  * `find … -delete` löscht Dateien über einen erlaubten Befehl, an der `command(rm)`-Deny-Regel
+    vorbei.
+  * `command(go run)` ist uneingeschränkt erlaubt: beliebiger Go-Code lässt sich damit ausführen,
+    unabhängig von jeder anderen Regel in dieser Datei.
+  * `git push +refs/heads/x:y` (die `+`-Syntax für Force-Push) läuft an den wörtlichen
+    `git push --force`/`-f`/`--force-with-lease`-Deny-Einträgen vorbei.
+  * In `claude-rechte.json` deckt kein Eintrag Bash allgemein ab (anders als `agy-settings.json`
+    mit `command(bash -c)`/`command(sh -c)`); jeder der obigen Wege steht Claude über sein
+    Bash-Werkzeug offen, auch wenn `Edit`/`Write` auf die Settings-Dateien selbst verweigert sind.
 * Dass diese Vorlagen überhaupt nur von Hand angewendet werden (nie automatisch durch ein
   Werkzeug in diesem Repository), durchsetzt nichts im Code — das ist allein der Nutzerentscheid
   CL-119/CL-123, hier nur dokumentiert.
@@ -112,6 +169,8 @@ AGY_TEST_SERVICE=imprint-oberflaeche.service \
 
 * `defaultMode: "auto"` aus `~/.claude/settings.json` ist nicht in `claude-rechte.json`
   übernommen — der Auftrag verlangte ausdrücklich nur den `permissions`-Block.
-* Beide neuen Einträge in `setup/inventar.json` zeigen bei `imprint-dev setup --plan` dauerhaft
-  den Status `abweichend`: die Vorlagen tragen Platzhalter bzw. (bei `claude-rechte.json`) nur
-  einen Ausschnitt der Zieldatei, nie deren Bytes.
+* Die beiden `rechte-vorlage`-Einträge in `setup/inventar.json` zeigen bei `imprint-dev setup
+  --plan` dauerhaft den Status `abweichend`: die Vorlagen tragen Platzhalter bzw. (bei
+  `claude-rechte.json`) nur einen Ausschnitt der Zieldatei, nie deren Bytes. Der `copy`-Eintrag
+  `agy-statusline` trägt keine Platzhalter und zeigt `fehlt`, solange `statusline.py` noch nicht
+  kopiert wurde, danach `gleich`.

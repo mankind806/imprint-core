@@ -80,13 +80,15 @@
       "command(rpm-ostree)",
       "command(jules)",
       "command(imprint-dev setup --apply)",
+      "command(go run ./tools/imprint-dev setup --apply)",
+      "command(go run tools/imprint-dev setup --apply)",
       "write_file(${HOME}/.gemini/antigravity-cli/settings.json)",
       "write_file(${HOME}/.claude/settings.json)"
     ]
   },
   "statusLine": {
     "type": "",
-    "command": "${PROJEKTE}/imprint-core/setup/vorlagen/statusline.py"
+    "command": "${HOME}/.gemini/antigravity-cli/statusline.py"
   },
   "trustedWorkspaces": [
     "${TRUSTED_WORKSPACE}"

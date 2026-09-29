@@ -22,5 +22,13 @@
     "ziel": "${HOME}/.claude/settings.json",
     "rechte": true,
     "beschreibung": "Rechte-Vorlage für den permissions-Block von Claude Code; nur der Mensch mergt sie ein, siehe setup/vorlagen/README.md"
+  },
+  {
+    "id": "agy-statusline",
+    "typ": "copy",
+    "quelle": "setup/vorlagen/statusline.py",
+    "ziel": "${HOME}/.gemini/antigravity-cli/statusline.py",
+    "rechte": false,
+    "beschreibung": "Statuszeilen-Skript für agy; kein Sicherheits-/Rechte-Inhalt, wird nach dem Anwenden der agy-Rechte-Vorlage dorthin kopiert, siehe setup/vorlagen/README.md"
   }
 ]
