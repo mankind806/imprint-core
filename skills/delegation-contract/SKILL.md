@@ -141,9 +141,9 @@ without write and execute permissions on purpose.
   draft: no review round.
 - **Medium** — reversible only at a cost or not by you alone: **one** review round.
 - **Final or outward-facing** — anything in the outward list above, or anything that cannot
-  be undone: reviewed round after round **until a round finds nothing more.**
+  be undone: reviewed round after round **until no severe or medium finding remains.**
 
-A round that formed suspicions, tested them and reports them refuted has found nothing more,
+A round that formed suspicions, tested them and reports them refuted has left no severe or medium finding,
 and that counts. A first round with nothing to be suspicious *about* on a non-trivial
 artefact means the dispatch was wrong — not blind, or phrased as a request for approval —
 and the fix is the dispatch, never a manufactured finding. The reviewer is never the author.
