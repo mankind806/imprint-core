@@ -14,9 +14,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -30,6 +32,9 @@ const (
 
 	RuleEnforcementQuestionID = "missing_enforcement"
 	RuleEnforcementNotice     = "imprint core: Jede Regel nennt, was sie durchsetzt, oder sagt deutlich, dass nichts es tut. Dieser Regeltext enthält möglicherweise Vorgaben ohne Benennung des Durchsetzungs-Mechanismus.\n(imprint core: Every rule names what enforces it, or says plainly that nothing does. Consider adding enforcement details or stating that nothing enforces it.)"
+
+	DuplicateFactQuestionID = "duplicate_fact"
+	DuplicateFactNotice     = "imprint knowledge-keeping: Dieser Eintrag enthält möglicherweise einen Fakt oder Entscheid, der bereits im Register existiert. Jeder Fakt hat genau einen kanonischen Ort; bestehende Einträge sollten abgelöst ([Überholt/Abgelöst am ... durch ...]) oder referenziert werden, statt sie doppelt anzulegen.\n(knowledge-keeping: This entry may duplicate an existing fact or decision. Every fact has one canonical place; consider referencing or superseding the existing entry rather than duplicating it.)"
 )
 
 // --- Masking (analog typesafe-dev ts_common.py) ------------------------------
@@ -471,7 +476,230 @@ func CheckRuleEnforcement(ctx context.Context, client *Client, text string) (boo
 	return false, "", nil
 }
 
-// --- Hook Payload & Subcommand (CL-000, CL-001, CL-002) -----------------------
+// --- Duplicate Fact Check (CL-003) -------------------------------------------
+
+// DuplicateFactQuestion returns the Jev primitive evaluating duplicate facts or decisions.
+func DuplicateFactQuestion() Question {
+	return Question{
+		Type:         TypeNoul,
+		Instructions: "State contains an existing record and a new record. Does the new record assert or register the same factual statement, decision, or invariant already established in the existing record, without explicitly referencing, amending, or superseding it?",
+	}
+}
+
+// CheckDuplicateFact evaluates whether a new record duplicates an existing record in candidates.
+// Fail-Open: on any error, returns (false, "", err).
+func CheckDuplicateFact(ctx context.Context, client *Client, candidates []string, newText string) (bool, string, error) {
+	if client == nil || client.APIKey == "" || len(candidates) == 0 {
+		return false, "", nil
+	}
+
+	state := fmt.Sprintf("Existing record:\n%s\n\nNew record:\n%s", strings.Join(candidates, "\n"), newText)
+	if len(state) > MaxPayloadBytes {
+		state = state[:MaxPayloadBytes]
+	}
+
+	questions := map[string]Question{
+		DuplicateFactQuestionID: DuplicateFactQuestion(),
+	}
+
+	resp, err := client.Post(ctx, state, questions)
+	if err != nil {
+		return false, "", err
+	}
+
+	prob, ok := resp.Noul(DuplicateFactQuestionID)
+	if !ok {
+		return false, "", nil
+	}
+
+	if prob >= 0.6 {
+		return true, DuplicateFactNotice, nil
+	}
+
+	return false, "", nil
+}
+
+// defaultStopwords contains common German and English stopwords excluded from keyword overlap.
+var defaultStopwords = map[string]struct{}{
+	// German
+	"der": {}, "die": {}, "das": {}, "den": {}, "dem": {}, "des": {},
+	"ein": {}, "eine": {}, "einer": {}, "eines": {}, "einem": {}, "einen": {},
+	"und": {}, "oder": {}, "aber": {}, "denn": {}, "doch": {}, "als": {}, "wie": {},
+	"in": {}, "im": {}, "an": {}, "am": {}, "auf": {}, "aus": {}, "bei": {}, "mit": {},
+	"nach": {}, "von": {}, "vom": {}, "zu": {}, "zur": {}, "zum": {}, "vor": {},
+	"über": {}, "ueber": {}, "unter": {}, "durch": {}, "für": {}, "fuer": {}, "um": {},
+	"ist": {}, "sind": {}, "war": {}, "waren": {}, "wird": {}, "werden": {}, "wurde": {}, "wurden": {},
+	"sein": {}, "seine": {}, "seinem": {}, "seinen": {}, "seiner": {}, "ihr": {}, "ihre": {},
+	"hat": {}, "haben": {}, "hatte": {}, "hatten": {},
+	"es": {}, "er": {}, "sie": {}, "wir": {}, "man": {}, "sich": {},
+	"nicht": {}, "kein": {}, "keine": {}, "keinen": {}, "keinem": {}, "keiner": {},
+	"auch": {}, "so": {}, "dass": {}, "da": {}, "nur": {}, "noch": {}, "hier": {},
+	"dies": {}, "diese": {}, "dieser": {}, "dieses": {}, "diesem": {}, "diesen": {},
+	// English
+	"the": {}, "a": {},
+	"and": {}, "or": {}, "but": {}, "nor": {},
+	"on": {}, "at": {}, "to": {}, "for": {}, "of": {}, "with": {}, "by": {},
+	"from": {}, "up": {}, "about": {}, "into": {}, "over": {}, "after": {}, "under": {},
+	"is": {}, "are": {}, "was": {}, "were": {}, "be": {}, "been": {}, "being": {},
+	"have": {}, "has": {}, "had": {}, "do": {}, "does": {}, "did": {},
+	"will": {}, "would": {}, "shall": {}, "should": {}, "can": {}, "could": {},
+	"may": {}, "might": {}, "must": {},
+	"it": {}, "its": {}, "this": {}, "that": {}, "these": {}, "those": {},
+	"not": {}, "no": {}, "all": {}, "any": {}, "both": {}, "each": {},
+	"more": {}, "most": {}, "other": {}, "some": {}, "such": {}, "only": {}, "same": {}, "than": {}, "too": {}, "very": {},
+}
+
+var tokenRE = regexp.MustCompile(`[\p{L}\p{N}_]+`)
+
+func isTableSeparator(s string) bool {
+	if !strings.HasPrefix(s, "|") {
+		return false
+	}
+	trimmed := strings.ReplaceAll(s, "|", "")
+	trimmed = strings.ReplaceAll(trimmed, "-", "")
+	trimmed = strings.ReplaceAll(trimmed, ":", "")
+	trimmed = strings.TrimSpace(trimmed)
+	return trimmed == ""
+}
+
+func extractKeywords(text string) map[string]struct{} {
+	words := make(map[string]struct{})
+	lower := strings.ToLower(text)
+	rawTokens := tokenRE.FindAllString(lower, -1)
+	for _, tok := range rawTokens {
+		tok = strings.Trim(tok, "_-")
+		if tok == "" {
+			continue
+		}
+		var parts []string
+		if strings.Contains(tok, "_") {
+			parts = strings.FieldsFunc(tok, func(r rune) bool {
+				return r == '_'
+			})
+		}
+		parts = append(parts, tok)
+
+		for _, p := range parts {
+			if len(p) < 2 {
+				continue
+			}
+			hasLetter := false
+			for _, r := range p {
+				if unicode.IsLetter(r) {
+					hasLetter = true
+					break
+				}
+			}
+			if !hasLetter {
+				continue
+			}
+			if _, isStop := defaultStopwords[p]; isStop {
+				continue
+			}
+			words[p] = struct{}{}
+		}
+	}
+	return words
+}
+
+// findDuplicateCandidates scans filePath for existing lines that share significant keywords
+// with newText. Returns top 1-3 candidate lines with at least 2 shared terms, capped at 500 chars total.
+// Returns nil if file does not exist, cannot be read, or no candidate has >= 2 shared terms.
+func findDuplicateCandidates(filePath, newText string) []string {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+
+	newKeywords := extractKeywords(newText)
+	if len(newKeywords) < 2 {
+		return nil
+	}
+
+	lines := strings.Split(string(data), "\n")
+	type candidateMatch struct {
+		line    string
+		overlap int
+		index   int
+	}
+
+	var matches []candidateMatch
+	seenLines := make(map[string]bool)
+
+	for i, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if isTableSeparator(line) {
+			continue
+		}
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			continue
+		}
+		if seenLines[line] {
+			continue
+		}
+
+		lineKeywords := extractKeywords(line)
+		overlap := 0
+		for kw := range newKeywords {
+			if _, ok := lineKeywords[kw]; ok {
+				overlap++
+			}
+		}
+
+		if overlap >= 2 {
+			seenLines[line] = true
+			matches = append(matches, candidateMatch{
+				line:    line,
+				overlap: overlap,
+				index:   i,
+			})
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil
+	}
+
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].overlap != matches[j].overlap {
+			return matches[i].overlap > matches[j].overlap
+		}
+		return matches[i].index < matches[j].index
+	})
+
+	var result []string
+	totalLen := 0
+	for _, m := range matches {
+		line := m.line
+		if len(result) == 0 && len(line) > 500 {
+			line = line[:500]
+		}
+		addedLen := len(line)
+		if len(result) > 0 {
+			addedLen += 1
+		}
+		if totalLen+addedLen > 500 {
+			if len(result) > 0 {
+				break
+			}
+		}
+		result = append(result, line)
+		totalLen += addedLen
+		if len(result) == 3 {
+			break
+		}
+	}
+
+	return result
+}
+
+// --- Hook Payload & Subcommand (CL-000, CL-001, CL-002, CL-003) ----------------
 
 // isCodeOrBuildOrTestFile identifies non-content files (source code, build definitions, tests)
 // that should never be analyzed by TypeSafe System One.
@@ -685,15 +913,31 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	var candidates []string
+	if isMemory {
+		candidates = findDuplicateCandidates(filePath, text)
+	}
+
+	state := text
+	if isMemory && len(candidates) > 0 {
+		state = fmt.Sprintf("Existing record:\n%s\n\nNew record:\n%s", strings.Join(candidates, "\n"), text)
+	}
+	if len(state) > MaxPayloadBytes {
+		state = state[:MaxPayloadBytes]
+	}
+
 	questions := make(map[string]Question)
 	if isMemory {
 		questions[KnowledgeKeepingQuestionID] = KnowledgeKeepingQuestion()
+		if len(candidates) > 0 {
+			questions[DuplicateFactQuestionID] = DuplicateFactQuestion()
+		}
 	}
 	if isRule {
 		questions[RuleEnforcementQuestionID] = RuleEnforcementQuestion()
 	}
 
-	resp, err := client.Post(ctx, text, questions)
+	resp, err := client.Post(ctx, state, questions)
 	if err != nil || resp == nil {
 		return exitOK
 	}
@@ -707,6 +951,11 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 	if isRule {
 		if prob, ok := resp.Noul(RuleEnforcementQuestionID); ok && prob >= 0.5 {
 			notices = append(notices, RuleEnforcementNotice)
+		}
+	}
+	if isMemory && len(candidates) > 0 {
+		if prob, ok := resp.Noul(DuplicateFactQuestionID); ok && prob >= 0.6 {
+			notices = append(notices, DuplicateFactNotice)
 		}
 	}
 
