@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -423,6 +424,147 @@ func TestCheckRuleEnforcement(t *testing.T) {
 	}
 }
 
+// --- Duplicate Fact Checks (CL-003) -----------------------------------------
+
+func TestFindDuplicateCandidates(t *testing.T) {
+	tmpDir := t.TempDir()
+	regFile := filepath.Join(tmpDir, "register.md")
+
+	content := `# Register der Architekturentscheide
+| Datum | Beschluss | Quelle |
+|---|---|---|
+| 2026-09-28 | SQLite wird im WAL-Modus betrieben für parallele Lesezugriffe. | Architekturbeschluss 1 |
+| 2026-09-27 | Docker-Builds laufen immer ohne Root-Rechte im Container. | Sicherheitsrichtlinie |
+| 2026-09-26 | Go-Binaries werden mit CGO_ENABLED=0 statisch gebaut. | Release-Leitfaden |
+`
+	if err := os.WriteFile(regFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test register file: %v", err)
+	}
+
+	// 1. Existing file with keyword matches (>= 2 shared significant terms)
+	cand := findDuplicateCandidates(regFile, "2026-09-29: SQLite Datenbank wird immer im WAL-Modus betrieben.")
+	if len(cand) != 1 {
+		t.Fatalf("expected 1 candidate, got %d: %v", len(cand), cand)
+	}
+	if !strings.Contains(cand[0], "SQLite wird im WAL-Modus") {
+		t.Errorf("candidate line mismatch: %s", cand[0])
+	}
+
+	// 2. Non-existent file -> nil
+	candMissing := findDuplicateCandidates(filepath.Join(tmpDir, "does-not-exist.md"), "SQLite WAL Modus")
+	if candMissing != nil {
+		t.Errorf("expected nil for non-existent file, got %v", candMissing)
+	}
+
+	// 3. Disjoint texts (< 2 shared terms) -> nil
+	candDisjoint := findDuplicateCandidates(regFile, "Python-Pakete werden mit uv verwaltet.")
+	if candDisjoint != nil {
+		t.Errorf("expected nil for disjoint text, got %v", candDisjoint)
+	}
+
+	// 4. Trivial lines (headings and table separators) are not matched
+	candHeading := findDuplicateCandidates(regFile, "Register der Architekturentscheide")
+	if candHeading != nil {
+		t.Errorf("headings should be ignored, got %v", candHeading)
+	}
+
+	// 5. Length cap: lines capped at 500 chars total
+	longFile := filepath.Join(tmpDir, "long.md")
+	longLine1 := "2026-09-01: SQLite WAL " + strings.Repeat("A", 300)
+	longLine2 := "2026-09-02: SQLite WAL " + strings.Repeat("B", 300)
+	if err := os.WriteFile(longFile, []byte(longLine1+"\n"+longLine2+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write long test file: %v", err)
+	}
+	candLong := findDuplicateCandidates(longFile, "SQLite WAL Betrieb")
+	if len(candLong) == 0 {
+		t.Fatalf("expected candidates for long file, got none")
+	}
+	totalLen := len(strings.Join(candLong, "\n"))
+	if totalLen > 500 {
+		t.Errorf("total candidates length %d exceeds 500 characters", totalLen)
+	}
+
+	// 6. Max 3 candidates returned
+	multiFile := filepath.Join(tmpDir, "multi.md")
+	multiContent := `
+2026-09-01: SQLite WAL 1
+2026-09-02: SQLite WAL 2
+2026-09-03: SQLite WAL 3
+2026-09-04: SQLite WAL 4
+2026-09-05: SQLite WAL 5
+`
+	if err := os.WriteFile(multiFile, []byte(multiContent), 0644); err != nil {
+		t.Fatalf("failed to write multi test file: %v", err)
+	}
+	candMulti := findDuplicateCandidates(multiFile, "SQLite WAL Betrieb")
+	if len(candMulti) > 3 {
+		t.Errorf("expected at most 3 candidates, got %d", len(candMulti))
+	}
+	if len(candMulti) != 3 {
+		t.Errorf("expected exactly 3 candidates, got %d", len(candMulti))
+	}
+}
+
+func TestCheckDuplicateFact(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		prob := 0.2
+		if strings.Contains(req.State, "DUPLIKAT") {
+			prob = 0.85
+		}
+
+		resp := Response{
+			Answers: map[string]RawAnswer{
+				DuplicateFactQuestionID: {
+					Noul: &prob,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	client := NewClient("test-key")
+	client.Endpoint = ts.URL
+	client.HTTPClient = ts.Client()
+
+	ctx := context.Background()
+
+	// 1. Duplikat erkannt (prob >= 0.6) -> Notice vorhanden
+	candidates := []string{"2026-09-28: SQLite wird im WAL-Modus betrieben."}
+	needsNotice, notice, err := CheckDuplicateFact(ctx, client, candidates, "DUPLIKAT Neuer Eintrag: SQLite im WAL-Modus")
+	if err != nil {
+		t.Fatalf("CheckDuplicateFact error: %v", err)
+	}
+	if !needsNotice {
+		t.Errorf("expected needsNotice = true for duplicate fact")
+	}
+	if !strings.Contains(notice, "bereits im Register existiert") {
+		t.Errorf("notice missing duplicate fact text: %s", notice)
+	}
+
+	// 2. Kein Duplikat (prob < 0.6) -> keine Notice
+	needsNotice, notice, err = CheckDuplicateFact(ctx, client, candidates, "Kein Duplikat: Postgres wird im Standard-Modus betrieben.")
+	if err != nil {
+		t.Fatalf("CheckDuplicateFact error: %v", err)
+	}
+	if needsNotice {
+		t.Errorf("expected needsNotice = false when prob < 0.6")
+	}
+	if notice != "" {
+		t.Errorf("expected empty notice when prob < 0.6, got %q", notice)
+	}
+
+	// 3. Leere Kandidaten -> sofort false ohne API-Aufruf
+	needsNotice, notice, err = CheckDuplicateFact(ctx, client, nil, "Text")
+	if err != nil || needsNotice || notice != "" {
+		t.Errorf("expected (false, \"\", nil) for empty candidates")
+	}
+}
+
 // --- Path & Field Extraction Tests -------------------------------------------
 
 func TestIsMemoryOrRegisterFile(t *testing.T) {
@@ -600,7 +742,7 @@ func TestExtractFileAndContent(t *testing.T) {
 // --- Hook CLI Subcommand Tests -----------------------------------------------
 
 func TestHookTypesafeCheckCLI(t *testing.T) {
-	// Mock TypeSafe server handling both provenance and rule enforcement questions
+	// Mock TypeSafe server handling provenance, rule enforcement, and duplicate fact questions
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req Request
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -613,6 +755,10 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		if strings.Contains(req.State, "OHNE_DURCHSETZUNG") {
 			probRE = 0.90
 		}
+		probDup := 0.1
+		if strings.Contains(req.State, "DUPLIKAT") {
+			probDup = 0.90
+		}
 
 		resp := Response{
 			Answers: map[string]RawAnswer{
@@ -621,6 +767,9 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 				},
 				RuleEnforcementQuestionID: {
 					Noul: &probRE,
+				},
+				DuplicateFactQuestionID: {
+					Noul: &probDup,
 				},
 			},
 		}
@@ -804,6 +953,96 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		}
 		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "\n\n") {
 			t.Errorf("Combined notices must be joined by double newline: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+	}
+
+	// Case 3e: Memory file with duplicate fact (CL-003) -> exits 0 with DuplicateFactNotice
+	{
+		tmpDir := t.TempDir()
+		memDir := filepath.Join(tmpDir, "memory")
+		if err := os.MkdirAll(memDir, 0755); err != nil {
+			t.Fatalf("failed to create memDir: %v", err)
+		}
+		memFile := filepath.Join(memDir, "entscheide.md")
+		if err := os.WriteFile(memFile, []byte("2026-09-28: SQLite Datenbank läuft im WAL-Modus für Nebenläufigkeit.\n"), 0644); err != nil {
+			t.Fatalf("failed to write memFile: %v", err)
+		}
+
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		payload := fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":%q,"CodeContent":"2026-09-29: Gemäß Beschluss B: DUPLIKAT SQLite Datenbank im WAL-Modus."}}`, memFile)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, strings.NewReader(payload), &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() == 0 {
+			t.Fatal("expected hook output for duplicate fact, got empty stdout")
+		}
+
+		var out HookOutput
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("failed to decode hook output JSON: %v", err)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "bereits im Register existiert") {
+			t.Errorf("AdditionalContext missing duplicate fact notice: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+		if strings.Contains(out.HookSpecificOutput.AdditionalContext, "ohne Erfassungsdatum") {
+			t.Errorf("Compliant text with date should not have provenance notice: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+	}
+
+	// Case 3f: Memory file with both missing provenance AND duplicate fact -> both notices joined by \n\n
+	{
+		tmpDir := t.TempDir()
+		memDir := filepath.Join(tmpDir, "memory")
+		if err := os.MkdirAll(memDir, 0755); err != nil {
+			t.Fatalf("failed to create memDir: %v", err)
+		}
+		memFile := filepath.Join(memDir, "entscheide.md")
+		if err := os.WriteFile(memFile, []byte("2026-09-28: SQLite Datenbank läuft im WAL-Modus für Nebenläufigkeit.\n"), 0644); err != nil {
+			t.Fatalf("failed to write memFile: %v", err)
+		}
+
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		payload := fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":%q,"CodeContent":"OHNE_DATUM DUPLIKAT SQLite Datenbank im WAL-Modus."}}`, memFile)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, strings.NewReader(payload), &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() == 0 {
+			t.Fatal("expected hook output for missing provenance + duplicate fact, got empty stdout")
+		}
+
+		var out HookOutput
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("failed to decode hook output JSON: %v", err)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "knowledge-keeping") {
+			t.Errorf("AdditionalContext missing provenance notice: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "bereits im Register existiert") {
+			t.Errorf("AdditionalContext missing duplicate fact notice: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "\n\n") {
+			t.Errorf("Multiple notices must be joined by double newline: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+	}
+
+	// Case 3g: Memory file that does not exist on disk -> no duplicate check, exits 0 with no duplicate notice
+	{
+		tmpDir := t.TempDir()
+		memFile := filepath.Join(tmpDir, "memory", "nonexistent.md")
+
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		payload := fmt.Sprintf(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":%q,"CodeContent":"2026-09-29: Gemäß Beschluss B: DUPLIKAT SQLite Datenbank im WAL-Modus."}}`, memFile)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, strings.NewReader(payload), &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout when file does not exist on disk, got %q", stdout.String())
 		}
 	}
 
