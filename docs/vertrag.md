@@ -2,8 +2,8 @@
 
 Wie mehrere Agenten-Hosts an einem Auftrag zusammenarbeiten, ohne sich die Arbeit zu
 zerstören: ein gemeinsames Journal, ein Orchestrator, ein Schreiber je Worktree.
-Stand: V0.5 mit den Nutzeranweisungen CL-116, CL-118 und CL-120 (2026-09-30). Das Journal selbst bleibt lokal und
-wird nicht mitgeliefert, nur dieser Vertrag.
+Stand: V0.5 mit den Nutzeranweisungen CL-116, CL-118 und CL-120 (2026-09-30). Das Journal
+selbst bleibt lokal und wird nicht mitgeliefert, nur dieser Vertrag.
 
 ## Rollen
 
@@ -155,7 +155,7 @@ EOF
 | Worktree | je Schreiber ein eigener, `<repo>-wt/<paket-id>` neben dem Klon; nie in fremden Worktrees arbeiten | Git verweigert den doppelten Checkout; sonst Verhaltensregel |
 | Geschichte | kein Force-Push, veröffentlichte History nicht umschreiben | Verhaltensregel |
 | Gemeinsamer Zustand | Dateien außerhalb der Worktrees stehen mit im `scope=` | Verhaltensregel |
-| Plan-Halter | die Leitsession (CL-116); bei mehreren Leads, wer das Vorhaben per `PLAN` eröffnet | Verhaltensregel |
+| Plan-Halter | die Leitsession (CL-116); vorher (V0.2, V0.4) wer das Vorhaben zuerst per `PLAN` eröffnete | Verhaltensregel |
 | Integrationshalter | genau einer je Zielbranch; integriert seriell und testet nach jeder Integration | Verhaltensregel |
 
 ## Review-Tiefe nach Risiko
