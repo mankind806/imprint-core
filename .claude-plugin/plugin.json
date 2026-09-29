@@ -1,7 +1,7 @@
 {
   "name": "imprint",
   "description": "Working rules for running several coding agents without them ruining each other's work, and for growing a knowledge store that does not quietly rot. Runs in Claude Code, Codex, and Antigravity. Ships four skills (delegation contract, measuring before asserting, session handover, and knowledge keeping), one read-only foreign-material review agent, a short core card injected at session start and at subagent start (or declaratively via rules/AGENTS.md), a hook that logs how long each subagent ran, and an update watch hook. Every rule states what enforces it, or says plainly that nothing does.",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "author": {
     "name": "mankind806"
   },

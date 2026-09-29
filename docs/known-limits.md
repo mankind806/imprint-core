@@ -64,16 +64,18 @@ Hook trust and agent tool enforcement have the following measured limits:
 
 ## Antigravity
 
-Antigravity (Google DeepMind; measured 2026-09-28 in `agy` CLI 1.2.12) merges `rules/AGENTS.md`
-into the active ruleset, delivering the core card declaratively without `SessionStart` hooks.
-Check `k` ensures `rules/AGENTS.md` remains in sync with `hooks/kernkarte.md`.
+Antigravity (Google DeepMind; measured 2026-09-28/29 in `agy` CLI 1.2.12/1.2.13) loads
+`rules/AGENTS.md` declaratively and executes `hooks/hooks.json` for session and subagent
+lifecycle events (`SessionStart`, `SubagentStart`, `SubagentStop`). Check `k` ensures
+`rules/AGENTS.md` remains in sync with `hooks/kernkarte.md`.
 Measured limits:
 
 - **Arrival verification:** The live arrival test matches the model response against the core card;
   whether the content pre-existed in context or was retrieved during execution is not proven
   ([documented boundary](core-card-and-checks.md)).
 - **Subagents and allowlists:** Subagent rule inheritance and tool allowlist enforcement remain
-  not checked.
+  not checked. Hook logging records subagent execution (`host=agy`), but does not enforce
+  tool restrictions.
 - **Runtime budget:** Antigravity's 20,000-token rules budget can demote over-budget rules to file
   references; runtime persistence across extended turns is not verified.
 

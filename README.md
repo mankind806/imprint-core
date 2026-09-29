@@ -225,7 +225,7 @@ Not included: the update watcher (PR #12).
   Claude Code 2.1.284, `tools/arrival-test.sh` exit 0, "PASS (Claude Code only)";
   codex-cli 0.157.1, `tools/arrival-test-codex.sh` exit 0, "PASS (model report)".
 
-**0.9.0** (2026-09-28; ships when the owner merges it):
+**0.9.0** (released 2026-09-29):
 
 Runs in Claude Code, Codex, and Antigravity. Codex remains a supported host for plugin users across all tooling and CI checks even when authoring or subscription environments change.
 
@@ -239,6 +239,18 @@ Runs in Claude Code, Codex, and Antigravity. Codex remains a supported host for 
   - Subagent rule inheritance, tool boundaries, and runtime budget persistence under Antigravity remain not checked.
   - Complete reviewer parity for `foreign-material-reviewer` without shell access under Codex is not achieved (disabling shell removes text reading entirely).
   - Codex Code Mode, MCP/plugin tools, alternate tool routes, and live model behaviors remain unverified.
+
+**0.9.1** (2026-09-29; ships when the owner merges it):
+
+Antigravity hook execution and subagent runtime logging.
+
+- **Antigravity hook integration (PR #27):** Ships `hooks/hooks.json` registering `SessionStart` (core card injection and host update watch), `SubagentStart` (core card injection and measuring start), and `SubagentStop` (measuring stop) for Antigravity plugin runs.
+- **R-HOST v3:** Extended host detection across `log-subagent.sh` and `update-watch.sh` to recognize Antigravity (`agy`) via `ANTIGRAVITY_CONFIG_DIR`, `ANTIGRAVITY_AGENT`, `AGY_VERSION`, or host binary path.
+- **Host binary check (Check `j`):** Updated `imprint-dev check` check `j` to validate `agy` host binary recognition alongside `claude` and `codex`.
+- **Live arrival & hook execution:** Live arrival measured in Antigravity CLI 1.2.13 (`tools/arrival-test-agy.sh` exit 0, PASS). Live hook execution verified with `subagent-log.jsonl` recording `host=agy` on `SubagentStop` in the Antigravity plugin data directory.
+- **What is not verified:**
+  - Whether Antigravity enforces tool allowlists on subagents remains not checked.
+  - Runtime budget persistence of rules across multi-turn sessions remains not verified.
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
