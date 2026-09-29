@@ -94,6 +94,150 @@ func TestMaskDetailSecretValuesRegression(t *testing.T) {
 	}
 }
 
+func TestMaskAddresses(t *testing.T) {
+	// 1. Street + House number
+	streetCases := []struct {
+		input       string
+		wantMasked  string
+		wantAddress int
+	}{
+		{"Musterstraße 12", "<address>", 1},
+		{"Hauptstr. 4b", "<address>", 1},
+		{"Am Markt 1", "<address>", 1},
+		{"Goethestr. 10", "<address>", 1},
+		{"Kurfürstendamm 100", "<address>", 1},
+		{"Kastanienallee 21", "<address>", 1},
+		{"Schulweg 5", "<address>", 1},
+		{"An der Alster 5", "<address>", 1},
+		{"Auf dem Hügel 9", "<address>", 1},
+		{"Im Winkel 3", "<address>", 1},
+		{"In der Aue 12", "<address>", 1},
+		{"Zum Bahnhof 4", "<address>", 1},
+		{"Vor dem Steintor 25", "<address>", 1},
+		{"Musterstraße 12-14", "<address>", 1},
+		{"Musterstr. 12a", "<address>", 1},
+		{"Berliner Straße 42", "<address>", 1},
+		{"Hier wohnt jemand in der Hauptstr. 4b im Erdgeschoss.", "Hier wohnt jemand in der <address> im Erdgeschoss.", 1},
+	}
+
+	for _, tc := range streetCases {
+		masked, counts := MaskDetail(tc.input)
+		if masked != tc.wantMasked {
+			t.Errorf("MaskDetail(%q) = %q; want %q", tc.input, masked, tc.wantMasked)
+		}
+		if counts.Address != tc.wantAddress {
+			t.Errorf("MaskDetail(%q) counts.Address = %d; want %d", tc.input, counts.Address, tc.wantAddress)
+		}
+	}
+
+	// 2. Postal code + City
+	plzCases := []struct {
+		input       string
+		wantMasked  string
+		wantAddress int
+	}{
+		{"10115 Berlin", "<address>", 1},
+		{"80331 München", "<address>", 1},
+		{"60311 Frankfurt am Main", "<address>", 1},
+		{"70173 Stuttgart", "<address>", 1},
+		{"10115 Berlin-Mitte", "<address>", 1},
+		{"PLZ ist 10115 Berlin im Brief.", "PLZ ist <address> im Brief.", 1},
+	}
+
+	for _, tc := range plzCases {
+		masked, counts := MaskDetail(tc.input)
+		if masked != tc.wantMasked {
+			t.Errorf("MaskDetail(%q) = %q; want %q", tc.input, masked, tc.wantMasked)
+		}
+		if counts.Address != tc.wantAddress {
+			t.Errorf("MaskDetail(%q) counts.Address = %d; want %d", tc.input, counts.Address, tc.wantAddress)
+		}
+	}
+
+	// 3. Combined street and PLZ
+	combined := "Musterstraße 12, 10115 Berlin"
+	masked, counts := MaskDetail(combined)
+	if masked != "<address>, <address>" {
+		t.Errorf("MaskDetail(%q) = %q; want %q", combined, masked, "<address>, <address>")
+	}
+	if counts.Address != 2 {
+		t.Errorf("MaskDetail(%q) counts.Address = %d; want 2", combined, counts.Address)
+	}
+
+	// 4. Non-address text must not trigger false positives
+	negativeCases := []string{
+		`git commit -m "fix issue 12"`,
+		"go test -count=1",
+		"version 10115",
+		"Am 12. Mai",
+		"Berlin ist eine Stadt",
+	}
+
+	for _, input := range negativeCases {
+		masked, counts := MaskDetail(input)
+		if masked != input {
+			t.Errorf("MaskDetail(%q) = %q; false positive address match", input, masked)
+		}
+		if counts.Address != 0 {
+			t.Errorf("MaskDetail(%q) counts.Address = %d; want 0", input, counts.Address)
+		}
+	}
+}
+
+func TestMaskNames(t *testing.T) {
+	// Create temporary names file
+	tmpDir := t.TempDir()
+	namesFile := filepath.Join(tmpDir, "names.txt")
+	content := `# Test team members
+Max Mustermann # Lead
+Erika Musterfrau
+Hans Peter von Schmidt
+`
+	if err := os.WriteFile(namesFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write names file: %v", err)
+	}
+
+	t.Setenv("TYPESAFE_NAMES_FILE", namesFile)
+
+	cases := []struct {
+		input     string
+		want      string
+		wantCount int
+	}{
+		{"Hallo Max Mustermann", "Hallo <name>", 1},
+		{"Erika sprach mit Max", "<name> sprach mit <name>", 2},
+		{"Herr Mustermann ist im Meeting", "Herr <name> ist im Meeting", 1},
+		{"Frau Musterfrau antwortete", "Frau <name> antwortete", 1},
+		{"Hans Peter von Schmidt war dabei", "<name> war dabei", 1},
+		{"Maximaler Aufwand für Max", "Maximaler Aufwand für <name>", 1}, // \b boundary check
+	}
+
+	for _, tc := range cases {
+		masked, counts := MaskDetail(tc.input)
+		if masked != tc.want {
+			t.Errorf("MaskDetail(%q) = %q; want %q", tc.input, masked, tc.want)
+		}
+		if counts.Name != tc.wantCount {
+			t.Errorf("MaskDetail(%q) counts.Name = %d; want %d", tc.input, counts.Name, tc.wantCount)
+		}
+		totalMasked, totalCount := Mask(tc.input)
+		if totalMasked != tc.want || totalCount != tc.wantCount {
+			t.Errorf("Mask(%q) = (%q, %d); want (%q, %d)", tc.input, totalMasked, totalCount, tc.want, tc.wantCount)
+		}
+	}
+
+	// Missing names file -> clean skip, 0 hits
+	t.Setenv("TYPESAFE_NAMES_FILE", filepath.Join(tmpDir, "nonexistent.txt"))
+	plain := "Max Mustermann und Erika Musterfrau"
+	masked, counts := MaskDetail(plain)
+	if masked != plain {
+		t.Errorf("MaskDetail with missing names file modified text: %q", masked)
+	}
+	if counts.Name != 0 {
+		t.Errorf("expected 0 Name count for missing file, got %d", counts.Name)
+	}
+}
+
 func TestMaxPayloadBytes(t *testing.T) {
 	var receivedReq Request
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +307,31 @@ func TestGetKeyFromEnv(t *testing.T) {
 	os.Unsetenv("TYPESAFE_API_KEY")
 	// Without env var, it will try secret-tool or return empty string
 	// (in test environment, secret-tool lookup will fail-open and return empty string or whatever is in vault)
+}
+
+func TestGetKeyBudget(t *testing.T) {
+	// Verify KeyLookupTimeout constant is at most 800ms
+	if KeyLookupTimeout > 800*time.Millisecond {
+		t.Errorf("KeyLookupTimeout = %v; must be <= 800ms for hook budget", KeyLookupTimeout)
+	}
+
+	// When TYPESAFE_API_KEY is unset and secret-tool fails or times out: fail-open returns ""
+	t.Setenv("TYPESAFE_API_KEY", "")
+
+	// Test GetKeyWithContext with an already cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	key := GetKeyWithContext(ctx)
+	duration := time.Since(start)
+
+	if key != "" {
+		t.Errorf("GetKeyWithContext(cancelled) = %q; want empty string", key)
+	}
+	if duration > 500*time.Millisecond {
+		t.Errorf("GetKeyWithContext took %v; expected immediate fail-open", duration)
+	}
 }
 
 // --- System One Client Tests with Loopback httptest.Server -------------------
@@ -1185,23 +1354,39 @@ func TestCheckSkillSuggestion(t *testing.T) {
 	client.Endpoint = ts.URL
 	client.HTTPClient = ts.Client()
 
-	// Case 1: Skill chosen (delegation-contract)
-	mu.Lock()
-	mockChoice = "delegation-contract"
-	mu.Unlock()
-	skill, err := CheckSkillSuggestion(context.Background(), client, "Delegiere diesen Task an einen Subagenten")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// Case 1: All 4 allowed skills must be accepted
+	for _, allowedSkill := range []string{"delegation-contract", "knowledge-keeping", "measure-before-asserting", "session-handover"} {
+		mu.Lock()
+		mockChoice = allowedSkill
+		mu.Unlock()
+		skill, err := CheckSkillSuggestion(context.Background(), client, "A prompt matching "+allowedSkill)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", allowedSkill, err)
+		}
+		if skill != allowedSkill {
+			t.Errorf("skill = %q; want %q", skill, allowedSkill)
+		}
 	}
-	if skill != "delegation-contract" {
-		t.Errorf("skill = %q; want %q", skill, "delegation-contract")
+
+	// Case 1b: Hallucinated or unknown skills must be discarded
+	for _, unknownSkill := range []string{"python-developer", "code-architect", "unknown-imprint-skill", "random"} {
+		mu.Lock()
+		mockChoice = unknownSkill
+		mu.Unlock()
+		skill, err := CheckSkillSuggestion(context.Background(), client, "Some prompt")
+		if err != nil {
+			t.Fatalf("unexpected error for unknown skill %q: %v", unknownSkill, err)
+		}
+		if skill != "" {
+			t.Errorf("unknown skill %q was not discarded: got %q; want empty string", unknownSkill, skill)
+		}
 	}
 
 	// Case 2: Skill "none" chosen
 	mu.Lock()
 	mockChoice = "none"
 	mu.Unlock()
-	skill, err = CheckSkillSuggestion(context.Background(), client, "Refaktoriere die Schleife in main.go")
+	skill, err := CheckSkillSuggestion(context.Background(), client, "Refaktoriere die Schleife in main.go")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1413,6 +1598,24 @@ func TestRunHookSkillSuggestion(t *testing.T) {
 		}
 		if stdout.Len() != 0 {
 			t.Errorf("expected empty stdout when none chosen, got %q", stdout.String())
+		}
+	}
+
+	// Case 6b: Hallucinated / unknown skill chosen -> exits 0, no output (discarded)
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		mu.Lock()
+		mockChoice = "python-expert"
+		mockStatus = http.StatusOK
+		mu.Unlock()
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"prompt": "Schreibe ein Python-Skript fuer Datenanalyse"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout when unknown skill chosen, got %q", stdout.String())
 		}
 	}
 
