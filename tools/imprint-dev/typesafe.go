@@ -400,41 +400,62 @@ func CheckKnowledgeKeeping(ctx context.Context, client *Client, text string) (bo
 
 // --- Hook Payload & Subcommand (CL-000, CL-001) ------------------------------
 
-// isMemoryOrRegisterFile returns true if path looks like a memory, decision, or register file.
+// isMemoryOrRegisterFile returns true if path is a memory, decision, or register file.
+// Non-memory files, source code files, and build/factory files always return false.
 func isMemoryOrRegisterFile(path string) bool {
-	if path == "" {
-		return true // when no file specified, default to inspecting content
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" || cleanPath == "." {
+		return false
 	}
-	base := strings.ToLower(filepath.Base(path))
-	keywords := []string{
-		"entscheid",
-		"register",
-		"memory",
-		"gedaechtnis",
-		"gedächtnis",
-		"knowledge",
-		"journal",
-		"orchestration",
-		"fakt",
-		"fact",
+	cleanPath = filepath.ToSlash(filepath.Clean(cleanPath))
+	lowerPath := strings.ToLower(cleanPath)
+	base := filepath.Base(cleanPath)
+	lowerBase := strings.ToLower(base)
+	ext := strings.ToLower(filepath.Ext(cleanPath))
+
+	// Source code files are never memory/register files.
+	codeExts := map[string]bool{
+		".go": true, ".py": true, ".sh": true, ".bash": true, ".zsh": true,
+		".rs": true, ".c": true, ".h": true, ".cpp": true, ".hpp": true,
+		".cc": true, ".hh": true, ".js": true, ".ts": true, ".jsx": true,
+		".tsx": true, ".java": true, ".rb": true, ".php": true, ".cs": true,
+		".swift": true, ".kt": true,
 	}
-	for _, kw := range keywords {
-		if strings.Contains(base, kw) {
+	if codeExts[ext] {
+		return false
+	}
+
+	// Factory and build files are never memory/register files.
+	if strings.Contains(lowerBase, "factory") || strings.Contains(lowerBase, "build") ||
+		lowerBase == "makefile" || lowerBase == "dockerfile" || lowerBase == "containerfile" {
+		return false
+	}
+
+	// Exact filenames / basenames.
+	switch lowerBase {
+	case "entscheide.md", "offene-entscheide.md", "register.md", "memory.md", "agents.md":
+		return true
+	}
+
+	// Fixed folder paths: /memory/, /rules/, /skills/ or starting with memory/, rules/, skills/.
+	prefixes := []string{"memory/", "rules/", "skills/"}
+	for _, p := range prefixes {
+		if strings.HasPrefix(lowerPath, p) || strings.Contains(lowerPath, "/"+p) {
 			return true
 		}
 	}
-	lowerPath := strings.ToLower(filepath.ToSlash(path))
-	return strings.Contains(lowerPath, "/memory/") || strings.Contains(lowerPath, "/gedaechtnis/")
+
+	return false
 }
 
-// extractFileAndContent parses tool input fields across Claude Code and Antigravity conventions.
+// extractFileAndContent parses tool input fields across Claude Code, Antigravity, and Codex conventions.
 func extractFileAndContent(toolInput map[string]any) (string, string) {
 	if toolInput == nil {
 		return "", ""
 	}
 
 	filePath := ""
-	for _, k := range []string{"TargetFile", "target_file", "file_path", "filePath", "path", "file"} {
+	for _, k := range []string{"file_path", "path", "TargetFile", "target_file", "filePath", "file"} {
 		if v, ok := toolInput[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
 				filePath = s
@@ -444,7 +465,7 @@ func extractFileAndContent(toolInput map[string]any) (string, string) {
 	}
 
 	content := ""
-	for _, k := range []string{"CodeContent", "ReplacementContent", "code_content", "replacement_content", "content", "text", "replacement"} {
+	for _, k := range []string{"new_string", "CodeContent", "ReplacementContent", "code_content", "replacement_content", "content", "text", "replacement"} {
 		if v, ok := toolInput[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
 				content = s
@@ -478,40 +499,11 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 	fs.SetOutput(stderr)
 
 	endpoint := fs.String("endpoint", DefaultEndpoint, "TypeSafe API endpoint")
-	keyFlag := fs.String("key", "", "TypeSafe API key (defaults to GetKey())")
 	timeoutSec := fs.Int("timeout", 8, "timeout in seconds (max 8)")
 
 	if err := fs.Parse(args); err != nil {
 		return exitOK // fail-open
 	}
-
-	keyPassed := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "key" {
-			keyPassed = true
-		}
-	})
-
-	apiKey := ""
-	if keyPassed {
-		apiKey = *keyFlag
-	} else {
-		apiKey = GetKey()
-	}
-
-	// Without a key: immediately exit 0 with no network or output.
-	if apiKey == "" {
-		return exitOK
-	}
-
-	timeout := time.Duration(*timeoutSec) * time.Second
-	if timeout <= 0 || timeout > DefaultTimeout {
-		timeout = DefaultTimeout
-	}
-
-	client := NewClient(apiKey)
-	client.Endpoint = *endpoint
-	client.Timeout = timeout
 
 	// Read hook payload from stdin (up to 2MB).
 	rawInput, err := io.ReadAll(io.LimitReader(stdin, 2*1024*1024))
@@ -536,10 +528,26 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 		text = payload.Content
 	}
 
-	// Only inspect memory/register files, and skip trivial edits.
+	// Optimization: check path and trivial content FIRST before doing any key search.
+	// Non-memory files exit immediately without triggering secret-tool.
 	if !isMemoryOrRegisterFile(filePath) || len(strings.TrimSpace(text)) < 15 {
 		return exitOK
 	}
+
+	// Key lookup only after confirming this is a memory/register file.
+	apiKey := GetKey()
+	if apiKey == "" {
+		return exitOK
+	}
+
+	timeout := time.Duration(*timeoutSec) * time.Second
+	if timeout <= 0 || timeout > DefaultTimeout {
+		timeout = DefaultTimeout
+	}
+
+	client := NewClient(apiKey)
+	client.Endpoint = *endpoint
+	client.Timeout = timeout
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

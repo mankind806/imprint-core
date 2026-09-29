@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "imprint-dev hook-typesafe-check",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/typesafe-check.sh\"",
             "timeout": 10
           }
         ]

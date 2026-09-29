@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -296,6 +297,103 @@ func TestCheckKnowledgeKeeping(t *testing.T) {
 	}
 }
 
+// --- Path & Field Extraction Tests -------------------------------------------
+
+func TestIsMemoryOrRegisterFile(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		// Empty / invalid
+		{"", false},
+		{"   ", false},
+		{".", false},
+
+		// Source code files - ALWAYS false
+		{"main.go", false},
+		{"pkg/factory/code.go", false},
+		{"factory.go", false},
+		{"script.py", false},
+		{"deploy.sh", false},
+		{"lib.rs", false},
+		{"program.c", false},
+		{"header.h", false},
+		{"app.ts", false},
+		{"index.js", false},
+		{"memory/script.py", false}, // Code inside memory dir must still be false
+
+		// Factory / build files - ALWAYS false
+		{"factory.md", false},
+		{"factory_settings.json", false},
+		{"build.gradle", false},
+		{"Makefile", false},
+		{"Dockerfile", false},
+		{"Containerfile", false},
+
+		// Exact basenames - true
+		{"entscheide.md", true},
+		{"docs/entscheide.md", true},
+		{"offene-entscheide.md", true},
+		{"register.md", true},
+		{"docs/register.md", true},
+		{"MEMORY.md", true},
+		{"AGENTS.md", true},
+
+		// Folder paths - true
+		{"memory/notes.md", true},
+		{"/var/home/user/memory/notes.md", true},
+		{"rules/AGENTS.md", true},
+		{"rules/custom.md", true},
+		{"skills/knowledge-keeping/SKILL.md", true},
+	}
+
+	for _, tc := range cases {
+		got := isMemoryOrRegisterFile(tc.path)
+		if got != tc.want {
+			t.Errorf("isMemoryOrRegisterFile(%q) = %v; want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestExtractFileAndContent(t *testing.T) {
+	// 1. Claude Code Edit tool (file_path, new_string)
+	editInput := map[string]any{
+		"file_path":  "memory/decisions.md",
+		"old_string": "old text",
+		"new_string": "new content for memory",
+	}
+	f1, c1 := extractFileAndContent(editInput)
+	if f1 != "memory/decisions.md" || c1 != "new content for memory" {
+		t.Errorf("Edit extraction failed: got (%q, %q)", f1, c1)
+	}
+
+	// 2. Antigravity write_to_file (TargetFile, CodeContent)
+	writeInput := map[string]any{
+		"TargetFile":  "entscheide.md",
+		"CodeContent": "new file content",
+	}
+	f2, c2 := extractFileAndContent(writeInput)
+	if f2 != "entscheide.md" || c2 != "new file content" {
+		t.Errorf("write_to_file extraction failed: got (%q, %q)", f2, c2)
+	}
+
+	// 3. Antigravity replace_file_content (TargetFile, ReplacementContent)
+	replaceInput := map[string]any{
+		"TargetFile":         "register.md",
+		"ReplacementContent": "replacement lines",
+	}
+	f3, c3 := extractFileAndContent(replaceInput)
+	if f3 != "register.md" || c3 != "replacement lines" {
+		t.Errorf("replace_file_content extraction failed: got (%q, %q)", f3, c3)
+	}
+
+	// 4. Nil input
+	f4, c4 := extractFileAndContent(nil)
+	if f4 != "" || c4 != "" {
+		t.Errorf("nil extraction failed: got (%q, %q)", f4, c4)
+	}
+}
+
 // --- Hook CLI Subcommand Tests -----------------------------------------------
 
 func TestHookTypesafeCheckCLI(t *testing.T) {
@@ -323,9 +421,15 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 
 	// Case 1: Without key -> exits 0 immediately with no output
 	{
+		t.Setenv("TYPESAFE_API_KEY", "")
+		origKeyFn := getKeyFn
+		getKeyFn = func() string { return "" }
+
 		var stdout, stderr bytes.Buffer
-		stdin := strings.NewReader(`{"tool_name":"write_to_file","tool_input":{"TargetFile":"entscheide.md","CodeContent":"OHNE_DATUM Fakt"}}`)
-		code := runWithStdin([]string{"hook-typesafe-check", "--key", ""}, stdin, &stdout, &stderr)
+		stdin := strings.NewReader(`{"tool_name":"write_to_file","tool_input":{"TargetFile":"entscheide.md","CodeContent":"OHNE_DATUM Fakt ohne Datum und Herkunft."}}`)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		getKeyFn = origKeyFn
+
 		if code != exitOK {
 			t.Fatalf("code = %d; want exitOK", code)
 		}
@@ -336,9 +440,10 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 
 	// Case 2: Non-memory file -> exits 0 with no output
 	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
 		var stdout, stderr bytes.Buffer
 		stdin := strings.NewReader(`{"tool_name":"write_to_file","tool_input":{"TargetFile":"main.go","CodeContent":"OHNE_DATUM package main"}}`)
-		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL, "--key", "test-key"}, stdin, &stdout, &stderr)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
 		if code != exitOK {
 			t.Fatalf("code = %d; want exitOK", code)
 		}
@@ -347,11 +452,33 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		}
 	}
 
-	// Case 3: Memory file with missing provenance -> exits 0 with additionalContext JSON
+	// Case 2b: Path exclusion does NOT invoke key lookup (factory.go -> kein Key-Lookup)
 	{
+		origKeyFn := getKeyFn
+		getKeyFn = func() string {
+			t.Fatal("key lookup must not be invoked for excluded/non-memory files like factory.go")
+			return "fail"
+		}
+
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"tool_name":"write_to_file","tool_input":{"TargetFile":"factory.go","CodeContent":"OHNE_DATUM package factory"}}`)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		getKeyFn = origKeyFn
+
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout for factory.go, got %q", stdout.String())
+		}
+	}
+
+	// Case 3: Memory file with missing provenance via write_to_file -> exits 0 with additionalContext JSON
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
 		var stdout, stderr bytes.Buffer
 		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":"docs/entscheide.md","CodeContent":"OHNE_DATUM Neuer Beschluss ohne Herkunft."}}`)
-		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL, "--key", "test-key"}, stdin, &stdout, &stderr)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
 		if code != exitOK {
 			t.Fatalf("code = %d; want exitOK", code)
 		}
@@ -374,11 +501,34 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		}
 	}
 
+	// Case 3b: Memory file with missing provenance via Claude Code Edit (file_path, new_string)
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"rules/AGENTS.md","old_string":"foo","new_string":"OHNE_DATUM Neuer Leitsatz ohne Erfassungsdatum."}}`)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() == 0 {
+			t.Fatal("expected hook output for Edit with new_string, got empty stdout")
+		}
+
+		var out HookOutput
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("failed to decode hook output JSON: %v", err)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "knowledge-keeping") {
+			t.Errorf("AdditionalContext does not contain knowledge-keeping notice: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+	}
+
 	// Case 4: Memory file with valid provenance -> exits 0 with no output
 	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
 		var stdout, stderr bytes.Buffer
 		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":"docs/entscheide.md","CodeContent":"2026-09-29: Gemäß Beschluss CL-105..."}}`)
-		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL, "--key", "test-key"}, stdin, &stdout, &stderr)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
 		if code != exitOK {
 			t.Fatalf("code = %d; want exitOK", code)
 		}
@@ -389,14 +539,53 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 
 	// Case 5: Malformed JSON on stdin -> fail-open (exit 0, no output)
 	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
 		var stdout, stderr bytes.Buffer
 		stdin := strings.NewReader(`{not valid json`)
-		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL, "--key", "test-key"}, stdin, &stdout, &stderr)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
 		if code != exitOK {
 			t.Fatalf("code = %d; want exitOK", code)
 		}
 		if stdout.Len() != 0 {
 			t.Errorf("expected empty stdout on malformed json, got %q", stdout.String())
 		}
+	}
+}
+
+// --- Hook Wrapper Script Tests -----------------------------------------------
+
+func TestHookWrapperScript(t *testing.T) {
+	scriptPath := filepath.Join("..", "..", "hooks", "typesafe-check.sh")
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("hooks/typesafe-check.sh missing: %v", err)
+	}
+
+	// Check executable permission
+	if info.Mode()&0111 == 0 {
+		t.Errorf("hooks/typesafe-check.sh is not executable: mode %v", info.Mode())
+	}
+
+	// Check script contents
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("failed to read hooks/typesafe-check.sh: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "command -v imprint-dev >/dev/null 2>&1 || exit 0") {
+		t.Errorf("missing command -v check in script: %s", content)
+	}
+	if !strings.Contains(content, "exec imprint-dev hook-typesafe-check") {
+		t.Errorf("missing exec imprint-dev hook-typesafe-check in script: %s", content)
+	}
+
+	// Check hooks.json registration
+	hooksJSONPath := filepath.Join("..", "..", "hooks", "hooks.json")
+	hooksData, err := os.ReadFile(hooksJSONPath)
+	if err != nil {
+		t.Fatalf("failed to read hooks/hooks.json: %v", err)
+	}
+	if !strings.Contains(string(hooksData), "hooks/typesafe-check.sh") {
+		t.Errorf("hooks.json does not reference hooks/typesafe-check.sh: %s", string(hooksData))
 	}
 }
