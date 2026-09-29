@@ -60,7 +60,7 @@ var checks = []check{
 	{"g", "enforcement-classification", "Each row of an Enforcement table under skills/, and in docs/core-card-and-checks.md, carries at least one known classification, none unknown: Enforced; Enforceable, not enforced; Behaviour rule; Reserved to a person.", checkEnforcementClassification},
 	{"h", "overdue-recheck", "No re-check date (Re-check by YYYY-MM-DD) has passed. A warning in a normal run; a violation only under --release.", checkOverdueRechecks},
 	{"i", "hook-env-portable", "hooks/hooks.json and hooks/*.sh use only CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA from the CLAUDE_* family, plus CLAUDE_CONFIG_DIR but only as ${CLAUDE_CONFIG_DIR:-...}; Codex leaves the rest unset.", checkHookEnvPortable},
-	{"j", "hook-host-binary", "A hooks/*.sh script that invokes the claude or codex binary as a command also carries R-HOST v2's canonical imprint_host() block verbatim and calls it; structural only, not a proof every call is gated.", checkHookHostBinary},
+	{"j", "hook-host-binary", "A hooks/*.sh script that invokes the claude, codex or agy binary as a command also carries R-HOST v3's canonical imprint_host() block verbatim and calls it; structural only, not a proof every call is gated.", checkHookHostBinary},
 	{"k", "rules-agents-in-sync", "rules/AGENTS.md exists and is byte-identical to hooks/kernkarte.md.", checkRulesAgentsInSync},
 }
 
@@ -829,33 +829,38 @@ func checkHookEnvPortable(e *env) (checkResult, error) {
 // without the shared detector at all, without it verbatim, or without ever
 // calling it.
 
-// rHostV2Block is R-HOST v2's canonical imprint_host definition, its
+// rHostV3Block is R-HOST v3's canonical imprint_host definition, its
 // explanatory comment line included. check j requires a hook script that
-// invokes claude or codex to carry this block verbatim — normalized only by
+// invokes claude, codex or agy to carry this block verbatim — normalized only by
 // trimming each line's own leading and trailing whitespace, so indentation
 // style (tabs vs spaces, how many) is free but the words on each line are
 // not — rather than some ad hoc reimplementation, so the plugin has exactly
 // one place this logic lives and every host-invoking hook shares it.
-const rHostV2Block = `# imprint_host prints the host runtime running this hook: codex, claude or unknown (R-HOST v2).
+const rHostV3Block = `# imprint_host prints the host runtime running this hook: codex, claude, agy or unknown (R-HOST v3).
 imprint_host() {
 	codex_home=${CODEX_HOME:-$HOME/.codex}
 	claude_home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+	agy_home=${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini}
 	for p in "${CLAUDE_PLUGIN_DATA:-}" "${CLAUDE_PLUGIN_ROOT:-}"; do
 		case $p in
 		"$codex_home"/*) echo codex; return ;;
 		"$claude_home"/*) echo claude; return ;;
+		"$agy_home"/*) echo agy; return ;;
 		esac
 	done
 	echo unknown
 }`
 
-// rHostV2Lines is rHostV2Block's own lines, each already trimmed — the form
-// findRHostV2Block compares a candidate run of lines against.
-var rHostV2Lines = normalizeLines(splitLines([]byte(rHostV2Block)))
+const rHostV2Block = rHostV3Block
+
+// rHostV3Lines is rHostV3Block's own lines, each already trimmed — the form
+// findRHostV3Block compares a candidate run of lines against.
+var rHostV3Lines = normalizeLines(splitLines([]byte(rHostV3Block)))
+var rHostV2Lines = rHostV3Lines
 
 // normalizeLines trims each line's leading and trailing whitespace. This is
-// the only normalization findRHostV2Block allows before comparing a line
-// against rHostV2Block's own text.
+// the only normalization findRHostV3Block allows before comparing a line
+// against rHostV3Block's own text.
 func normalizeLines(lines []string) []string {
 	out := make([]string, len(lines))
 	for i, l := range lines {
@@ -864,17 +869,17 @@ func normalizeLines(lines []string) []string {
 	return out
 }
 
-// findRHostV2Block looks for rHostV2Block inside lines (a script's own lines,
+// findRHostV3Block looks for rHostV3Block inside lines (a script's own lines,
 // unnormalized) and returns the matched block's [start, end) line range,
 // 0-based, or ok=false if no contiguous run of lines matches once each side
 // is normalized the same way.
-func findRHostV2Block(lines []string) (start, end int, ok bool) {
+func findRHostV3Block(lines []string) (start, end int, ok bool) {
 	norm := normalizeLines(lines)
-	n := len(rHostV2Lines)
+	n := len(rHostV3Lines)
 	for i := 0; i+n <= len(norm); i++ {
 		match := true
 		for k := 0; k < n; k++ {
-			if norm[i+k] != rHostV2Lines[k] {
+			if norm[i+k] != rHostV3Lines[k] {
 				match = false
 				break
 			}
@@ -886,8 +891,12 @@ func findRHostV2Block(lines []string) (start, end int, ok bool) {
 	return 0, 0, false
 }
 
+func findRHostV2Block(lines []string) (start, end int, ok bool) {
+	return findRHostV3Block(lines)
+}
+
 // hostBinaryInvocationRE is a textual heuristic, not a shell parser. It flags
-// "claude" or "codex" sitting right after something that starts a command: the
+// "claude", "codex" or "agy" sitting right after something that starts a command: the
 // start of the line, a ;, &, | or backtick, or a $( — so it catches
 // out="$(claude --version)" and codex exec ... but not "command -v claude"
 // (an existence probe, not an invocation: "claude" there follows "-v ", none
@@ -898,13 +907,13 @@ func findRHostV2Block(lines []string) (start, end int, ok bool) {
 // way (a variable holding the binary name, for one) and flag a stray
 // non-comment mention that only looks like one; it is not a substitute for a
 // human reading the script it flags.
-var hostBinaryInvocationRE = regexp.MustCompile("(^|[;&|`]|\\$\\()\\s*(claude|codex)\\b")
+var hostBinaryInvocationRE = regexp.MustCompile("(^|[;&|`]|\\$\\()\\s*(claude|codex|agy)\\b")
 
 // imprintHostDefRE matches any shell function definition named imprint_host,
 // canonical or not: imprint_host() { ... } or, bash's optional keyword form,
 // function imprint_host() { ... }. It exists only to tell apart, for the
 // finding's own wording, a script with no imprint_host at all from one whose
-// imprint_host does not match rHostV2Block; findRHostV2Block, not this,
+// imprint_host does not match rHostV3Block; findRHostV3Block, not this,
 // decides whether the check passes. It does not match inside a comment:
 // ^\s* does not skip a leading #, so "# imprint_host() {" is not a definition.
 var imprintHostDefRE = regexp.MustCompile(`(?m)^\s*(?:function\s+)?imprint_host\s*\(\s*\)`)
@@ -933,11 +942,12 @@ var imprintHostCallRE = regexp.MustCompile(
 		`|(?:^|[;&|])\s*imprint_host(?:$|[\s;)|>])`, // a bare command
 )
 
-// rHostV2DiffersMsg is a fixed, greppable phrase: every finding about
-// imprint_host not matching R-HOST v2's canonical block, whichever way it
+// rHostV3DiffersMsg is a fixed, greppable phrase: every finding about
+// imprint_host not matching R-HOST v3's canonical block, whichever way it
 // doesn't, says this, so a wider search (by the owner, by Codex, by the other
 // writer) finds every such case with one string.
-const rHostV2DiffersMsg = "imprint_host differs from R-HOST v2"
+const rHostV3DiffersMsg = "imprint_host differs from R-HOST v3"
+const rHostV2DiffersMsg = rHostV3DiffersMsg
 
 func checkHookHostBinary(e *env) (checkResult, error) {
 	const rule = "hook-host-binary"
@@ -970,13 +980,13 @@ func checkHookHostBinary(e *env) (checkResult, error) {
 		if invocationLine == 0 {
 			continue
 		}
-		start, end, ok := findRHostV2Block(lines)
+		start, end, ok := findRHostV3Block(lines)
 		if !ok {
-			msg := "invokes the claude or codex binary as a command but does not define imprint_host(); R-HOST v2's canonical block is needed to tell the two hosts apart"
+			msg := "invokes the claude, codex or agy binary as a command but does not define imprint_host(); R-HOST v3's canonical block is needed to tell the hosts apart"
 			if imprintHostDefRE.MatchString(string(raw)) {
 				msg = fmt.Sprintf(
-					"invokes the claude or codex binary as a command; %s (its canonical block, comment line included, must appear verbatim — only each line's own leading/trailing whitespace may differ); copy it exactly rather than reimplementing it",
-					rHostV2DiffersMsg)
+					"invokes the claude, codex or agy binary as a command; %s (its canonical block, comment line included, must appear verbatim — only each line's own leading/trailing whitespace may differ); copy it exactly rather than reimplementing it",
+					rHostV3DiffersMsg)
 			}
 			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine, msg})
 			continue
@@ -1007,11 +1017,11 @@ func checkHookHostBinary(e *env) (checkResult, error) {
 		switch {
 		case redefined:
 			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine, fmt.Sprintf(
-				"invokes the claude or codex binary as a command; %s (a second imprint_host definition sits outside the canonical block) — keep exactly one, shared, verbatim definition",
-				rHostV2DiffersMsg)})
+				"invokes the claude, codex or agy binary as a command; %s (a second imprint_host definition sits outside the canonical block) — keep exactly one, shared, verbatim definition",
+				rHostV3DiffersMsg)})
 		case !called:
 			res.Findings = append(res.Findings, finding{rule, violation, rel, invocationLine,
-				"defines imprint_host() as R-HOST v2's canonical block, verbatim, but never calls it outside its own definition; this invocation of the claude or codex binary is not actually gated by it"})
+				"defines imprint_host() as R-HOST v3's canonical block, verbatim, but never calls it outside its own definition; this invocation of the claude, codex or agy binary is not actually gated by it"})
 		}
 	}
 	res.Note = fmt.Sprintf("%d hook script(s) scanned", scanned)

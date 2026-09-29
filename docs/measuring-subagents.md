@@ -74,12 +74,13 @@ prove absence in hook input. The parent/child meaning of the common model field 
 unverified; the Codex rollout therefore takes precedence when readable. These observations
 prove the inspected events, not every Codex surface or version.
 
-`host` follows the shared R-HOST v2 path heuristic: check `CLAUDE_PLUGIN_DATA`, then
-`CLAUDE_PLUGIN_ROOT`, against `CODEX_HOME` (default `~/.codex`) and `CLAUDE_CONFIG_DIR`
-(default `~/.claude`). Otherwise it is `unknown`; logging still works. This is not host
-attestation. Mixed paths use the first match; symlinks, overlapping homes and trailing
-slashes can misclassify or miss a host. No runtime identity is inferred from an absent
-Codex signal alone. Host classification does not select a model or confer permissions.
+`host` follows the shared R-HOST v3 path heuristic: check `CLAUDE_PLUGIN_DATA`, then
+`CLAUDE_PLUGIN_ROOT`, against `CODEX_HOME` (default `~/.codex`), `CLAUDE_CONFIG_DIR`
+(default `~/.claude`), and `ANTIGRAVITY_CONFIG_DIR` (default `~/.gemini`). Otherwise it is
+`unknown`; logging still works. This is not host attestation. Mixed paths use the first match;
+symlinks, overlapping homes and trailing slashes can misclassify or miss a host. No runtime
+identity is inferred from an absent Codex signal alone. Host classification does not select a
+model or confer permissions.
 
 The shell field extractor is not a full JSON parser: an unexpected nested object with
 a `model` key can be mistaken for the top-level field. The documented subagent payload

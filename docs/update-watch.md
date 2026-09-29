@@ -1,8 +1,8 @@
-# Watching Claude Code and Codex updates
+# Watching Claude Code, Codex, and Antigravity updates
 
 | What | How | State |
 |---|---|---|
-| Host | Claude Code or Codex, told apart by rule R-HOST; any other answer: nothing | enforced by the hook |
+| Host | Claude Code, Codex, or Antigravity, told apart by rule R-HOST; any other answer: nothing | enforced by the hook |
 | Switched off | `IMPRINT_UPDATE_WATCH=0` in the environment Claude Code starts with | **on by default** |
 | Speaks | on a fresh start after an upgrade, once per version, in one session | enforced by the hook |
 | Says | an update review is due, what it reads, where its one report goes | a factual note, no command |
@@ -13,9 +13,9 @@ Claude Code changes often, and a plugin that is not re-read against each release
 rebuilding what Claude Code now does itself, or getting in its way. A fourth hook notices a
 new version at session start and tells the session, as an offer, that a review is due.
 
-## Two hosts: Claude Code and Codex
+## Three hosts: Claude Code, Codex, and Antigravity
 
-Codex loads this plugin too and runs the same hook. Measured 2026-09-28: under Codex,
+Codex and Antigravity load this plugin too and run the same hook. Measured 2026-09-28: under Codex,
 `CLAUDE_PLUGIN_DATA` is `~/.codex/plugins/data/<plugin>`, and that directory held a
 `claude-code-version` of 2.1.283. The hook had watched Claude Code while Codex ran it. Now it
 first asks which host runs it, and each host watches its own program:
@@ -24,6 +24,7 @@ first asks which host runs it, and each host watches its own program:
 |---|---|---|---|---|
 | Claude Code | `~/.claude/plugins/data/<plugin>` | `claude --version` | `claude-code-version`, `claude-code-version-history` | `CHANGELOG.md` in `anthropics/claude-code`; docs index `code.claude.com/docs/llms.txt` |
 | Codex | `~/.codex/plugins/data/<plugin>` | `codex --version` | `codex-version`, `codex-version-history` | releases of `openai/codex` on GitHub; changelog and docs index under `learn.chatgpt.com/docs` |
+| Antigravity | `~/.gemini/antigravity-cli/plugin_data/<plugin>` | `agy --version` | `agy-version`, `agy-version-history` | changelog under `antigravity.google/changelog`; docs under `antigravity.google/docs` |
 | unknown | anywhere else | nothing | nothing | no note; the hook exits 0 at once |
 
 Neither host reads or writes the other's record. The Claude Code path is unchanged: the same
@@ -37,7 +38,8 @@ harmless, since under Codex the hook reads and writes only `codex-version` (`hoo
 **R-HOST.** `imprint_host` in the script is the rule. It prints `codex` if
 `CLAUDE_PLUGIN_DATA`, or else `CLAUDE_PLUGIN_ROOT`, lies below the Codex home (`CODEX_HOME`,
 by default `~/.codex`), `claude` if it lies below the Claude home (`CLAUDE_CONFIG_DIR`, by
-default `~/.claude`), and `unknown` otherwise. Below means the home and a slash, so a sibling
+default `~/.claude`), `agy` if it lies below the Antigravity home (`ANTIGRAVITY_CONFIG_DIR`,
+by default `~/.gemini`), and `unknown` otherwise. Below means the home and a slash, so a sibling
 such as `~/.codex-other` is not the Codex home. Another hook script that needs the host is
 to carry the identical text; so far only this script does, and nothing checks that copies
 stay identical. The tests in

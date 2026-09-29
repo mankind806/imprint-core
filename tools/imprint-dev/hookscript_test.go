@@ -30,7 +30,7 @@ func runHook(t *testing.T, dataDir, input string, hostEnv ...string) {
 	var env []string
 	for _, kv := range os.Environ() {
 		key, _, _ := strings.Cut(kv, "=")
-		if key != "CLAUDE_PLUGIN_DATA" && key != "CLAUDE_PLUGIN_ROOT" && key != "CODEX_HOME" && key != "CLAUDE_CONFIG_DIR" && key != "HOME" {
+		if key != "CLAUDE_PLUGIN_DATA" && key != "CLAUDE_PLUGIN_ROOT" && key != "CODEX_HOME" && key != "CLAUDE_CONFIG_DIR" && key != "ANTIGRAVITY_CONFIG_DIR" && key != "HOME" {
 			env = append(env, kv)
 		}
 	}
@@ -175,17 +175,20 @@ func TestHookOutputFeedsMeasure(t *testing.T) {
 	}
 }
 
-// Host classification is the agreed R-HOST v2 path heuristic, not an attestation.
+// Host classification is the agreed R-HOST v3 path heuristic, not an attestation.
 func TestHookHostPathsAndOptionalModel(t *testing.T) {
-	for _, tc := range []struct{ name, data, root, codex, claude, want string }{
-		{"codex default", ".codex/plugins/data/p", "", "", "", "codex"},
-		{"claude default", ".claude/plugins/data/p", "", "", "", "claude"},
-		{"custom codex", "custom-cx/data/p", "", "custom-cx", "custom-cl", "codex"},
-		{"custom claude", "custom-cl/data/p", "", "custom-cx", "custom-cl", "claude"},
-		{"unknown", "elsewhere/data/p", "", "", "", "unknown"},
-		{"prefix boundary", ".codex-other/data/p", "", "", "", "unknown"},
-		{"root fallback", "elsewhere/data/p", ".codex/cache/p", "", "", "codex"},
-		{"data wins mixed paths", ".claude/data/p", ".codex/cache/p", "", "", "claude"},
+	for _, tc := range []struct{ name, data, root, codex, claude, agy, want string }{
+		{"codex default", ".codex/plugins/data/p", "", "", "", "", "codex"},
+		{"claude default", ".claude/plugins/data/p", "", "", "", "", "claude"},
+		{"agy default", ".gemini/antigravity-cli/plugin_data/p", "", "", "", "", "agy"},
+		{"custom codex", "custom-cx/data/p", "", "custom-cx", "custom-cl", "custom-ag", "codex"},
+		{"custom claude", "custom-cl/data/p", "", "custom-cx", "custom-cl", "custom-ag", "claude"},
+		{"custom agy", "custom-ag/data/p", "", "custom-cx", "custom-cl", "custom-ag", "agy"},
+		{"unknown", "elsewhere/data/p", "", "", "", "", "unknown"},
+		{"prefix boundary", ".codex-other/data/p", "", "", "", "", "unknown"},
+		{"root fallback", "elsewhere/data/p", ".codex/cache/p", "", "", "", "codex"},
+		{"data wins mixed paths", ".claude/data/p", ".codex/cache/p", "", "", "", "claude"},
+		{"agy root fallback", "elsewhere/data/p", ".gemini/cache/p", "", "", "", "agy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -196,7 +199,7 @@ func TestHookHostPathsAndOptionalModel(t *testing.T) {
 				return filepath.Join(home, s)
 			}
 			dir := path(tc.data)
-			env := []string{"HOME=" + home, "CODEX_HOME=" + path(tc.codex), "CLAUDE_CONFIG_DIR=" + path(tc.claude), "CLAUDE_PLUGIN_ROOT=" + path(tc.root)}
+			env := []string{"HOME=" + home, "CODEX_HOME=" + path(tc.codex), "CLAUDE_CONFIG_DIR=" + path(tc.claude), "ANTIGRAVITY_CONFIG_DIR=" + path(tc.agy), "CLAUDE_PLUGIN_ROOT=" + path(tc.root)}
 			runHook(t, dir, `{"hook_event_name":"SubagentStop","agent_id":"a1","agent_type":"default","session_id":"s","model":"model-measured","last_assistant_message":"DO-NOT-LOG"}`, env...)
 			rows := hookLog(t, dir)
 			if len(rows) != 1 {
@@ -210,6 +213,20 @@ func TestHookHostPathsAndOptionalModel(t *testing.T) {
 				t.Fatal("copied answer")
 			}
 		})
+	}
+}
+
+func TestHookAgyInvokeSubagent(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".gemini", "antigravity-cli", "plugin_data", "imprint")
+	input := `{"toolCall":{"name":"invoke_subagent","args":{"Subagents":[{"TypeName":"research","Role":"Explorer","Prompt":"look around"}]}},"conversationId":"c1"}`
+	runHook(t, dir, input, "HOME="+home)
+	rows := hookLog(t, dir)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %v", rows)
+	}
+	if rows[0]["host"] != "agy" || rows[0]["agent_type"] != "research" || rows[0]["agent_id"] != "Explorer" {
+		t.Fatalf("got %v, want host=agy, agent_type=research, agent_id=Explorer", rows[0])
 	}
 }
 func TestHookDoesNotInventModel(t *testing.T) {
