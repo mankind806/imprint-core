@@ -137,8 +137,8 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 | Core card | hooks on `SessionStart`, `SubagentStart` | Inject `hooks/kernkarte.md` as additional context |
 | Measuring hook | hook on `SubagentStart`, `SubagentStop` | Appends one JSON line per event to the plugin's data directory |
 | Update watch | hook on `SessionStart`, on by default; `IMPRINT_UPDATE_WATCH=0` turns it off | After an upgrade of the host that runs the session, Claude Code or Codex, notes that a review of its changelog is due ([docs/update-watch.md](docs/update-watch.md)) |
-| `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs, and `hook-typesafe-check` |
-| TypeSafe Hook | hook on `PostToolUse` (Opt-in) | Rein beratender Hinweis bei fehlender Provenienz, fehlender Regel-Durchsetzung oder Duplikat-Fakten |
+| `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs, `hook-typesafe-check` and `hook-skill-suggestion` |
+| TypeSafe Hook | hooks on `PostToolUse` and `UserPromptSubmit` (Opt-in) | Rein beratende Hinweise bei fehlender Provenienz, fehlender Regel-Durchsetzung, Duplikat-Fakten oder passendem Skill-Vorschlag je Eingabe |
 | Pre-push hook | `.githooks/pre-push`, this repository, opt-in | Refuses undeclared identities and the shapes personal data takes |
 
 Each skill, the agent and the two layers in full: [docs/skills.md](docs/skills.md).
@@ -151,13 +151,13 @@ tools are not measured. Re-check by 2026-12-13.*
 
 ```mermaid
 flowchart LR
-    A["Tool Call<br/>(Write / Edit)"] --> B{"Register-, Gedächtnis-<br/>oder Regeldatei?"}
+    A["Ereignis<br/>(Write / Edit / UserPrompt)"] --> B{"Register-, Regeldatei<br/>oder Prompt ≥ 10 Zeichen?"}
     B -- Nein --> C["Stille Ausführung<br/>(Exit 0)"]
     B -- Ja --> D{"API-Key vorhanden?<br/>(Env / secret-tool)"}
     D -- Nein --> C
-    D -- Ja --> E["Lokale Maskierung<br/>(Secrets, E-Mails, Tokens)"]
+    D -- Ja --> E["Lokale Maskierung / Übertragung<br/>(System One Client)"]
     E --> F["TypeSafe System One<br/>(api.typesafe.ai / Jev)"]
-    F --> G{"Provenienz fehlt,<br/>Durchsetzung fehlt oder<br/>Duplikat-Fakt?"}
+    F --> G{"Befund oder<br/>Skill-Vorschlag?"}
     G -- Nein --> C
     G -- Ja --> H["Beratender Hinweis<br/>(additionalContext, Exit 0)"]
 ```
@@ -169,14 +169,14 @@ flowchart LR
 | **Endpoint & Hosting** | Strikte Allowlist: nur `https://api.typesafe.ai/v1/systemone` (TLS, US-Hosting); Loopback in Tests |
 | **Datenspeicherung / Retention** | Keine Zero Data Retention (ZDR) zugesichert; Aufbewahrungsdauer und Löschfristen beim Anbieter sind unbestimmt |
 | **Datenschutz & Maskierung** | Lokale Vorab-Maskierung via Regex (Secrets, API-Keys, Passwörter, E-Mails, Opaque-Tokens); Übertragung nur maskierter Texte (bis max. 100 KB). Bei Duplikat-Prüfung (CL-003): nur lokale Vorauswahl der Top 1–3 Zeilen (max. 500 Zeichen); keine ganzen Dateien |
-| **Scope & Filterung** | Ausschließlich Gedächtnis-/Registerdateien (`entscheide.md`, `offene-entscheide.md`, `register.md`, `MEMORY.md` oder in `memory/`) und Regeldateien (`AGENTS.md`, `rules/`, `skills/`). Quellcode (`.go`, `.py`, `.sh`, `.rs`, `.c`, etc.), Build-/Factory- und Testdateien werden vorab lokal gefiltert und **niemals** gesendet |
-| **Wirkung & Grenzen** | Rein beratender Hinweis als `additionalContext`; blockiert niemals Schreiboperationen (Exit 0) |
-| **Fehlertoleranz** | Fail-Open: Timeout (≤ 8s), Netzfehler oder HTTP-Fehler werden lautlos ignoriert |
+| **Scope & Filterung** | Schreibprüfungen (CL-001/002/003): ausschließlich Gedächtnis-/Registerdateien (`entscheide.md`, `offene-entscheide.md`, `register.md`, `MEMORY.md` oder in `memory/`) und Regeldateien (`AGENTS.md`, `rules/`, `skills/`). Quellcode (`.go`, `.py`, `.sh`, `.rs`, `.c`, etc.), Build-/Factory- und Testdateien werden vorab lokal gefiltert und **niemals** gesendet. Bei Nutzereingaben (`UserPromptSubmit`, CL-004): Prompts ab 10 Zeichen werden bei aktivem Key zur Skill-Einordnung übertragen |
+| **Wirkung & Grenzen** | Rein beratender Hinweis als `additionalContext`; blockiert niemals Arbeits- oder Schreiboperationen (Exit 0) |
+| **Fehlertoleranz & Latenz** | Fail-Open: Schreibprüfung Timeout ≤ 8s; Skill-Vorschlag je Nutzereingabe (CL-004) Latenz-Budget < 1s (Default-Timeout 1s, max 2s). Netzfehler oder HTTP-Fehler werden lautlos ignoriert |
 | **Tests & CI** | 100 % Loopback mit `httptest.Server`; null externes Netzwerk in CI und Unit-Tests |
 
-Das Paket integriert die Teilprüfungen `CL-000` (TypeSafe System One Client in `tools/imprint-dev`), `CL-001` (Knowledge-Keeping Beratung), `CL-002` (Regel-Durchsetzungs-Prüfung) und `CL-003` (Duplikat-Erkennung bei Fakten und Entscheiden). Wird ein neuer Fakt oder Entscheid in einer Register- oder Gedächtnisdatei ohne Erfassungsdatum (`YYYY-MM-DD`), Herkunftsquelle oder Ermittlungsmethode protokolliert (CL-001), enthält ein Regeltext Vorgaben ohne Benennung des Durchsetzungs-Mechanismus (CL-002), oder dupliziert ein Eintrag bereits im Register vorhandene Fakten oder Entscheide ohne explizite Ablösung oder Referenz (CL-003), generiert das System One Modell Jev (`jev-latest`) einen freundlichen, beratenden Hinweis. Für CL-003 wird lokal per Keyword-Overlap eine Vorauswahl von 1–3 Zeilen (max. 500 Zeichen) der bestehenden Datei getroffen — es werden niemals ganze Dateien übertragen. Treffen mehrere Kriterien zu, werden die Prüfungen gebündelt in einer einzigen System One Anfrage ausgeführt.
+Das Paket integriert die Teilprüfungen `CL-000` (TypeSafe System One Client in `tools/imprint-dev`), `CL-001` (Knowledge-Keeping Beratung), `CL-002` (Regel-Durchsetzungs-Prüfung), `CL-003` (Duplikat-Erkennung bei Fakten und Entscheiden) und `CL-004` (Skill-Vorschlag je Eingabe bei UserPromptSubmit). Wird ein neuer Fakt oder Entscheid in einer Register- oder Gedächtnisdatei ohne Erfassungsdatum (`YYYY-MM-DD`), Herkunftsquelle oder Ermittlungsmethode protokolliert (CL-001), enthält ein Regeltext Vorgaben ohne Benennung des Durchsetzungs-Mechanismus (CL-002), oder dupliziert ein Eintrag bereits im Register vorhandene Fakten oder Entscheide ohne explizite Ablösung oder Referenz (CL-003), generiert das System One Modell Jev (`jev-latest`) einen freundlichen, beratenden Hinweis. Bei jeder Nutzereingabe (`UserPromptSubmit`, CL-004) schlägt das Modell bei Bedarf den passenden Imprint-Governance-Skill (`delegation-contract`, `knowledge-keeping`, `measure-before-asserting`, `session-handover`) beratend vor. Für CL-003 wird lokal per Keyword-Overlap eine Vorauswahl von 1–3 Zeilen (max. 500 Zeichen) der bestehenden Datei getroffen — es werden niemals ganze Dateien übertragen. Treffen mehrere Kriterien zu, werden die Prüfungen gebündelt in einer einzigen System One Anfrage ausgeführt.
 
-**Offenlegung Datenweg (CL-108):** Die API-Anfragen werden an `api.typesafe.ai` mit Serverstandort in den USA übertragen. Der Drittanbieter sichert keine Zero Data Retention (ZDR) zu; Aufbewahrungsfristen und Löschfristen beim Anbieter sind unbestimmt. Vor jeder Übertragung werden alle Texte lokal maskiert (Entfernung von API-Schlüsseln, Secrets, Tokens und E-Mail-Adressen). Gesendet wird der maskierte Inhalt der Textänderung (`content` bzw. `new_string`, bis max. 100 KB). Bei der Duplikat-Prüfung (CL-003) werden ausschließlich die lokal vorausgewählten 1–3 Kandidatenzeilen (max. 500 Zeichen) zusammen mit der Textänderung übertragen; die bestehende Datei wird niemals vollständig hochgeladen. Quellcode-Dateien (wie `.go`, `.py`, `.sh`, `.rs`, `.c`, `.ts`), Build-/Factory-Dateien und Testdateien werden vorab lokal gefiltert und niemals an TypeSafe übertragen. Ohne konfigurierten API-Schlüssel findet keinerlei Netzwerkaufruf statt.
+**Offenlegung Datenweg (CL-108, CL-107 B):** Die API-Anfragen werden an `api.typesafe.ai` mit Serverstandort in den USA übertragen. Der Drittanbieter sichert keine Zero Data Retention (ZDR) zu; Aufbewahrungsfristen und Löschfristen beim Anbieter sind unbestimmt. Vor jeder Übertragung bei Dateiänderungen (CL-001/002/003) werden alle Texte lokal maskiert (Entfernung von API-Schlüsseln, Secrets, Tokens und E-Mail-Adressen). Gesendet wird der maskierte Inhalt der Textänderung (`content` bzw. `new_string`, bis max. 100 KB). Bei der Duplikat-Prüfung (CL-003) werden ausschließlich die lokal vorausgewählten 1–3 Kandidatenzeilen (max. 500 Zeichen) zusammen mit der Textänderung übertragen; die bestehende Datei wird niemals vollständig hochgeladen. Quellcode-Dateien (wie `.go`, `.py`, `.sh`, `.rs`, `.c`, `.ts`), Build-/Factory-Dateien und Testdateien werden vorab lokal gefiltert und niemals an TypeSafe übertragen. Bei der Skill-Vorschlags-Prüfung je Eingabe (`UserPromptSubmit`, CL-004 / CL-107 B) wird der User-Prompt laut Nutzerentscheidung bei aktivem Schlüssel ungefiltert an `api.typesafe.ai` zur Einordnung übertragen (Latenz-Budget < 1 s), um den relevanten Governance-Skill beratend vorzuschlagen. Ohne konfigurierten API-Schlüssel findet keinerlei Netzwerkaufruf statt.
 
 
 ## Installation

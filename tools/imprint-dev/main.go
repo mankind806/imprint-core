@@ -6,6 +6,7 @@
 //	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
 //	    [--pr-body-file file] [--same-repo] [--sarif file]
 //	imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
+//	imprint-dev hook-skill-suggestion [--endpoint url] [--timeout sec]
 //
 // gen writes the SessionStart and SubagentStart hook payloads, and rules/AGENTS.md,
 // from their one canonical source, hooks/kernkarte.md. check runs the invariants a
@@ -15,7 +16,8 @@
 // checks a range of new commits, and on a pull request its body, against
 // .imprint/commit.conf and CONTRIBUTING.md's rules for commit messages (N78, N79,
 // N96); see commitcheck.go. hook-typesafe-check runs opt-in advisory checks on
-// memory and register writes via TypeSafe System One.
+// memory and register writes via TypeSafe System One. hook-skill-suggestion
+// suggests relevant imprint skills for user prompts via TypeSafe System One.
 //
 // An overdue re-check date is a warning, which leaves the exit code alone,
 // unless --release is given: overdue dates block a release, never the ordinary
@@ -52,6 +54,7 @@ const usageText = `usage:
   imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
       [--pr-body-file file] [--same-repo] [--sarif file]
   imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
+  imprint-dev hook-skill-suggestion [--endpoint url] [--timeout sec]
 
 gen      writes hooks/session-start.json, hooks/subagent-start.json and rules/AGENTS.md from hooks/kernkarte.md
 check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run;
@@ -63,6 +66,8 @@ commit-check   checks a range of new commits (and, with --pr-body-file, a pull r
          exit 0 no findings, 1 a finding, 2 the check could not run
 hook-typesafe-check  evaluates memory/register file writes via TypeSafe System One for missing
          provenance (knowledge-keeping); exit 0 always (fail-open)
+hook-skill-suggestion  suggests relevant imprint skills for user prompts via TypeSafe System One;
+         exit 0 always (fail-open)
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -85,6 +90,8 @@ func runWithStdin(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runCommitCheck(args[1:], stdout, stderr)
 	case "hook-typesafe-check":
 		return runHookTypesafeCheck(args[1:], stdin, stdout, stderr)
+	case "hook-skill-suggestion":
+		return runHookSkillSuggestion(args[1:], stdin, stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return exitOK
