@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1124,5 +1125,399 @@ func TestHookWrapperScript(t *testing.T) {
 	}
 	if !strings.Contains(string(hooksData), "hooks/typesafe-check.sh") {
 		t.Errorf("hooks.json does not reference hooks/typesafe-check.sh: %s", string(hooksData))
+	}
+}
+
+// --- Skill Suggestion Tests (CL-004) -----------------------------------------
+
+func TestSkillSuggestionQuestion(t *testing.T) {
+	q := SkillSuggestionQuestion()
+	if q.Type != TypeChoice {
+		t.Errorf("SkillSuggestionQuestion().Type = %q; want %q", q.Type, TypeChoice)
+	}
+	if !strings.Contains(q.Instructions, "delegation-contract") ||
+		!strings.Contains(q.Instructions, "knowledge-keeping") ||
+		!strings.Contains(q.Instructions, "measure-before-asserting") ||
+		!strings.Contains(q.Instructions, "session-handover") ||
+		!strings.Contains(q.Instructions, "none") {
+		t.Errorf("SkillSuggestionQuestion().Instructions missing skill descriptions: %s", q.Instructions)
+	}
+	criteria, ok := q.Criteria.(map[string]string)
+	if !ok {
+		t.Fatalf("SkillSuggestionQuestion().Criteria is not map[string]string: %T", q.Criteria)
+	}
+	expectedKeys := []string{"delegation-contract", "knowledge-keeping", "measure-before-asserting", "session-handover", "none"}
+	for _, k := range expectedKeys {
+		if _, exists := criteria[k]; !exists {
+			t.Errorf("SkillSuggestionQuestion().Criteria missing key %q", k)
+		}
+	}
+}
+
+func TestCheckSkillSuggestion(t *testing.T) {
+	var mu sync.Mutex
+	var mockChoice string
+	var mockStatus int = http.StatusOK
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		status := mockStatus
+		choice := mockChoice
+		mu.Unlock()
+
+		var req Request
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if status != http.StatusOK {
+			http.Error(w, "server error", status)
+			return
+		}
+		resp := Response{
+			Answers: map[string]RawAnswer{
+				SkillSuggestionQuestionID: {Choice: &choice},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	client := NewClient("test-key")
+	client.Endpoint = ts.URL
+	client.HTTPClient = ts.Client()
+
+	// Case 1: Skill chosen (delegation-contract)
+	mu.Lock()
+	mockChoice = "delegation-contract"
+	mu.Unlock()
+	skill, err := CheckSkillSuggestion(context.Background(), client, "Delegiere diesen Task an einen Subagenten")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill != "delegation-contract" {
+		t.Errorf("skill = %q; want %q", skill, "delegation-contract")
+	}
+
+	// Case 2: Skill "none" chosen
+	mu.Lock()
+	mockChoice = "none"
+	mu.Unlock()
+	skill, err = CheckSkillSuggestion(context.Background(), client, "Refaktoriere die Schleife in main.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill != "" {
+		t.Errorf("skill = %q; want empty string", skill)
+	}
+
+	// Case 3: Empty choice
+	mu.Lock()
+	mockChoice = ""
+	mu.Unlock()
+	skill, err = CheckSkillSuggestion(context.Background(), client, "Ein normaler Text")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill != "" {
+		t.Errorf("skill = %q; want empty string", skill)
+	}
+
+	// Case 4: No API key
+	noKeyClient := NewClient("")
+	skill, err = CheckSkillSuggestion(context.Background(), noKeyClient, "Prompt")
+	if err != nil || skill != "" {
+		t.Errorf("expected empty string and nil error when no API key, got %q, %v", skill, err)
+	}
+
+	// Case 5: Nil client
+	skill, err = CheckSkillSuggestion(context.Background(), nil, "Prompt")
+	if err != nil || skill != "" {
+		t.Errorf("expected empty string and nil error when nil client, got %q, %v", skill, err)
+	}
+
+	// Case 6: Server error -> returns error
+	mu.Lock()
+	mockStatus = http.StatusInternalServerError
+	mu.Unlock()
+	_, err = CheckSkillSuggestion(context.Background(), client, "Prompt")
+	if err == nil {
+		t.Errorf("expected error on HTTP 500, got nil")
+	}
+}
+
+func TestExtractPromptText(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"prompt field", `{"prompt": "Hello world"}`, "Hello world"},
+		{"user_prompt field", `{"user_prompt": "Hello from user"}`, "Hello from user"},
+		{"text field", `{"text": "Text content"}`, "Text content"},
+		{"input field string", `{"input": "Input text"}`, "Input text"},
+		{"input field map", `{"input": {"prompt": "Nested prompt"}}`, "Nested prompt"},
+		{"tool_input field map", `{"tool_input": {"prompt": "Nested tool prompt"}}`, "Nested tool prompt"},
+		{"query field", `{"query": "Search query"}`, "Search query"},
+		{"content field", `{"content": "Raw content in json"}`, "Raw content in json"},
+		{"raw plain text", "Delegiere diesen Task an einen Subagenten", "Delegiere diesen Task an einen Subagenten"},
+		{"empty string", "", ""},
+		{"json with unknown field", `{"unknown": 123}`, ""},
+	}
+
+	for _, tc := range cases {
+		got := extractPromptText([]byte(tc.input))
+		if got != tc.want {
+			t.Errorf("%s: extractPromptText() = %q; want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRunHookSkillSuggestion(t *testing.T) {
+	var mu sync.Mutex
+	var mockChoice string
+	var mockStatus int = http.StatusOK
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		status := mockStatus
+		choice := mockChoice
+		mu.Unlock()
+
+		var req Request
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if status != http.StatusOK {
+			http.Error(w, "server error", status)
+			return
+		}
+		resp := Response{
+			Answers: map[string]RawAnswer{
+				SkillSuggestionQuestionID: {Choice: &choice},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	// Case 1: No API key -> exits 0, no output
+	{
+		t.Setenv("TYPESAFE_API_KEY", "")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"prompt": "Delegiere diesen Task an einen Subagenten"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout when no API key, got %q", stdout.String())
+		}
+	}
+
+	// Case 2: Short prompt (< 10 chars) -> exits 0, no output
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"prompt": "Kurz"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout for prompt < 10 chars, got %q", stdout.String())
+		}
+	}
+
+	// Case 3: Empty stdin -> exits 0, no output
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(``)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout for empty stdin, got %q", stdout.String())
+		}
+	}
+
+	// Case 4: Skill suggested ("delegation-contract") -> JSON output with notice
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		mu.Lock()
+		mockChoice = "delegation-contract"
+		mockStatus = http.StatusOK
+		mu.Unlock()
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"hook_event_name": "UserPromptSubmit", "prompt": "Delegiere diese Aufgabe an einen Subagenten und lass ihn prüfen"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() == 0 {
+			t.Fatal("expected stdout output for suggested skill, got empty")
+		}
+
+		var out HookOutput
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("failed to decode HookOutput: %v", err)
+		}
+		if out.HookSpecificOutput.HookEventName != "UserPromptSubmit" {
+			t.Errorf("HookEventName = %q; want %q", out.HookSpecificOutput.HookEventName, "UserPromptSubmit")
+		}
+		wantNotice := "imprint core: Für diesen Arbeitsschritt könnte der Skill 'delegation-contract' relevant sein.\n(imprint core: Skill 'delegation-contract' might be relevant for this task.)"
+		if out.HookSpecificOutput.AdditionalContext != wantNotice {
+			t.Errorf("AdditionalContext = %q; want %q", out.HookSpecificOutput.AdditionalContext, wantNotice)
+		}
+		if len(out.InjectSteps) == 0 || out.InjectSteps[0].EphemeralMessage != wantNotice {
+			t.Errorf("EphemeralMessage mismatch: %v", out.InjectSteps)
+		}
+	}
+
+	// Case 5: Raw content (non-JSON) prompt with suggested skill
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		mu.Lock()
+		mockChoice = "session-handover"
+		mockStatus = http.StatusOK
+		mu.Unlock()
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`Schluss für heute, lass uns die Übergabe machen`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() == 0 {
+			t.Fatal("expected stdout output for raw content prompt, got empty")
+		}
+		var out HookOutput
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("failed to decode HookOutput: %v", err)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "session-handover") {
+			t.Errorf("expected session-handover notice, got %q", out.HookSpecificOutput.AdditionalContext)
+		}
+	}
+
+	// Case 6: "none" chosen -> exits 0, no output
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		mu.Lock()
+		mockChoice = "none"
+		mockStatus = http.StatusOK
+		mu.Unlock()
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"prompt": "Schreibe eine Hilfsfunktion zum Parsen von Datumsangaben"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout when none chosen, got %q", stdout.String())
+		}
+	}
+
+	// Case 7: Server error (HTTP 500) -> fail-open (exits 0, no output)
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		mu.Lock()
+		mockStatus = http.StatusInternalServerError
+		mu.Unlock()
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"prompt": "Delegiere diese Aufgabe an einen Subagenten"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout on server error, got %q", stdout.String())
+		}
+		mu.Lock()
+		mockStatus = http.StatusOK
+		mu.Unlock()
+	}
+
+	// Case 8: Timeout -> fail-open (exits 0, no output)
+	{
+		slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(1500 * time.Millisecond)
+		}))
+		defer slowServer.Close()
+
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"prompt": "Delegiere diese Aufgabe an einen Subagenten"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--endpoint", slowServer.URL, "--timeout", "1"}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout on timeout, got %q", stdout.String())
+		}
+	}
+
+	// Case 9: Bad flags -> fail-open (exits 0, no output)
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"prompt": "Delegiere diese Aufgabe an einen Subagenten"}`)
+		code := runWithStdin([]string{"hook-skill-suggestion", "--unknown-flag"}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+	}
+}
+
+func TestSkillSuggestionWrapperScript(t *testing.T) {
+	scriptPath := filepath.Join("..", "..", "hooks", "skill-suggestion.sh")
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("hooks/skill-suggestion.sh missing: %v", err)
+	}
+
+	// Check executable permission
+	if info.Mode()&0111 == 0 {
+		t.Errorf("hooks/skill-suggestion.sh is not executable: mode %v", info.Mode())
+	}
+
+	// Check script contents
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("failed to read hooks/skill-suggestion.sh: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "command -v imprint-dev >/dev/null 2>&1 || exit 0") {
+		t.Errorf("missing command -v check in script: %s", content)
+	}
+	if !strings.Contains(content, "exec imprint-dev hook-skill-suggestion") {
+		t.Errorf("missing exec imprint-dev hook-skill-suggestion in script: %s", content)
+	}
+
+	// Check hooks.json registration
+	hooksJSONPath := filepath.Join("..", "..", "hooks", "hooks.json")
+	hooksData, err := os.ReadFile(hooksJSONPath)
+	if err != nil {
+		t.Fatalf("failed to read hooks/hooks.json: %v", err)
+	}
+	var doc struct {
+		Hooks map[string][]hookGroup `json:"hooks"`
+	}
+	if err := json.Unmarshal(hooksData, &doc); err != nil {
+		t.Fatalf("failed to parse hooks/hooks.json: %v", err)
+	}
+	groups, ok := doc.Hooks["UserPromptSubmit"]
+	if !ok || len(groups) == 0 {
+		t.Fatalf("UserPromptSubmit not registered in hooks.json")
+	}
+	found := false
+	for _, g := range groups {
+		for _, h := range g.Hooks {
+			if strings.Contains(h.Command, "hooks/skill-suggestion.sh") {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Errorf("hooks.json UserPromptSubmit does not reference hooks/skill-suggestion.sh: %s", string(hooksData))
 	}
 }

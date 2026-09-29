@@ -35,6 +35,8 @@ const (
 
 	DuplicateFactQuestionID = "duplicate_fact"
 	DuplicateFactNotice     = "imprint knowledge-keeping: Dieser Eintrag enthält möglicherweise einen Fakt oder Entscheid, der bereits im Register existiert. Jeder Fakt hat genau einen kanonischen Ort; bestehende Einträge sollten abgelöst ([Überholt/Abgelöst am ... durch ...]) oder referenziert werden, statt sie doppelt anzulegen.\n(knowledge-keeping: This entry may duplicate an existing fact or decision. Every fact has one canonical place; consider referencing or superseding the existing entry rather than duplicating it.)"
+
+	SkillSuggestionQuestionID = "suggested_skill"
 )
 
 // --- Masking (analog typesafe-dev ts_common.py) ------------------------------
@@ -519,6 +521,61 @@ func CheckDuplicateFact(ctx context.Context, client *Client, candidates []string
 	return false, "", nil
 }
 
+// --- Skill Suggestion Check (CL-004) ----------------------------------------
+
+// SkillSuggestionQuestion returns the Jev primitive evaluating which imprint skill is most relevant.
+func SkillSuggestionQuestion() Question {
+	return Question{
+		Type: TypeChoice,
+		Instructions: "Which imprint skill is most relevant to the user's prompt or task?\n" +
+			"- delegation-contract: When dispatching agents, delegating tasks to subagents, multi-agent workflows, code reviews by another agent, resolving disagreements between agents, choosing models.\n" +
+			"- knowledge-keeping: When recording, updating, or correcting facts, decisions, sources, dates, deadlines, memory entries ('merk dir', 'halte fest', 'notier', 'remember this', 'supersede').\n" +
+			"- measure-before-asserting: When verifying claims before stating them, checking system properties, configs, versions, paths, measuring performance, or checking if something is still true ('stimmt das noch', 'is that still true').\n" +
+			"- session-handover: When closing or ending a session, handing over tasks, preparing wrap-up, context limit reached, committing final work, or saying goodbye ('that's it for today', 'Schluss für heute', 'Übergabe').\n" +
+			"- none: General coding, questions, refactoring, or tasks where none of the specialized imprint governance skills apply.",
+		Criteria: map[string]string{
+			"delegation-contract":     "Task delegation, subagents, reviews, agent arbitration, model choice",
+			"knowledge-keeping":       "Recording facts, decisions, provenance, memory notes, superseding facts",
+			"measure-before-asserting": "Verification before asserting, measuring properties, checking reality vs notes",
+			"session-handover":        "Closing session, handoff, committing runnable work, wrapping up",
+			"none":                    "No specific imprint skill applies",
+		},
+	}
+}
+
+// CheckSkillSuggestion evaluates whether a user prompt matches an imprint skill.
+// Returns the skill name if a specific skill is chosen (not empty, not "none").
+// Fail-Open: on any error, returns ("", err).
+func CheckSkillSuggestion(ctx context.Context, client *Client, promptText string) (string, error) {
+	if client == nil || client.APIKey == "" {
+		return "", nil
+	}
+
+	if len(promptText) > MaxPayloadBytes {
+		promptText = promptText[:MaxPayloadBytes]
+	}
+
+	questions := map[string]Question{
+		SkillSuggestionQuestionID: SkillSuggestionQuestion(),
+	}
+
+	resp, err := client.Post(ctx, promptText, questions)
+	if err != nil {
+		return "", err
+	}
+
+	choice, _, _, ok := resp.Choice(SkillSuggestionQuestionID)
+	if !ok {
+		return "", nil
+	}
+
+	if choice != "" && choice != "none" {
+		return choice, nil
+	}
+
+	return "", nil
+}
+
 // defaultStopwords contains common German and English stopwords excluded from keyword overlap.
 var defaultStopwords = map[string]struct{}{
 	// German
@@ -968,6 +1025,119 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 	eventName := payload.HookEventName
 	if eventName == "" {
 		eventName = "PostToolUse"
+	}
+
+	out := HookOutput{
+		HookSpecificOutput: HookSpecificOutput{
+			HookEventName:     eventName,
+			AdditionalContext: notice,
+		},
+		InjectSteps: []InjectStep{
+			{EphemeralMessage: notice},
+		},
+	}
+
+	enc := json.NewEncoder(stdout)
+	_ = enc.Encode(out)
+
+	return exitOK
+}
+
+// extractPromptText parses the prompt text from UserPromptSubmit payloads across
+// Claude Code, Antigravity, and Codex hook conventions, or falls back to raw content.
+func extractPromptText(rawInput []byte) string {
+	var rawMap map[string]any
+	if err := json.Unmarshal(rawInput, &rawMap); err == nil {
+		for _, k := range []string{"prompt", "user_prompt", "text", "input", "query", "content"} {
+			if v, ok := rawMap[k]; ok {
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					return strings.TrimSpace(s)
+				}
+				if subMap, ok := v.(map[string]any); ok {
+					for _, subK := range []string{"prompt", "user_prompt", "text", "query", "content"} {
+						if sv, ok := subMap[subK]; ok {
+							if s, ok := sv.(string); ok && strings.TrimSpace(s) != "" {
+								return strings.TrimSpace(s)
+							}
+						}
+					}
+				}
+			}
+		}
+		if ti, ok := rawMap["tool_input"].(map[string]any); ok {
+			for _, subK := range []string{"prompt", "user_prompt", "text", "query", "content"} {
+				if sv, ok := ti[subK]; ok {
+					if s, ok := sv.(string); ok && strings.TrimSpace(s) != "" {
+						return strings.TrimSpace(s)
+					}
+				}
+			}
+		}
+		return ""
+	}
+
+	// Roh-Content fallback (not JSON)
+	trimmed := strings.TrimSpace(string(rawInput))
+	return trimmed
+}
+
+// runHookSkillSuggestion executes the hook-skill-suggestion CLI subcommand.
+// Suggests relevant imprint skills for user prompts via TypeSafe System One.
+// Never blocks or crashes: exits 0 on all paths.
+func runHookSkillSuggestion(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("hook-skill-suggestion", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	endpoint := fs.String("endpoint", DefaultEndpoint, "TypeSafe API endpoint")
+	timeoutSec := fs.Int("timeout", 1, "timeout in seconds (max 2)")
+
+	if err := fs.Parse(args); err != nil {
+		return exitOK // fail-open
+	}
+
+	// Read hook payload from stdin (up to 2MB).
+	rawInput, err := io.ReadAll(io.LimitReader(stdin, 2*1024*1024))
+	if err != nil || len(bytes.TrimSpace(rawInput)) == 0 {
+		return exitOK
+	}
+
+	promptText := extractPromptText(rawInput)
+	if len(strings.TrimSpace(promptText)) < 10 {
+		return exitOK
+	}
+
+	apiKey := GetKey()
+	if apiKey == "" {
+		return exitOK
+	}
+
+	timeout := time.Duration(*timeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 1 * time.Second
+	} else if timeout > 2*time.Second {
+		timeout = 2 * time.Second
+	}
+
+	client := NewClient(apiKey)
+	client.Endpoint = *endpoint
+	client.Timeout = timeout
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	skill, err := CheckSkillSuggestion(ctx, client, promptText)
+	if err != nil || skill == "" || skill == "none" {
+		return exitOK
+	}
+
+	notice := fmt.Sprintf("imprint core: Für diesen Arbeitsschritt könnte der Skill '%s' relevant sein.\n(imprint core: Skill '%s' might be relevant for this task.)", skill, skill)
+
+	eventName := "UserPromptSubmit"
+	var rawMap map[string]any
+	if err := json.Unmarshal(rawInput, &rawMap); err == nil {
+		if ev, ok := rawMap["hook_event_name"].(string); ok && ev != "" {
+			eventName = ev
+		}
 	}
 
 	out := HookOutput{
