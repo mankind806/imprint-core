@@ -56,6 +56,16 @@
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/log-subagent.sh\""
           }
         ]
+      },
+      {
+        "matcher": "write_to_file|replace_file_content|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/typesafe-check.sh\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreInvocation": [
