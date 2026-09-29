@@ -60,6 +60,67 @@ func TestMaskOpaqueTokens(t *testing.T) {
 	}
 }
 
+func TestMaskDetailSecretValuesRegression(t *testing.T) {
+	// 10 test cases from CL-110 / typesafe-dev tests/mask-test.py
+	cases := []struct {
+		input  string
+		secret string // secret that must be gone; empty string if input must stay unchanged
+	}{
+		{"api_key=SECRETVALUE99 mail a@b.de", "SECRETVALUE99"},
+		{"password=hunter2 end", "hunter2"},
+		{"export API_KEY=abcd1234 x", "abcd1234"},
+		{"Authorization: Bearer sk-abc123 def", "sk-abc123"},
+		{`{"token": "t0k3n", "x": 1}`, "t0k3n"},
+		{`{'secret':'s3cr3t'}`, "s3cr3t"},
+		{"db_password: geheim123;", "geheim123"},
+		{"mail an max.muster@example.org", "max.muster@example.org"},
+		{"pytest -q tests/test_api.py", ""},
+		{`git commit -m "fix token refresh"`, ""},
+	}
+
+	for _, tc := range cases {
+		masked, _ := MaskDetail(tc.input)
+		if tc.secret != "" {
+			if strings.Contains(masked, tc.secret) {
+				t.Errorf("MaskDetail(%q) = %q; secret %q was not redacted", tc.input, masked, tc.secret)
+			}
+		} else {
+			if masked != tc.input {
+				t.Errorf("MaskDetail(%q) = %q; expected unchanged text", tc.input, masked)
+			}
+		}
+	}
+}
+
+func TestMaxPayloadBytes(t *testing.T) {
+	var receivedReq Request
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&receivedReq)
+		prob := 0.1
+		resp := Response{
+			Answers: map[string]RawAnswer{
+				"q": {Noul: &prob},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	client := NewClient("test-key")
+	client.Endpoint = ts.URL
+	client.HTTPClient = ts.Client()
+
+	longText := strings.Repeat("x", MaxPayloadBytes+1024)
+	_, err := client.Post(context.Background(), longText, map[string]Question{"q": NewNoulQuestion("test")})
+	if err != nil {
+		t.Fatalf("Post failed: %v", err)
+	}
+	if len(receivedReq.State) > MaxPayloadBytes {
+		t.Errorf("expected receivedReq.State capped at %d bytes, got %d", MaxPayloadBytes, len(receivedReq.State))
+	}
+}
+
 // --- Allowlist Tests ---------------------------------------------------------
 
 func TestAllowlist(t *testing.T) {

@@ -23,6 +23,7 @@ const (
 	DefaultEndpoint = "https://api.typesafe.ai/v1/systemone"
 	DefaultModel    = "jev-latest"
 	DefaultTimeout  = 8 * time.Second
+	MaxPayloadBytes = 100 * 1024 // 100 KB
 
 	KnowledgeKeepingQuestionID = "missing_provenance"
 	KnowledgeKeepingNotice     = "imprint knowledge-keeping: Dieser Eintrag enthält möglicherweise einen Fakt oder Entscheid ohne Erfassungsdatum (YYYY-MM-DD), Quelle oder Methode. Gemäß knowledge-keeping sollte jede dauerhafte Aufzeichnung Herkunft, Methode und Datum nennen.\n(knowledge-keeping: This entry may record a fact or decision without a recording date (YYYY-MM-DD), source, or acquisition method. Consider adding provenance.)"
@@ -31,8 +32,8 @@ const (
 // --- Masking (analog typesafe-dev ts_common.py) ------------------------------
 
 var (
-	// secretKWRE matches secret-ish keywords and redacts the value following them.
-	secretKWRE = regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|bearer|authorization)\S*[\s=:]+)\S+`)
+	bearerBasicRE = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+)([^\s"',;]+)`)
+	secretKWRE    = regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|authorization)[\w.-]*["']?\s*[=:]\s*["']?)([^\s"',;]+)`)
 
 	// emailRE matches email addresses.
 	emailRE = regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+`)
@@ -49,14 +50,32 @@ type MaskCounts struct {
 }
 
 // MaskDetail redacts sensitive patterns in text before transmission.
-// Order of execution matches ts_common.mask_detail: secret_kw, email, opaque.
+// Order of execution matches ts_common.mask_detail: secret_kw (bearer/basic + secret keywords), email, opaque.
 func MaskDetail(text string) (string, MaskCounts) {
 	var counts MaskCounts
 
-	// 1. secret_kw
+	// 1. Bearer / Basic
+	text = bearerBasicRE.ReplaceAllStringFunc(text, func(m string) string {
+		sub := bearerBasicRE.FindStringSubmatch(m)
+		if len(sub) >= 3 {
+			if sub[2] == "<redacted>" {
+				return m
+			}
+			counts.SecretKW++
+			return sub[1] + "<redacted>"
+		}
+		counts.SecretKW++
+		return "<redacted>"
+	})
+
+	// 2. Secret keywords with = or :
 	text = secretKWRE.ReplaceAllStringFunc(text, func(m string) string {
 		sub := secretKWRE.FindStringSubmatch(m)
-		if len(sub) >= 2 {
+		if len(sub) >= 3 {
+			val := sub[2]
+			if val == "<redacted>" || strings.EqualFold(val, "bearer") || strings.EqualFold(val, "basic") {
+				return m
+			}
 			counts.SecretKW++
 			return sub[1] + "<redacted>"
 		}
@@ -291,7 +310,7 @@ func NewClient(apiKey string) *Client {
 }
 
 // Post sends a batched System One request.
-// All text in state is masked before transmission.
+// All text in state is capped at MaxPayloadBytes and masked before transmission.
 // Fail-Open: returns (nil, err) on any network/JSON error without panicking.
 func (c *Client) Post(ctx context.Context, state string, questions map[string]Question) (*Response, error) {
 	if c.APIKey == "" {
@@ -299,6 +318,10 @@ func (c *Client) Post(ctx context.Context, state string, questions map[string]Qu
 	}
 	if !isAllowedEndpoint(c.Endpoint) {
 		return nil, fmt.Errorf("typesafe: endpoint %q not allowed", c.Endpoint)
+	}
+
+	if len(state) > MaxPayloadBytes {
+		state = state[:MaxPayloadBytes]
 	}
 
 	maskedState, _ := Mask(state)
@@ -375,6 +398,10 @@ func KnowledgeKeepingQuestion() Question {
 func CheckKnowledgeKeeping(ctx context.Context, client *Client, text string) (bool, string, error) {
 	if client == nil || client.APIKey == "" {
 		return false, "", nil
+	}
+
+	if len(text) > MaxPayloadBytes {
+		text = text[:MaxPayloadBytes]
 	}
 
 	questions := map[string]Question{
@@ -526,6 +553,10 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 	filePath, text := extractFileAndContent(payload.ToolInput)
 	if text == "" && payload.Content != "" {
 		text = payload.Content
+	}
+
+	if len(text) > MaxPayloadBytes {
+		text = text[:MaxPayloadBytes]
 	}
 
 	// Optimization: check path and trivial content FIRST before doing any key search.

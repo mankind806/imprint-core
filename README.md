@@ -168,7 +168,7 @@ flowchart LR
 | **Schlüsselbezug** | `TYPESAFE_API_KEY` (Umgebungsvariable) mit Fallback auf lokalen GNOME-Schlüsselbund (`secret-tool lookup service typesafe key api`) |
 | **Endpoint & Hosting** | Strikte Allowlist: nur `https://api.typesafe.ai/v1/systemone` (TLS, US-Hosting); Loopback in Tests |
 | **Datenspeicherung / Retention** | Keine Zero Data Retention (ZDR) zugesichert; Aufbewahrungsdauer und Löschfristen beim Anbieter sind unbestimmt |
-| **Datenschutz & Maskierung** | Lokale Vorab-Maskierung via Regex (Secrets, API-Keys, Passwörter, E-Mails, Opaque-Tokens); Übertragung nur maskierter Texte |
+| **Datenschutz & Maskierung** | Lokale Vorab-Maskierung via Regex (Secrets, API-Keys, Passwörter, E-Mails, Opaque-Tokens); Übertragung nur maskierter Texte (bis max. 100 KB) |
 | **Scope & Filterung** | Ausschließlich Gedächtnis- und Registerdateien (`entscheide.md`, `offene-entscheide.md`, `register.md`, `MEMORY.md`, `AGENTS.md` oder in `memory/`, `rules/`, `skills/`). Quellcode (`.go`, `.py`, `.sh`, `.rs`, `.c`, etc.) sowie Build-/Factory-Dateien werden vorab lokal gefiltert und **niemals** gesendet |
 | **Wirkung & Grenzen** | Rein beratender Hinweis als `additionalContext`; blockiert niemals Schreiboperationen (Exit 0) |
 | **Fehlertoleranz** | Fail-Open: Timeout (≤ 8s), Netzfehler oder HTTP-Fehler werden lautlos ignoriert |
@@ -176,7 +176,7 @@ flowchart LR
 
 Das Paket integriert die Teilprüfungen `CL-000` (TypeSafe System One Client in `tools/imprint-dev`) und `CL-001` (Knowledge-Keeping Beratung). Wird ein neuer Fakt oder Entscheid in einer Register- oder Gedächtnisdatei ohne Erfassungsdatum (`YYYY-MM-DD`), Herkunftsquelle oder Ermittlungsmethode protokolliert, generiert das System One Modell Jev (`jev-latest`) einen freundlichen, beratenden Hinweis zur Ergänzung der Herkunftsangaben.
 
-**Offenlegung Datenweg (CL-108):** Die API-Anfragen werden an `api.typesafe.ai` mit Serverstandort in den USA übertragen. Der Drittanbieter sichert keine Zero Data Retention (ZDR) zu; Aufbewahrungsfristen und Löschfristen beim Anbieter sind unbestimmt. Vor jeder Übertragung werden alle Texte lokal maskiert (Entfernung von API-Schlüsseln, Secrets, Tokens und E-Mail-Adressen). Quellcode-Dateien (wie `.go`, `.py`, `.sh`, `.rs`, `.c`, `.ts`) und Build-/Factory-Dateien werden vorab lokal gefiltert und niemals an TypeSafe übertragen. Ohne konfigurierten API-Schlüssel findet keinerlei Netzwerkaufruf statt.
+**Offenlegung Datenweg (CL-108):** Die API-Anfragen werden an `api.typesafe.ai` mit Serverstandort in den USA übertragen. Der Drittanbieter sichert keine Zero Data Retention (ZDR) zu; Aufbewahrungsfristen und Löschfristen beim Anbieter sind unbestimmt. Vor jeder Übertragung werden alle Texte lokal maskiert (Entfernung von API-Schlüsseln, Secrets, Tokens und E-Mail-Adressen). Gesendet wird der maskierte Inhalt der Textänderung (`content` bzw. `new_string`, bis max. 100 KB). Quellcode-Dateien (wie `.go`, `.py`, `.sh`, `.rs`, `.c`, `.ts`) und Build-/Factory-Dateien werden vorab lokal gefiltert und niemals an TypeSafe übertragen. Ohne konfigurierten API-Schlüssel findet keinerlei Netzwerkaufruf statt.
 
 
 ## Installation
