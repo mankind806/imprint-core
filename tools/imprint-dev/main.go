@@ -3,6 +3,7 @@
 //	imprint-dev gen   [--root dir]
 //	imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
 //	imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
+//	imprint-dev setup --plan [--root dir] [--repo path]
 //	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
 //	    [--pr-body-file file] [--same-repo] [--sarif file]
 //	imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
@@ -12,7 +13,9 @@
 // from their one canonical source, hooks/kernkarte.md. check runs the invariants a
 // program can decide over the plugin tree and reports every finding. measure reports the
 // subagent runs that hooks/log-subagent.sh logged: duration, model, effort and
-// whether a run went over the target; it exits 0 whatever it reports. commit-check
+// whether a run went over the target; it exits 0 whatever it reports. setup compares
+// setup inventory entries against target files without writing; exit 0 when
+// inventory parses, 2 on usage or invalid inventory. commit-check
 // checks a range of new commits, and on a pull request its body, against
 // .imprint/commit.conf and CONTRIBUTING.md's rules for commit messages (N78, N79,
 // N96); see commitcheck.go. hook-typesafe-check runs opt-in advisory checks on
@@ -51,6 +54,7 @@ const usageText = `usage:
   imprint-dev gen   [--root dir]
   imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
   imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
+  imprint-dev setup --plan [--root dir] [--repo path]
   imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
       [--pr-body-file file] [--same-repo] [--sarif file]
   imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
@@ -61,6 +65,8 @@ check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could
          an overdue re-check date warns, and fails only with --release
 measure  reports subagent runs from the hook's log (default $CLAUDE_PLUGIN_DATA/subagent-log.jsonl);
          an overrun is reported, not a failure: exit 0, or 2 if the log cannot be read
+setup    compares setup inventory entries against target files without writing;
+         exit 0 on success, 2 on usage or invalid inventory
 commit-check   checks a range of new commits (and, with --pr-body-file, a pull request's
          body) against .imprint/commit.conf and CONTRIBUTING.md's commit-message rules;
          exit 0 no findings, 1 a finding, 2 the check could not run
@@ -86,6 +92,8 @@ func runWithStdin(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runCheck(args[1:], stderr)
 	case "measure":
 		return runMeasure(args[1:], stdout, stderr)
+	case "setup":
+		return runSetup(args[1:], stdout, stderr)
 	case "commit-check":
 		return runCommitCheck(args[1:], stdout, stderr)
 	case "hook-typesafe-check":
