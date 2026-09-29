@@ -1,0 +1,10 @@
+[
+  {
+    "id": "pre-push-githook",
+    "typ": "githook",
+    "quelle": ".githooks/pre-push",
+    "ziel": "${HOME}/.git/hooks/pre-push",
+    "rechte": false,
+    "beschreibung": "Pre-push githook verification script"
+  }
+]
