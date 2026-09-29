@@ -137,7 +137,8 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 | Core card | hooks on `SessionStart`, `SubagentStart` | Inject `hooks/kernkarte.md` as additional context |
 | Measuring hook | hook on `SubagentStart`, `SubagentStop` | Appends one JSON line per event to the plugin's data directory |
 | Update watch | hook on `SessionStart`, on by default; `IMPRINT_UPDATE_WATCH=0` turns it off | After an upgrade of the host that runs the session, Claude Code or Codex, notes that a review of its changelog is due ([docs/update-watch.md](docs/update-watch.md)) |
-| `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs |
+| `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs, and `hook-typesafe-check` |
+| TypeSafe Hook | hook on `PostToolUse` (Opt-in) | Rein beratender Hinweis bei fehlender Provenienz (Quelle/Datum) beim Schreiben ins Gedächtnis/Register |
 | Pre-push hook | `.githooks/pre-push`, this repository, opt-in | Refuses undeclared identities and the shapes personal data takes |
 
 Each skill, the agent and the two layers in full: [docs/skills.md](docs/skills.md).
@@ -145,6 +146,35 @@ Each skill, the agent and the two layers in full: [docs/skills.md](docs/skills.m
 *Measured 2026-09-13 on Claude Code 2.1.269 through `--plugin-dir`, at session scope: the
 agent gets exactly `Read`, `Grep` and `Glob`; a subagent dispatch and the filtering of MCP
 tools are not measured. Re-check by 2026-12-13.*
+
+## TypeSafe System One Unterstützung (Opt-in)
+
+```mermaid
+flowchart LR
+    A["Tool Call<br/>(Write / Edit)"] --> B{"Gedächtnis- oder<br/>Registerdatei?"}
+    B -- Nein --> C["Stille Ausführung<br/>(Exit 0)"]
+    B -- Ja --> D{"API-Key vorhanden?<br/>(Env / secret-tool)"}
+    D -- Nein --> C
+    D -- Ja --> E["Lokale Maskierung<br/>(Secrets, E-Mails, Tokens)"]
+    E --> F["TypeSafe System One<br/>(api.typesafe.ai / Jev)"]
+    F --> G{"Provenienz fehlt?<br/>(Datum/Quelle/Methode)"}
+    G -- Nein --> C
+    G -- Ja --> H["Beratender Hinweis<br/>(additionalContext, Exit 0)"]
+```
+
+| Eigenschaft | Spezifikation |
+|---|---|
+| **Aktivierung** | 100 % Opt-in (Standard aus; aktiv nur bei vorhandenem API-Key) |
+| **Schlüsselbezug** | `TYPESAFE_API_KEY` (Umgebungsvariable) mit Fallback auf lokalen GNOME-Schlüsselbund (`secret-tool lookup service typesafe key api`) |
+| **Endpoint** | Strikte Allowlist: nur `https://api.typesafe.ai/v1/systemone` (TLS); Loopback in Tests |
+| **Datenschutz & Maskierung** | Lokale Vorab-Maskierung via Regex (Secrets, API-Keys, Passwörter, E-Mails, Opaque-Tokens); Übertragung nur maskierter Texte |
+| **Scope** | Ausschließlich Gedächtnis-, Entscheidungs- und Registerdateien (`entscheide.md`, `register.md`, `memory`, `journal`) |
+| **Wirkung & Grenzen** | Rein beratender Hinweis als `additionalContext`; blockiert niemals Schreiboperationen (Exit 0) |
+| **Fehlertoleranz** | Fail-Open: Timeout (≤ 8s), Netzfehler oder HTTP-Fehler werden lautlos ignoriert |
+| **Tests & CI** | 100 % Loopback mit `httptest.Server`; null externes Netzwerk in CI und Unit-Tests |
+
+Das Paket integriert die Teilprüfungen `CL-000` (TypeSafe System One Client in `tools/imprint-dev`) und `CL-001` (Knowledge-Keeping Beratung). Wird ein neuer Fakt oder Entscheid in einer Register- oder Gedächtnisdatei ohne Erfassungsdatum (`YYYY-MM-DD`), Herkunftsquelle oder Ermittlungsmethode protokolliert, generiert das System One Modell Jev (`jev-latest`) einen freundlichen, beratenden Hinweis zur Ergänzung der Herkunftsangaben. Ohne konfigurierten API-Schlüssel findet keinerlei Netzwerkaufruf statt.
+
 
 ## Installation
 
