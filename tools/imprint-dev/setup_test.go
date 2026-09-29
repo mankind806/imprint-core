@@ -176,6 +176,68 @@ func TestSetupRepoOption(t *testing.T) {
 	}
 }
 
+func TestQuelleEscapesRoot(t *testing.T) {
+	cases := []struct {
+		quelle string
+		want   bool
+	}{
+		{"src/file.txt", false},
+		{"./src/file.txt", false},
+		{"a/b/../c/file.txt", false},
+		{"../secret.txt", true},
+		{"../../etc/passwd", true},
+		{"..", true},
+		{"/etc/passwd", true},
+	}
+	for _, c := range cases {
+		if got := quelleEscapesRoot(c.quelle); got != c.want {
+			t.Errorf("quelleEscapesRoot(%q) = %v, want %v", c.quelle, got, c.want)
+		}
+	}
+}
+
+func TestSetupPlanRejectsQuelleTraversal(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
+
+	// A file outside the inventory root that a traversing "quelle" must not
+	// be able to reach.
+	outside := t.TempDir()
+	secretPath := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secretPath, []byte("top-secret-content"), 0644); err != nil {
+		t.Fatalf("failed to write secret file: %v", err)
+	}
+
+	root := t.TempDir()
+	setupDir := filepath.Join(root, "setup")
+	_ = os.MkdirAll(setupDir, 0755)
+
+	rel, err := filepath.Rel(root, secretPath)
+	if err != nil {
+		t.Fatalf("failed to compute relative path: %v", err)
+	}
+	inventoryJSON := fmt.Sprintf(`[{"id": "escape-attempt", "typ": "copy", "quelle": %q, "ziel": "${HOME}/copied.txt", "rechte": false, "beschreibung": "b"}]`, filepath.ToSlash(rel))
+	if err := os.WriteFile(filepath.Join(setupDir, "inventar.json"), []byte(inventoryJSON), 0644); err != nil {
+		t.Fatalf("failed to write inventar.json: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--plan", "--root", root}, &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("expected exit code 0, got %d. stderr: %s", code, stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("nicht-prüfbar")) {
+		t.Fatalf("expected escape attempt to be reported as nicht-pruefbar, got:\n%s", stdout.String())
+	}
+	if bytes.Contains(stdout.Bytes(), []byte("top-secret-content")) {
+		t.Fatalf("secret file content leaked into output:\n%s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(tempHome, "copied.txt")); err == nil {
+		t.Fatalf("secret file must not have been copied to ziel")
+	}
+}
+
 func hashTree(t *testing.T, dir string) string {
 	t.Helper()
 	var entries []fileHash

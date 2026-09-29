@@ -61,6 +61,22 @@ func parseInventory(data []byte) ([]setupEntry, error) {
 	return entries, nil
 }
 
+// quelleEscapesRoot reports whether quelle, once cleaned, would resolve outside
+// the inventory root it is joined with: an absolute path, or one that steps
+// above the root via "..". Both are rejected so a crafted inventory (in
+// particular an untrusted --repo's .imprint/setup.json) cannot make setup
+// --plan read and echo back arbitrary files elsewhere on disk.
+func quelleEscapesRoot(quelle string) bool {
+	cleaned := filepath.Clean(filepath.FromSlash(quelle))
+	if filepath.IsAbs(cleaned) {
+		return true
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return true
+	}
+	return false
+}
+
 func expandZiel(ziel string) string {
 	home := os.Getenv("HOME")
 	xdg := os.Getenv("XDG_CONFIG_HOME")
@@ -237,6 +253,14 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	var results []evalResult
 	for _, item := range items {
 		e := item.entry
+		if quelleEscapesRoot(e.Quelle) {
+			results = append(results, evalResult{
+				entry:  e,
+				status: "nicht-prüfbar",
+				reason: fmt.Sprintf("quelle %q verlässt den Inventar-Root (kein absoluter Pfad oder Traversal erlaubt)", e.Quelle),
+			})
+			continue
+		}
 		qPath := filepath.Join(item.invRoot, filepath.FromSlash(e.Quelle))
 		zPath := expandZiel(e.Ziel)
 
