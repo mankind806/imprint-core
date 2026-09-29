@@ -42,7 +42,7 @@ employer's policies allow it.
 
 If an AI tool helped, say so in the commit message or the pull request with one line,
 `Assisted-by: <tool or model>`, naming the tool or model and never an address — for example
-`Assisted-by: Claude Code`, `Assisted-by: Codex` or `Assisted-by: GitHub Copilot`. This
+`Assisted-by: Claude Code`, `Assisted-by: Codex`, `Assisted-by: Antigravity` or `Assisted-by: GitHub Copilot`. This
 applies to everyone, the owner included. Pure handiwork with no AI feature named anywhere in
 the text owes no such line and may go without one; the moment the text already names one — a
 🤖 line, a `Generated with ...` line, a `Co-Authored-By:` trailer naming an AI tool, or an

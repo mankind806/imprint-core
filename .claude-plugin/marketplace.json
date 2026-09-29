@@ -9,7 +9,7 @@
     {
       "name": "imprint",
       "source": "./",
-      "description": "Working rules in two layers: multi-agent collaboration (delegation contract, measuring before asserting, session handover) and knowledge keeping for a store that stays provable, plus a read-only review agent, a core card injected at session and subagent start, a hook that logs how long each subagent ran, and a hook that watches for updates of the host (Claude Code or Codex) and offers a review after an upgrade.",
+      "description": "Working rules in two layers: multi-agent collaboration (delegation contract, measuring before asserting, session handover) and knowledge keeping for a store that stays provable. Runs in Claude Code, Codex, and Antigravity, with four skills, a read-only review agent, core card injection, subagent runtime logging, and host update watching.",
       "category": "workflow"
     }
   ]
