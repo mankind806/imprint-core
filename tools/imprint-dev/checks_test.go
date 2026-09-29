@@ -187,8 +187,12 @@ func TestCheckRemovedSkills(t *testing.T) {
 		{"longer name is another word", add("README.md", "knowledge-ages-extra and preknowledge-ages and knowledge_ages\n"), 0, nil},
 		{"outside the scanned places", func(f map[string]string) {
 			f["tools/x/main.go"] = "// knowledge-ages\n"
-			f["docs/old.md"] = "one-canonical-place\n"
+			f[".github/workflows/ci.yml"] = "# one-canonical-place\n"
 		}, 0, nil},
+		{"in docs and CONTRIBUTING", func(f map[string]string) {
+			f["docs/old.md"] = "one-canonical-place\n"
+			f["CONTRIBUTING.md"] = "knowledge-ages\n"
+		}, 2, []string{"docs/old.md:1", "CONTRIBUTING.md:1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -443,8 +447,12 @@ func TestCheckOverdueRechecks(t *testing.T) {
 		}, 3, []string{"skills/alpha/references/r.md:1", "agents/reader.md:5", "hooks/notes.md:1"}},
 		{"files outside the plugin are not read", func(f map[string]string) {
 			f["tools/x/x_test.go"] = "// Re-check by 2020-01-01.\n"
-			f["CONTRIBUTING.md"] = "Re-check by 2020-01-01.\n"
+			f[".github/workflows/ci.yml"] = "# Re-check by 2020-01-01.\n"
 		}, 0, nil},
+		{"docs and CONTRIBUTING are read", func(f map[string]string) {
+			f["docs/guide.md"] = "Re-check by 2020-01-01.\n"
+			f["CONTRIBUTING.md"] = "Re-check by 2020-01-01.\n"
+		}, 2, []string{"docs/guide.md:1", "CONTRIBUTING.md:1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name+" (release)", func(t *testing.T) {
