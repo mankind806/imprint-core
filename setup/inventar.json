@@ -6,5 +6,21 @@
     "ziel": "${HOME}/.git/hooks/pre-push",
     "rechte": false,
     "beschreibung": "Pre-push githook verification script"
+  },
+  {
+    "id": "agy-rechte-vorlage",
+    "typ": "rechte-vorlage",
+    "quelle": "setup/vorlagen/agy-settings.json",
+    "ziel": "${HOME}/.gemini/antigravity-cli/settings.json",
+    "rechte": true,
+    "beschreibung": "Rechte-Vorlage für agy (permissions, statusLine, trustedWorkspaces); nur der Mensch wendet sie an, siehe setup/vorlagen/README.md"
+  },
+  {
+    "id": "claude-rechte-vorlage",
+    "typ": "rechte-vorlage",
+    "quelle": "setup/vorlagen/claude-rechte.json",
+    "ziel": "${HOME}/.claude/settings.json",
+    "rechte": true,
+    "beschreibung": "Rechte-Vorlage für den permissions-Block von Claude Code; nur der Mensch mergt sie ein, siehe setup/vorlagen/README.md"
   }
 ]
