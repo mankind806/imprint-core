@@ -206,7 +206,7 @@ func checkCardGenerated(e *env) (checkResult, error) {
 
 var (
 	removedSkills   = []string{"one-canonical-place", "provenance-on-entry", "supersede-dont-delete", "knowledge-ages", "blind-first-pass"}
-	removedScanDirs = []string{"skills", "agents", "hooks", ".claude-plugin"}
+	removedScanDirs = []string{"skills", "agents", "hooks", ".claude-plugin", "docs"}
 	migrationWord   = regexp.MustCompile(`(?i)\b(formerly|merged)\b`)
 )
 
@@ -269,8 +269,8 @@ func regularFilesUnder(root, dir string) ([]string, error) {
 	return out, err
 }
 
-// pluginFiles lists the files the text checks read: everything under the
-// plugin's own directories, and the README.
+// pluginFiles lists the tracked prose files the text checks read: everything
+// under the plugin's own directories, docs/, and README.md / CONTRIBUTING.md.
 func pluginFiles(root string) ([]string, error) {
 	var paths []string
 	for _, d := range removedScanDirs {
@@ -280,8 +280,10 @@ func pluginFiles(root string) ([]string, error) {
 		}
 		paths = append(paths, files...)
 	}
-	if info, err := os.Stat(filepath.Join(root, "README.md")); err == nil && info.Mode().IsRegular() {
-		paths = append(paths, "README.md")
+	for _, single := range []string{"README.md", "CONTRIBUTING.md"} {
+		if info, err := os.Stat(filepath.Join(root, single)); err == nil && info.Mode().IsRegular() {
+			paths = append(paths, single)
+		}
 	}
 	return paths, nil
 }
