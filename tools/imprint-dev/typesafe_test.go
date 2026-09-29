@@ -358,6 +358,71 @@ func TestCheckKnowledgeKeeping(t *testing.T) {
 	}
 }
 
+// --- Rule Enforcement Checks (CL-002) ---------------------------------------
+
+func TestCheckRuleEnforcement(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		prob := 0.1
+		// If text lacks enforcement mechanism and does not state nothing enforces it
+		if strings.Contains(req.State, "OHNE_DURCHSETZUNG") {
+			prob = 0.88
+		}
+
+		resp := Response{
+			Answers: map[string]RawAnswer{
+				RuleEnforcementQuestionID: {
+					Noul: &prob,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	client := NewClient("test-key")
+	client.Endpoint = ts.URL
+	client.HTTPClient = ts.Client()
+
+	ctx := context.Background()
+
+	// 1. Regel ohne Durchsetzung -> schlägt an (prob >= 0.5)
+	textNoEnforcement := "OHNE_DURCHSETZUNG Jede Funktion darf maximal 20 Zeilen lang sein."
+	needsNotice, notice, err := CheckRuleEnforcement(ctx, client, textNoEnforcement)
+	if err != nil {
+		t.Fatalf("CheckRuleEnforcement error: %v", err)
+	}
+	if !needsNotice {
+		t.Errorf("expected needsNotice = true for rule missing enforcement")
+	}
+	if !strings.Contains(notice, "Jede Regel nennt, was sie durchsetzt") {
+		t.Errorf("notice missing rule-enforcement guidance: %s", notice)
+	}
+
+	// 2. Regel mit Durchsetzungs-Nennung -> schlägt nicht an
+	textWithEnforcement := "Jede Funktion darf maximal 20 Zeilen lang sein; durchgesetzt von check-len in tools/imprint-dev."
+	needsNotice, _, err = CheckRuleEnforcement(ctx, client, textWithEnforcement)
+	if err != nil {
+		t.Fatalf("CheckRuleEnforcement error: %v", err)
+	}
+	if needsNotice {
+		t.Errorf("expected needsNotice = false for rule naming enforcement")
+	}
+
+	// 3. Regel mit explizitem „nichts tut es“ -> schlägt nicht an
+	textExplicitNothing := "Jede Funktion soll verständlich sein; nichts setzt das durch."
+	needsNotice, _, err = CheckRuleEnforcement(ctx, client, textExplicitNothing)
+	if err != nil {
+		t.Fatalf("CheckRuleEnforcement error: %v", err)
+	}
+	if needsNotice {
+		t.Errorf("expected needsNotice = false for rule explicitly stating nothing enforces it")
+	}
+}
+
 // --- Path & Field Extraction Tests -------------------------------------------
 
 func TestIsMemoryOrRegisterFile(t *testing.T) {
@@ -391,6 +456,21 @@ func TestIsMemoryOrRegisterFile(t *testing.T) {
 		{"Dockerfile", false},
 		{"Containerfile", false},
 
+		// Test files - ALWAYS false
+		{"memory/test_notes.md", false},
+		{"test/memory.md", false},
+		{"tests/notes.md", false},
+		{"memory/notes_test.go", false},
+		{"memory/test-plan.md", false},
+		{"memory/test.md", false},
+
+		// Rule and skill files - false for isMemoryOrRegisterFile (handled by isRuleFile)
+		{"rules/AGENTS.md", false},
+		{"rules/custom.md", false},
+		{"skills/knowledge-keeping/SKILL.md", false},
+		{"skills/delegation-contract/SKILL.md", false},
+		{"AGENTS.md", false},
+
 		// Exact basenames - true
 		{"entscheide.md", true},
 		{"docs/entscheide.md", true},
@@ -398,20 +478,82 @@ func TestIsMemoryOrRegisterFile(t *testing.T) {
 		{"register.md", true},
 		{"docs/register.md", true},
 		{"MEMORY.md", true},
-		{"AGENTS.md", true},
+		{"memory.md", true},
 
 		// Folder paths - true
 		{"memory/notes.md", true},
 		{"/var/home/user/memory/notes.md", true},
-		{"rules/AGENTS.md", true},
-		{"rules/custom.md", true},
-		{"skills/knowledge-keeping/SKILL.md", true},
+		{"memory/decisions.md", true},
 	}
 
 	for _, tc := range cases {
 		got := isMemoryOrRegisterFile(tc.path)
 		if got != tc.want {
 			t.Errorf("isMemoryOrRegisterFile(%q) = %v; want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestIsRuleFile(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		// Empty / invalid
+		{"", false},
+		{"   ", false},
+		{".", false},
+
+		// Source code files - ALWAYS false
+		{"rules/check.go", false},
+		{"skills/run.py", false},
+		{"rules/deploy.sh", false},
+		{"rules/main.ts", false},
+		{"main.go", false},
+
+		// Factory / build files - ALWAYS false
+		{"rules/factory.md", false},
+		{"rules/build.sh", false},
+		{"skills/Makefile", false},
+		{"rules/Dockerfile", false},
+
+		// Test files - ALWAYS false
+		{"rules/rules_test.go", false},
+		{"rules/test_rule.md", false},
+		{"rules/test-spec.md", false},
+		{"rules/test.md", false},
+		{"test/rules.md", false},
+		{"tests/skills.md", false},
+
+		// Memory files - false for isRuleFile
+		{"memory/notes.md", false},
+		{"entscheide.md", false},
+		{"docs/entscheide.md", false},
+		{"register.md", false},
+		{"docs/register.md", false},
+
+		// Non-rule markdown
+		{"README.md", false},
+		{"docs/status.md", false},
+
+		// Positive rule files
+		{"rules/AGENTS.md", true},
+		{"rules/custom.md", true},
+		{"AGENTS.md", true},
+		{"agents.md", true},
+		{"rules.md", true},
+		{"skills/delegation-contract/SKILL.md", true},
+		{"skills/knowledge-keeping/SKILL.md", true},
+		{"skills/measure-before-asserting/SKILL.md", true},
+		{"skills/session-handover/SKILL.md", true},
+		{"skills/knowledge-keeping/references/provenance.md", true},
+		{"/home/user/repo/rules/policy.md", true},
+	}
+
+	for _, tc := range cases {
+		got := isRuleFile(tc.path)
+		if got != tc.want {
+			t.Errorf("isRuleFile(%q) = %v; want %v", tc.path, got, tc.want)
 		}
 	}
 }
@@ -458,20 +600,27 @@ func TestExtractFileAndContent(t *testing.T) {
 // --- Hook CLI Subcommand Tests -----------------------------------------------
 
 func TestHookTypesafeCheckCLI(t *testing.T) {
-	// Mock TypeSafe server
+	// Mock TypeSafe server handling both provenance and rule enforcement questions
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req Request
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		prob := 0.1
+		probKK := 0.1
 		if strings.Contains(req.State, "OHNE_DATUM") {
-			prob = 0.90
+			probKK = 0.90
+		}
+		probRE := 0.1
+		if strings.Contains(req.State, "OHNE_DURCHSETZUNG") {
+			probRE = 0.90
 		}
 
 		resp := Response{
 			Answers: map[string]RawAnswer{
 				KnowledgeKeepingQuestionID: {
-					Noul: &prob,
+					Noul: &probKK,
+				},
+				RuleEnforcementQuestionID: {
+					Noul: &probRE,
 				},
 			},
 		}
@@ -499,7 +648,7 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		}
 	}
 
-	// Case 2: Non-memory file -> exits 0 with no output
+	// Case 2: Non-relevant file (main.go) -> exits 0 with no output
 	{
 		t.Setenv("TYPESAFE_API_KEY", "test-key")
 		var stdout, stderr bytes.Buffer
@@ -517,7 +666,7 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 	{
 		origKeyFn := getKeyFn
 		getKeyFn = func() string {
-			t.Fatal("key lookup must not be invoked for excluded/non-memory files like factory.go")
+			t.Fatal("key lookup must not be invoked for excluded/non-relevant files like factory.go")
 			return "fail"
 		}
 
@@ -531,6 +680,27 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		}
 		if stdout.Len() != 0 {
 			t.Errorf("expected empty stdout for factory.go, got %q", stdout.String())
+		}
+	}
+
+	// Case 2c: Test file exclusion does NOT invoke key lookup (rules_test.go -> kein Key-Lookup)
+	{
+		origKeyFn := getKeyFn
+		getKeyFn = func() string {
+			t.Fatal("key lookup must not be invoked for test files")
+			return "fail"
+		}
+
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"tool_name":"write_to_file","tool_input":{"TargetFile":"rules/rules_test.go","CodeContent":"OHNE_DURCHSETZUNG package main"}}`)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		getKeyFn = origKeyFn
+
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout for rules_test.go, got %q", stdout.String())
 		}
 	}
 
@@ -566,7 +736,7 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 	{
 		t.Setenv("TYPESAFE_API_KEY", "test-key")
 		var stdout, stderr bytes.Buffer
-		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"rules/AGENTS.md","old_string":"foo","new_string":"OHNE_DATUM Neuer Leitsatz ohne Erfassungsdatum."}}`)
+		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"memory/notes.md","old_string":"foo","new_string":"OHNE_DATUM Neuer Leitsatz ohne Erfassungsdatum."}}`)
 		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
 		if code != exitOK {
 			t.Fatalf("code = %d; want exitOK", code)
@@ -584,6 +754,59 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		}
 	}
 
+	// Case 3c: Rule file with missing enforcement via write_to_file (CL-002)
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":"rules/AGENTS.md","CodeContent":"OHNE_DURCHSETZUNG Alle Commits müssen signiert sein."}}`)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() == 0 {
+			t.Fatal("expected hook output for rule file, got empty stdout")
+		}
+
+		var out HookOutput
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("failed to decode hook output JSON: %v", err)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "Jede Regel nennt, was sie durchsetzt") {
+			t.Errorf("AdditionalContext does not contain rule-enforcement notice: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+		if strings.Contains(out.HookSpecificOutput.AdditionalContext, "knowledge-keeping") {
+			t.Errorf("Rule-only file should not have knowledge-keeping notice")
+		}
+	}
+
+	// Case 3d: Combined payload (file matching both memory and rule) -> both notices joined with \n\n
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":"memory/AGENTS.md","CodeContent":"OHNE_DATUM OHNE_DURCHSETZUNG Regel ohne Datum und ohne Durchsetzung."}}`)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() == 0 {
+			t.Fatal("expected hook output for combined file, got empty stdout")
+		}
+
+		var out HookOutput
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("failed to decode hook output JSON: %v", err)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "knowledge-keeping") {
+			t.Errorf("AdditionalContext missing knowledge-keeping notice in combined: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "Jede Regel nennt, was sie durchsetzt") {
+			t.Errorf("AdditionalContext missing rule-enforcement notice in combined: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+		if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "\n\n") {
+			t.Errorf("Combined notices must be joined by double newline: %s", out.HookSpecificOutput.AdditionalContext)
+		}
+	}
+
 	// Case 4: Memory file with valid provenance -> exits 0 with no output
 	{
 		t.Setenv("TYPESAFE_API_KEY", "test-key")
@@ -595,6 +818,20 @@ func TestHookTypesafeCheckCLI(t *testing.T) {
 		}
 		if stdout.Len() != 0 {
 			t.Errorf("expected empty stdout for compliant text, got %q", stdout.String())
+		}
+	}
+
+	// Case 4b: Rule file with valid enforcement -> exits 0 with no output
+	{
+		t.Setenv("TYPESAFE_API_KEY", "test-key")
+		var stdout, stderr bytes.Buffer
+		stdin := strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"write_to_file","tool_input":{"TargetFile":"rules/AGENTS.md","CodeContent":"Jede Regel nennt was sie durchsetzt; durchgesetzt von check-rules."}}`)
+		code := runWithStdin([]string{"hook-typesafe-check", "--endpoint", ts.URL}, stdin, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("code = %d; want exitOK", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("expected empty stdout for compliant rule text, got %q", stdout.String())
 		}
 	}
 

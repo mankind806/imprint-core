@@ -27,6 +27,9 @@ const (
 
 	KnowledgeKeepingQuestionID = "missing_provenance"
 	KnowledgeKeepingNotice     = "imprint knowledge-keeping: Dieser Eintrag enthält möglicherweise einen Fakt oder Entscheid ohne Erfassungsdatum (YYYY-MM-DD), Quelle oder Methode. Gemäß knowledge-keeping sollte jede dauerhafte Aufzeichnung Herkunft, Methode und Datum nennen.\n(knowledge-keeping: This entry may record a fact or decision without a recording date (YYYY-MM-DD), source, or acquisition method. Consider adding provenance.)"
+
+	RuleEnforcementQuestionID = "missing_enforcement"
+	RuleEnforcementNotice     = "imprint core: Jede Regel nennt, was sie durchsetzt, oder sagt deutlich, dass nichts es tut. Dieser Regeltext enthält möglicherweise Vorgaben ohne Benennung des Durchsetzungs-Mechanismus.\n(imprint core: Every rule names what enforces it, or says plainly that nothing does. Consider adding enforcement details or stating that nothing enforces it.)"
 )
 
 // --- Masking (analog typesafe-dev ts_common.py) ------------------------------
@@ -425,22 +428,60 @@ func CheckKnowledgeKeeping(ctx context.Context, client *Client, text string) (bo
 	return false, "", nil
 }
 
-// --- Hook Payload & Subcommand (CL-000, CL-001) ------------------------------
+// --- Rule Enforcement Check (CL-002) ----------------------------------------
 
-// isMemoryOrRegisterFile returns true if path is a memory, decision, or register file.
-// Non-memory files, source code files, and build/factory files always return false.
-func isMemoryOrRegisterFile(path string) bool {
-	cleanPath := strings.TrimSpace(path)
-	if cleanPath == "" || cleanPath == "." {
-		return false
+// RuleEnforcementQuestion returns the Jev primitive evaluating missing rule enforcement.
+func RuleEnforcementQuestion() Question {
+	return Question{
+		Type:         TypeNoul,
+		Instructions: "Does this rule text or guideline state a mandatory rule, constraint, or policy without naming what enforces it (a specific tool, hook, script, check, linter, or stating explicitly that nothing does)?",
 	}
-	cleanPath = filepath.ToSlash(filepath.Clean(cleanPath))
+}
+
+// CheckRuleEnforcement evaluates whether a rule or guideline text appears to state rules
+// without naming what enforces it or explicitly stating that nothing does.
+// Fail-Open: on any error, returns (false, "", err).
+func CheckRuleEnforcement(ctx context.Context, client *Client, text string) (bool, string, error) {
+	if client == nil || client.APIKey == "" {
+		return false, "", nil
+	}
+
+	if len(text) > MaxPayloadBytes {
+		text = text[:MaxPayloadBytes]
+	}
+
+	questions := map[string]Question{
+		RuleEnforcementQuestionID: RuleEnforcementQuestion(),
+	}
+
+	resp, err := client.Post(ctx, text, questions)
+	if err != nil {
+		return false, "", err
+	}
+
+	prob, ok := resp.Noul(RuleEnforcementQuestionID)
+	if !ok {
+		return false, "", nil
+	}
+
+	if prob >= 0.5 {
+		return true, RuleEnforcementNotice, nil
+	}
+
+	return false, "", nil
+}
+
+// --- Hook Payload & Subcommand (CL-000, CL-001, CL-002) -----------------------
+
+// isCodeOrBuildOrTestFile identifies non-content files (source code, build definitions, tests)
+// that should never be analyzed by TypeSafe System One.
+func isCodeOrBuildOrTestFile(cleanPath string) bool {
 	lowerPath := strings.ToLower(cleanPath)
 	base := filepath.Base(cleanPath)
 	lowerBase := strings.ToLower(base)
 	ext := strings.ToLower(filepath.Ext(cleanPath))
 
-	// Source code files are never memory/register files.
+	// Source code files are never memory/register or rule files.
 	codeExts := map[string]bool{
 		".go": true, ".py": true, ".sh": true, ".bash": true, ".zsh": true,
 		".rs": true, ".c": true, ".h": true, ".cpp": true, ".hpp": true,
@@ -449,23 +490,81 @@ func isMemoryOrRegisterFile(path string) bool {
 		".swift": true, ".kt": true,
 	}
 	if codeExts[ext] {
-		return false
-	}
-
-	// Factory and build files are never memory/register files.
-	if strings.Contains(lowerBase, "factory") || strings.Contains(lowerBase, "build") ||
-		lowerBase == "makefile" || lowerBase == "dockerfile" || lowerBase == "containerfile" {
-		return false
-	}
-
-	// Exact filenames / basenames.
-	switch lowerBase {
-	case "entscheide.md", "offene-entscheide.md", "register.md", "memory.md", "agents.md":
 		return true
 	}
 
-	// Fixed folder paths: /memory/, /rules/, /skills/ or starting with memory/, rules/, skills/.
-	prefixes := []string{"memory/", "rules/", "skills/"}
+	// Factory and build files are never memory/register or rule files.
+	if strings.Contains(lowerBase, "factory") || strings.Contains(lowerBase, "build") ||
+		lowerBase == "makefile" || lowerBase == "dockerfile" || lowerBase == "containerfile" {
+		return true
+	}
+
+	// Test files (test scripts, test fixtures, unit tests) are excluded.
+	if strings.Contains(lowerBase, "_test.") || strings.Contains(lowerBase, ".test.") ||
+		strings.Contains(lowerBase, ".spec.") || strings.HasPrefix(lowerBase, "test_") ||
+		strings.HasPrefix(lowerBase, "test-") || lowerBase == "test.md" || lowerBase == "test.txt" ||
+		strings.HasPrefix(lowerPath, "test/") || strings.Contains(lowerPath, "/test/") ||
+		strings.HasPrefix(lowerPath, "tests/") || strings.Contains(lowerPath, "/tests/") {
+		return true
+	}
+
+	return false
+}
+
+// isMemoryOrRegisterFile returns true if path is a memory, decision, or register file
+// (memory/, entscheide.md, offene-entscheide.md, register.md, MEMORY.md).
+// Non-memory files, source code files, build/factory files, and test files always return false.
+func isMemoryOrRegisterFile(path string) bool {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" || cleanPath == "." {
+		return false
+	}
+	cleanPath = filepath.ToSlash(filepath.Clean(cleanPath))
+	if isCodeOrBuildOrTestFile(cleanPath) {
+		return false
+	}
+
+	lowerPath := strings.ToLower(cleanPath)
+	lowerBase := strings.ToLower(filepath.Base(cleanPath))
+
+	// Exact filenames / basenames.
+	switch lowerBase {
+	case "entscheide.md", "offene-entscheide.md", "register.md", "memory.md":
+		return true
+	}
+
+	// Fixed folder path: memory/ or /memory/
+	if strings.HasPrefix(lowerPath, "memory/") || strings.Contains(lowerPath, "/memory/") {
+		return true
+	}
+
+	return false
+}
+
+// isRuleFile returns true if path is a rule or skill guideline file
+// (e.g., rules/, skills/, AGENTS.md, agents.md).
+// Non-rule files, source code files, build/factory files, and test files always return false.
+func isRuleFile(path string) bool {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" || cleanPath == "." {
+		return false
+	}
+	cleanPath = filepath.ToSlash(filepath.Clean(cleanPath))
+	if isCodeOrBuildOrTestFile(cleanPath) {
+		return false
+	}
+
+	lowerPath := strings.ToLower(cleanPath)
+	lowerBase := strings.ToLower(filepath.Base(cleanPath))
+
+	// Exact filenames / basenames.
+	switch lowerBase {
+	case "agents.md", "rules.md":
+		return true
+	}
+
+	// Fixed folder paths: rules/ or skills/
+	prefixes := []string{"rules/", "skills/"}
 	for _, p := range prefixes {
 		if strings.HasPrefix(lowerPath, p) || strings.Contains(lowerPath, "/"+p) {
 			return true
@@ -559,13 +658,16 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 		text = text[:MaxPayloadBytes]
 	}
 
+	isRule := isRuleFile(filePath)
+	isMemory := isMemoryOrRegisterFile(filePath)
+
 	// Optimization: check path and trivial content FIRST before doing any key search.
-	// Non-memory files exit immediately without triggering secret-tool.
-	if !isMemoryOrRegisterFile(filePath) || len(strings.TrimSpace(text)) < 15 {
+	// Non-relevant files exit immediately without triggering secret-tool.
+	if (!isRule && !isMemory) || len(strings.TrimSpace(text)) < 15 {
 		return exitOK
 	}
 
-	// Key lookup only after confirming this is a memory/register file.
+	// Key lookup only after confirming this is a relevant file.
 	apiKey := GetKey()
 	if apiKey == "" {
 		return exitOK
@@ -583,10 +685,36 @@ func runHookTypesafeCheck(args []string, stdin io.Reader, stdout, stderr io.Writ
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	needsNotice, notice, _ := CheckKnowledgeKeeping(ctx, client, text)
-	if !needsNotice || notice == "" {
+	questions := make(map[string]Question)
+	if isMemory {
+		questions[KnowledgeKeepingQuestionID] = KnowledgeKeepingQuestion()
+	}
+	if isRule {
+		questions[RuleEnforcementQuestionID] = RuleEnforcementQuestion()
+	}
+
+	resp, err := client.Post(ctx, text, questions)
+	if err != nil || resp == nil {
 		return exitOK
 	}
+
+	var notices []string
+	if isMemory {
+		if prob, ok := resp.Noul(KnowledgeKeepingQuestionID); ok && prob >= 0.5 {
+			notices = append(notices, KnowledgeKeepingNotice)
+		}
+	}
+	if isRule {
+		if prob, ok := resp.Noul(RuleEnforcementQuestionID); ok && prob >= 0.5 {
+			notices = append(notices, RuleEnforcementNotice)
+		}
+	}
+
+	if len(notices) == 0 {
+		return exitOK
+	}
+
+	notice := strings.Join(notices, "\n\n")
 
 	eventName := payload.HookEventName
 	if eventName == "" {
