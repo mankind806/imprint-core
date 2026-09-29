@@ -298,6 +298,7 @@ func TestCheckPluginVersion(t *testing.T) {
 		want   []string
 	}{
 		{"valid", nil, 0, nil},
+		{"current release 0.9.2", version("0.9.2"), 0, nil},
 		{"zero major", version("0.3.0"), 0, nil},
 		{"pre-release and build", version("1.2.3-rc.1+build.5"), 0, nil},
 		{"multi-digit", version("10.20.30"), 0, nil},

@@ -50,6 +50,12 @@ var (
 
 	// opaqueCandidateRE matches candidates for long opaque strings (24+ base64/hex characters).
 	opaqueCandidateRE = regexp.MustCompile(`[A-Za-z0-9_\-+/]{24,}={0,2}`)
+
+	// streetRE matches German street names + house number (e.g. "Musterstraße 12", "Hauptstr. 4b", "Am Markt 1").
+	streetRE = regexp.MustCompile(`\b(?:(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+(?:\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+\s+)*(?:Straße|Strasse|Str\.|Str\b|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:straße|strasse|str\.|str\b|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile|pfad|steig|gäßchen|gaesschen)))\s+\d+[a-zA-Z]?(?:\s*[-/]\s*\d+[a-zA-Z]?)?\b`)
+
+	// plzOrtRE matches German postal code + city (e.g. "10115 Berlin", "80331 München").
+	plzOrtRE = regexp.MustCompile(`\b\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+(?:\s+(?:am Main|am Rhein|am Neckar|an der Oder|an der Elbe|an der Donau|an der Lahn|im Breisgau|ob der Tauber))?\b`)
 )
 
 // MaskCounts records the number of redactions by category.
@@ -57,10 +63,100 @@ type MaskCounts struct {
 	SecretKW int `json:"secret_kw"`
 	Email    int `json:"email"`
 	Opaque   int `json:"opaque"`
+	Address  int `json:"address"`
+	Name     int `json:"name"`
+}
+
+// getNamesFilePath resolves the path to the names file:
+// 1. TYPESAFE_NAMES_FILE environment variable
+// 2. Fallback to ~/.config/typesafe/names.txt
+func getNamesFilePath() string {
+	if p := strings.TrimSpace(os.Getenv("TYPESAFE_NAMES_FILE")); p != "" {
+		return expandHome(p)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "typesafe", "names.txt")
+}
+
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, path[2:])
+		}
+	} else if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home
+		}
+	}
+	return path
+}
+
+// loadNames reads names from the specified file.
+// If the file is missing or unreadable, returns nil cleanly (0 hits).
+// Lines with comments '#' are ignored. Names are split into first and last name components,
+// and sorted by length descending (with alphabetical secondary sort for determinism).
+func loadNames(filePath string) []string {
+	if filePath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	nameSet := make(map[string]bool)
+
+	for _, line := range lines {
+		if idx := strings.Index(line, "#"); idx != -1 {
+			line = line[:idx]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+
+		if len(fields) > 1 {
+			fullName := strings.Join(fields, " ")
+			nameSet[fullName] = true
+		}
+
+		for _, f := range fields {
+			f = strings.TrimSpace(f)
+			if len(f) >= 2 {
+				nameSet[f] = true
+			}
+		}
+	}
+
+	if len(nameSet) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
+		names = append(names, name)
+	}
+
+	sort.Slice(names, func(i, j int) bool {
+		if len(names[i]) != len(names[j]) {
+			return len(names[i]) > len(names[j])
+		}
+		return names[i] < names[j]
+	})
+
+	return names
 }
 
 // MaskDetail redacts sensitive patterns in text before transmission.
-// Order of execution matches ts_common.mask_detail: secret_kw (bearer/basic + secret keywords), email, opaque.
+// Order of execution: secret_kw (bearer/basic + secret keywords), email, opaque, address, name.
 func MaskDetail(text string) (string, MaskCounts) {
 	var counts MaskCounts
 
@@ -93,13 +189,13 @@ func MaskDetail(text string) (string, MaskCounts) {
 		return "<redacted>"
 	})
 
-	// 2. email
+	// 3. email
 	text = emailRE.ReplaceAllStringFunc(text, func(m string) string {
 		counts.Email++
 		return "<email>"
 	})
 
-	// 3. opaque: 24+ chars with at least one digit and one letter.
+	// 4. opaque: 24+ chars with at least one digit and one letter.
 	text = opaqueCandidateRE.ReplaceAllStringFunc(text, func(m string) string {
 		hasDigit := false
 		hasLetter := false
@@ -117,32 +213,71 @@ func MaskDetail(text string) (string, MaskCounts) {
 		return m
 	})
 
+	// 5. address: Straße + Hausnummer
+	text = streetRE.ReplaceAllStringFunc(text, func(m string) string {
+		counts.Address++
+		return "<address>"
+	})
+
+	// 6. address: PLZ + Ort
+	text = plzOrtRE.ReplaceAllStringFunc(text, func(m string) string {
+		counts.Address++
+		return "<address>"
+	})
+
+	// 7. names: from TYPESAFE_NAMES_FILE or ~/.config/typesafe/names.txt
+	if names := loadNames(getNamesFilePath()); len(names) > 0 {
+		for _, name := range names {
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+			text = re.ReplaceAllStringFunc(text, func(m string) string {
+				counts.Name++
+				return "<name>"
+			})
+		}
+	}
+
 	return text, counts
 }
 
 // Mask redacts sensitive patterns and returns the masked string and total redaction count.
 func Mask(text string) (string, int) {
 	masked, counts := MaskDetail(text)
-	return masked, counts.SecretKW + counts.Email + counts.Opaque
+	return masked, counts.SecretKW + counts.Email + counts.Opaque + counts.Address + counts.Name
 }
 
 // --- Key Lookup --------------------------------------------------------------
 
-var getKeyFn = defaultGetKey
+const KeyLookupTimeout = 800 * time.Millisecond
+
+var (
+	getKeyFn            = defaultGetKey
+	getKeyWithContextFn = defaultGetKeyWithContext
+)
 
 // GetKey searches for the TypeSafe API key:
 // 1. Environment variable TYPESAFE_API_KEY
-// 2. Fallback to `secret-tool lookup service typesafe key api`
+// 2. Fallback to `secret-tool lookup service typesafe key api` within KeyLookupTimeout (800ms)
 // Returns empty string if no key is found or lookup fails.
 func GetKey() string {
 	return getKeyFn()
 }
 
+// GetKeyWithContext searches for the TypeSafe API key using the given parent context.
+// Secret-tool execution is bounded by KeyLookupTimeout (800ms) or parent context deadline.
+// Fails open immediately if lookup times out or errors.
+func GetKeyWithContext(ctx context.Context) string {
+	return getKeyWithContextFn(ctx)
+}
+
 func defaultGetKey() string {
+	return defaultGetKeyWithContext(context.Background())
+}
+
+func defaultGetKeyWithContext(parentCtx context.Context) string {
 	if key := strings.TrimSpace(os.Getenv("TYPESAFE_API_KEY")); key != "" {
 		return key
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, KeyLookupTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "secret-tool", "lookup", "service", "typesafe", "key", "api")
 	out, err := cmd.Output()
@@ -543,8 +678,17 @@ func SkillSuggestionQuestion() Question {
 	}
 }
 
+// ImprintSkillsAllowlist defines the fixed allowlist of the 4 canonical imprint skills.
+var ImprintSkillsAllowlist = map[string]bool{
+	"delegation-contract":      true,
+	"knowledge-keeping":        true,
+	"measure-before-asserting": true,
+	"session-handover":         true,
+}
+
 // CheckSkillSuggestion evaluates whether a user prompt matches an imprint skill.
-// Returns the skill name if a specific skill is chosen (not empty, not "none").
+// Returns the skill name only if one of the 4 allowed imprint skills is chosen.
+// If another value is returned (hallucination or unknown skill), it is discarded.
 // Fail-Open: on any error, returns ("", err).
 func CheckSkillSuggestion(ctx context.Context, client *Client, promptText string) (string, error) {
 	if client == nil || client.APIKey == "" {
@@ -569,7 +713,7 @@ func CheckSkillSuggestion(ctx context.Context, client *Client, promptText string
 		return "", nil
 	}
 
-	if choice != "" && choice != "none" {
+	if ImprintSkillsAllowlist[choice] {
 		return choice, nil
 	}
 
@@ -1106,11 +1250,6 @@ func runHookSkillSuggestion(args []string, stdin io.Reader, stdout, stderr io.Wr
 		return exitOK
 	}
 
-	apiKey := GetKey()
-	if apiKey == "" {
-		return exitOK
-	}
-
 	timeout := time.Duration(*timeoutSec) * time.Second
 	if timeout <= 0 {
 		timeout = 1 * time.Second
@@ -1118,15 +1257,20 @@ func runHookSkillSuggestion(args []string, stdin io.Reader, stdout, stderr io.Wr
 		timeout = 2 * time.Second
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	apiKey := GetKeyWithContext(ctx)
+	if apiKey == "" {
+		return exitOK
+	}
+
 	client := NewClient(apiKey)
 	client.Endpoint = *endpoint
 	client.Timeout = timeout
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
 	skill, err := CheckSkillSuggestion(ctx, client, promptText)
-	if err != nil || skill == "" || skill == "none" {
+	if err != nil || !ImprintSkillsAllowlist[skill] {
 		return exitOK
 	}
 

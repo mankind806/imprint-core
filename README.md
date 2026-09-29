@@ -273,7 +273,7 @@ Runs in Claude Code, Codex, and Antigravity. Codex remains a supported host for 
   - Complete reviewer parity for `foreign-material-reviewer` without shell access under Codex is not achieved (disabling shell removes text reading entirely).
   - Codex Code Mode, MCP/plugin tools, alternate tool routes, and live model behaviors remain unverified.
 
-**0.9.1** (2026-09-29; ships when the owner merges it):
+**0.9.1** (released 2026-09-29):
 
 Antigravity hook execution and subagent runtime logging.
 
@@ -284,6 +284,14 @@ Antigravity hook execution and subagent runtime logging.
 - **What is not verified:**
   - Whether Antigravity enforces tool allowlists on subagents remains not checked.
   - Runtime budget persistence of rules across multi-turn sessions remains not verified.
+
+**0.9.2** (2026-09-29; ships when the owner merges it):
+
+TypeSafe Hook-Budget, Skill-Vorschlag-Allowlist, Adress- und Namensmaskierung (CL-113).
+
+- **Hook-Budget für Key-Lookup:** `secret-tool` Lookup in `defaultGetKey` auf maximal 800ms beschränkt, um das 2s-Budget in `hooks.json` einzuhalten; strikt fail-open.
+- **Skill-Vorschlag Allowlist:** `CheckSkillSuggestion` auf die 4 kanonischen imprint-Skills (`delegation-contract`, `knowledge-keeping`, `measure-before-asserting`, `session-handover`) beschränkt; unbekannte Vorschläge oder Halluzinationen werden verworfen.
+- **Adress- und Namensmaskierung:** `MaskDetail` und `Mask` um Adressen (`<address>`, Straße+Hausnummer und PLZ+Ort) sowie Namen (`<name>`, aus `TYPESAFE_NAMES_FILE` bzw. `~/.config/typesafe/names.txt`, Vor-/Nachname-Split nach Länge absteigend mit `\b`) erweitert. `MaskCounts` um `Address` und `Name` ergänzt.
 
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
