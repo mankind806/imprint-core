@@ -2,7 +2,7 @@
 
 Wie mehrere Agenten-Hosts an einem Auftrag zusammenarbeiten, ohne sich die Arbeit zu
 zerstören: ein gemeinsames Journal, ein Orchestrator, ein Schreiber je Worktree.
-Stand: V0.5 mit Rollen-Nachtrag CL-116 (2026-09-30). Das Journal selbst bleibt lokal und
+Stand: V0.5 mit den Nutzeranweisungen CL-116, CL-118 und CL-120 (2026-09-30). Das Journal selbst bleibt lokal und
 wird nicht mitgeliefert, nur dieser Vertrag.
 
 ## Rollen
@@ -43,8 +43,10 @@ wird nicht mitgeliefert, nur dieser Vertrag.
 | Cloud-Agent | Jules | abgeschlossene, testbare Pakete (Tests, Fuzz-Seeds, kleine Refactors, Doku-Abgleich); liefert einen PR | nie Claimant; keine Logins, Tokens, Geheimnisse, Sicherheitsgrenzen, modulübergreifenden Umbauten, Register; keine Zeitplan-Agenten | Zeitpläne im Dienst abgeschaltet (technisch); Rest Verhaltensregel |
 | Klassifikations-Werkzeug | TypeSafe (Jev) | empfiehlt Ausführenden, Modellstufe, Risiko | entscheidet nicht, schreibt nichts; private Inhalte nur maskiert | Verhaltensregel |
 
-**Mehrere Leads** (V0.4) bleiben möglich: Dann hat jede Seite genau einen Journal-Schreiber,
-jedes Vorhaben einen Plan-Halter und jeder Zielbranch einen Integrationshalter.
+**Mehrere Leads:** Unter V0.4 waren die Seiten gleichrangige Leads; wer ein Vorhaben
+eröffnete, wurde dessen Plan-Halter. Das hat CL-116 für die Leitungsfrage abgelöst. Aus V0.2
+gilt weiter: jede Seite hat genau einen Journal-Schreiber, jeder Zielbranch genau einen
+Integrationshalter.
 
 **Delegation:** Vor dem Start steht eine `AGENT`-Zeile im Journal. Der Auftrag beginnt mit
 dem Rollenkopf `DELEGATED BY / ROLE / AMBIGUITY POLICY / RETURN`. Pakete sind klein (Ziel
@@ -126,7 +128,7 @@ Sitzung wacht niemand: Hängt es, bittet man den Menschen kurz um einen Anstoß.
 | Lesen, Prüfen und Anhängen unter **einem** exklusiven `flock` | ohne Lock waren in der Messung 39 von 40 Einträgen zerschnitten | `flock`, technisch nur für kooperierende Schreiber |
 | Lock-Datei stabil neben dem Journal, nie löschen oder ersetzen; vor dem Warten freigeben | die Sperre hängt am inode | Verhaltensregel |
 | ID unter Lock auf Dubletten prüfen | eine ID, ein Eintrag | Verhaltensregel |
-| Heredocs gequotet: `<<'EOF'` | ungequotet führte die Shell Backtick-Text zweimal als Befehl aus | Verhaltensregel |
+| Heredocs gequotet: `<<'EOF'` | ungequotet führte die Shell Backtick-Text als Befehl aus, in zwei Einträgen | Verhaltensregel |
 | Zeitstempel aus `date -Iseconds`, nie von Hand | von Hand geschriebene Zeiten lagen bis zu 45 min daneben | Verhaltensregel |
 | Kein Secret, keine privaten Inhalte im Journal | das Journal lesen alle Seiten | Verhaltensregel |
 
@@ -149,7 +151,7 @@ EOF
 
 | Was | Regel | Durchsetzung |
 |---|---|---|
-| Branch | je Paket `<host>/<paket-id>`, z. B. `claude/…`, `codex/…`, `agy/…`; ein Cloud-Agent nutzt den Branch, den sein Dienst anlegt | Verhaltensregel |
+| Branch | je Paket `<host>/<paket-id>`, z. B. `claude/…`, `codex/…`, `agy/…`; ein Cloud-Agent arbeitet unter Paket-ID und Owner der startenden Seite (V0.5) | Verhaltensregel |
 | Worktree | je Schreiber ein eigener, `<repo>-wt/<paket-id>` neben dem Klon; nie in fremden Worktrees arbeiten | Git verweigert den doppelten Checkout; sonst Verhaltensregel |
 | Geschichte | kein Force-Push, veröffentlichte History nicht umschreiben | Verhaltensregel |
 | Gemeinsamer Zustand | Dateien außerhalb der Worktrees stehen mit im `scope=` | Verhaltensregel |
@@ -165,8 +167,9 @@ EOF
 | final oder nach außen | Runden, bis keine neuen Befunde kommen | Release, öffentliche Doku |
 | Sicherheitsgrenze | **blinde Runden**: jede mit frischem Kontext und dem stärksten Modell, bis nichts mehr gefunden wird | Login-Pfad, Rechte, Parser für fremde Daten |
 
-- Der Reviewer ist nie der Autor. Er kommt bevorzugt von einer anderen Seite oder einem
-  anderen Modellhersteller, und der REVIEW-Eintrag nennt das Modell.
+- Der Reviewer ist nie der Autor (CL-116). Er kommt bevorzugt von einer anderen Seite oder
+  einem anderen Modellhersteller, und der REVIEW-Eintrag nennt das Modell. V0.4 verlangte
+  mindestens eine andere Seite; das ist mit den gleichrangigen Leads durch CL-116 abgelöst.
 - Betrifft ein Paket einen Host, prüft möglichst die Seite dieses Hosts, ob es dort
   ankommt.
 - Ein Review hängt an einer exakten SHA. Jeder weitere Commit macht die betroffenen Checks
@@ -225,6 +228,6 @@ Eine Nutzeranweisung gilt ab dem Eintrag, der sie festhält.
 | V0.4 / CL-059 | gleichrangige Leads; Plan-Halter je Vorhaben, Integrationshalter je Zielbranch; Review durch eine andere Seite | V0.3 D3 (feste Planhoheit einer Seite) | ACK aller drei Seiten, 2026-09-28 |
 | V0.4.1 / CX-093 | Merge-Lease | – (Ergänzung) | ACK aller drei Seiten, 2026-09-28 |
 | V0.5 / CL-079 | Cloud-Agent als Ausführender: nie Claimant, Start nur durch die Leitsession, Best-of-N höchstens 3, anfangs höchstens 10 offene gleichzeitig über alle Seiten, gedeckelt durch die Review-Kapazität | – (Delta) | ACK aller drei Seiten, 2026-09-28 |
-| CL-116 | eine Leitsession orchestriert und hält den Plan; lokale CLI und Cloud-Agent führen aus, ohne selbst zu claimen; ein Klassifikations-Werkzeug berät | V0.4 E1 (Gleichrang), nur in der Leitungsfrage | gilt per Nutzeranweisung, 2026-09-30 |
-| CL-118 | Merge durch einen Subagenten der Leitsession; blinde Runden an der Sicherheitsgrenze | Merge durch den Ausführenden selbst | gilt per Nutzeranweisung, 2026-09-30 |
+| CL-116 | eine Leitsession orchestriert und hält den Plan; lokale CLI und Cloud-Agent führen aus, ohne selbst zu claimen; ein Klassifikations-Werkzeug berät | V0.4 / CL-059 (gleichberechtigte Leads), für die Leitungsfrage | gilt per Nutzeranweisung, 2026-09-30 |
+| CL-118 | Merge durch einen Subagenten der Leitsession; blinde Runden an der Sicherheitsgrenze | CL-115 Pkt. 3: an der Sicherheitsgrenze merged die bauende Seite selbst | gilt per Nutzeranweisung, 2026-09-30 |
 | CL-120 | Rechte- und Sicherheitsdateien ändert kein Agent | – (Präzisierung) | gilt per Nutzeranweisung, 2026-09-30 |
