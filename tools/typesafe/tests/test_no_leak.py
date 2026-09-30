@@ -249,6 +249,32 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         r = self.run_check("retries = 3\n", msg="fix: drop the leaked value")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_noreply_trailers_and_identities_pass(self):
+        # Addresses built from parts so this test file's own diff carries none.
+        at = "@"
+        msg = ("feat: add config\n\nBody text.\n\n"
+               f"Co-Authored-By: Claude <noreply{at}anthropic.com>\n"
+               f"Signed-off-by: Dev <12345+dev{at}users.noreply.github.com>\n"
+               "Assisted-by: Claude Code")
+        diff_line = f"owner = 12345+dev{at}users.noreply.github.com, bot = noreply{at}github.com\n"
+        r = self.run_check(diff_line, msg=msg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_real_address_in_body_blocks(self):
+        at = "@"
+        r = self.run_check("retries = 3\n", msg=f"docs: tidy\n\nKontakt: erika.muster{at}mail.example\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_real_address_in_diff_blocks(self):
+        at = "@"
+        r = self.run_check(f"owner = erika.muster{at}mail.example\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_lookalike_noreply_blocks(self):
+        at = "@"
+        r = self.run_check(f"owner = noreply{at}github.com.mail.example\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
     def test_address_in_subject_blocks(self):
         r = self.run_check("retries = 3\n", msg="docs: mail " + "ops" + "@" + "bots.example")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
