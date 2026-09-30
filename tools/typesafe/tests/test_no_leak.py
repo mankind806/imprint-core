@@ -295,6 +295,42 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         r = self.run_tool("ts-commit-check", "--cached", "--msg", "docs: x\n\n" + NOREPLY_TRAILERS)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    # --- blind round 3, A: executor identities and non-addresses ---
+    def test_declared_identities_pass(self):
+        subprocess.run(["git", "-C", self.repo, "config", "user.email", "dev" + AT + "firma-intern.de"], check=True)
+        subprocess.run(["git", "-C", self.repo, "config", "--add", "imprint.allowedIdentity",
+                        "Jules <jules" + AT + "google.com>"], check=True)
+        msg = ("feat: x\n\nCo-authored-by: Jules <jules" + AT + "google.com>\n"
+               "Co-authored-by: Codex <noreply" + AT + "openai.com>\nReviewed-by: dev" + AT + "firma-intern.de")
+        r = self.run_check("retries = 3\n", msg=msg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # not declared in this clone: still an address
+        r = self.run_check("retries = 4\n", msg="feat: y\n\nCo-authored-by: Antigravity <antigravity" + AT + "google.com>")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_units_calendar_ids_and_word_tokens_pass(self):
+        lines = [  # from imprint 15b17a3, 73cdc2c, c5c6d65, 9c4da41, 98344bb
+            "cp betrieb/systemd/betrieb-job" + AT + "wissen-vault.service ~/.config/systemd/user/",
+            "systemctl --user enable --now betrieb-job" + AT + "wissen-vault.timer",
+            'ad := adapterFuer(u, c, "arbeit' + AT + 'group.calendar.google.com")',
+            'case "/calendar/v3/calendars/arbeit' + AT + 'import.calendar.google.com/events/t1":',
+            'NextPageToken: "page-token-3",',
+            'ersterToken:  "expired_tok_1",',
+            'if auth := r.Header.Get("Authorization"); auth != "Bearer geheimer-schluessel" {',
+        ]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertFalse(tc.local_alarm(tc.alarm_view(line)))
+        r = self.run_check("\n".join(lines) + "\n",
+                           msg="feat: unit betrieb-job" + AT + "wissen-vault.service",
+                           path="betrieb/systemd/betrieb-job" + AT + "wissen-vault.service")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # a real-looking address on a unit-like but different domain still counts
+        self.assertTrue(tc.local_alarm(tc.alarm_view("mail max" + AT + "service.de")))
+        # one-letter fixtures are synthetic, two letters are not
+        self.assertFalse(tc.local_alarm(tc.alarm_view('raw: "From: a' + AT + 'b.com\\r\\n"')))
+        self.assertTrue(tc.local_alarm(tc.alarm_view("From: ab" + AT + "b.com")))
+
     # --- blind round 2 ---
     def test_real_address_in_trailer_blocks(self):
         r = self.run_check("retries = 3\n", msg=f"docs: x\n\nCo-Authored-By: Max <max.privat{AT}gmail.com>")

@@ -77,7 +77,8 @@ def evaluate_diff(commit_range, cwd=None):
     hits = tc.add_counts(h1, h2, h3)
     local_hits = sum(hits.values())
     # Local leak alarm per commit (rules in ts_common), independent of TypeSafe.
-    local_leak = any(tc.leak_found(*u) for u in tc.commit_units(commit_range, cwd=cwd))
+    allowed = tc.allowed_addresses(cwd)
+    local_leak = any(tc.leak_found(*u, allowed=allowed) for u in tc.commit_units(commit_range, cwd=cwd))
     paths = run_cmd(["git", "diff", "--name-only", commit_range], cwd=cwd).splitlines()
 
     state = {

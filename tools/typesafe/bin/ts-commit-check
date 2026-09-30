@@ -104,15 +104,16 @@ def get_diff_and_msg(args, cwd=None):
     return commit_msg, diff_text, stat_text, units, None
 
 
-def check_commit(commit_msg, diff_text, stat_text, units=None):
+def check_commit(commit_msg, diff_text, stat_text, units=None, allowed=frozenset()):
     """units: [(message, diff, file names)] for the local alarm; default: this change,
-    with the stat text standing in for the file names."""
+    with the stat text standing in for the file names. allowed: the clone's declared
+    identities (tc.allowed_addresses), never an alarm."""
     if not commit_msg:
         return {"status": "error", "message": "No commit message provided"}
     if units is None:
         units = [(commit_msg, diff_text, stat_text)]
     # Local part of the leak check (rules in ts_common): runs before and without TypeSafe.
-    local_leak = any(tc.leak_found(*u) for u in units)
+    local_leak = any(tc.leak_found(*u, allowed=allowed) for u in units)
     if not diff_text:
         return {"status": "ok", "empty_diff": True, "message": "Diff is empty (nothing changed)",
                 "leak_prob": 1.0 if local_leak else None}
@@ -193,7 +194,7 @@ def main():
             print(f"Fehler: {err}")
         sys.exit(1)
 
-    res = check_commit(commit_msg, diff_text, stat_text, units)
+    res = check_commit(commit_msg, diff_text, stat_text, units, allowed=tc.allowed_addresses(args.cwd))
 
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))

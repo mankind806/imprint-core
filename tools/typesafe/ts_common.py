@@ -239,8 +239,13 @@ def add_counts(*dicts):
 # Independent of the masking above: the masking toward TypeSafe stays generous, this
 # decides whether a change is BLOCKED locally, so it only fires on values that really
 # look like a secret or a personal address. Rules, in short:
-#  - an email address, unless no-reply (NOREPLY_RE) or on a reserved domain
-#    (RFC 2606/6761: example.com/.org/.net, *.example, *.test, *.invalid, *.localhost);
+#  - an email address, unless no-reply (NOREPLY_RE), on a reserved domain (RFC
+#    2606/6761: example.com/.org/.net, *.example, *.test, *.invalid, *.localhost), one
+#    of the clone's declared identities (allowed_addresses: user.email and
+#    imprint.allowedIdentity, the list .githooks/pre-push reads), or no address at
+#    all: systemd instance units (name@inst.service/.timer/...) and Google calendar
+#    IDs (...@group.calendar.google.com, ...@import.calendar.google.com); one-letter
+#    fixtures like a@b.com count as synthetic;
 #  - a known token prefix at a segment start with >= 8 token characters behind it
 #    (at least one digit among them), with or without a keyword; AWS key IDs;
 #  - after a keyword (api_key, token, secret, credential, private_key, access_key,
@@ -250,18 +255,26 @@ def add_counts(*dicts):
 #    an unquoted value of >= 20 characters with letters and >= 4 digits;
 #  - after a password keyword (pass, pwd, passwd, password, passwort, passphrase, as a
 #    word of the key name, not label/hint/placeholder keys): any quoted value of >= 8
-#    characters, any unquoted one of >= 8 with a digit and no dot;
+#    characters, any unquoted one of >= 8 with a digit and no dot, unless the value
+#    STARTS with a fixture segment ("synth-password");
 #  - Bearer/Basic with a literal of >= 16 token characters.
 # Never an alarm without a known prefix: placeholders (<...>, ${...}, os.Getenv,
 # REPLACE_ME, CHANGEME) and values with a fixture segment (a word that starts with
 # synth, fake, dummy, beispiel, example, test, platzhalter, changeme, gueltig,
-# ungueltig or xxx; "Contest" is no fixture segment). No hit for comparisons (== !=),
+# ungueltig, xxx, geheim, schluessel/schlüssel, page or expired; "Contest" is no
+# fixture segment). Outside password keys also never: word values, i.e. two or more
+# parts split at - _ . / : + = that are all letters or digit runs of at most 3
+# ("page-token-3", "expired_tok_1"). No hit for comparisons (== !=),
 # identifiers and expressions (s.Weiter, "Bearer " + tok) and empty strings.
 NOREPLY_RE = re.compile(
-    r"(?i)(?<![\w.+-])(?:noreply@anthropic\.com|noreply@google\.com|noreply@github\.com"
+    r"(?i)(?<![\w.+-])(?:noreply@anthropic\.com|noreply@google\.com|noreply@github\.com|noreply@openai\.com"
     r"|[\w.+-]+@users\.noreply\.github\.com)(?!\.?[\w-])")
 RESERVED_DOMAIN_RE = re.compile(
     r"(?i)^(?:[\w-]+\.)*(?:example\.(?:com|org|net)|[\w-]+\.(?:example|test|invalid|localhost))$")
+# name@instance.<unit type> is a systemd unit, a calendar ID is a resource: no address.
+NOT_ADDRESS_DOMAIN_RE = re.compile(
+    r"(?i)^(?:[\w-]+\.)+(?:service|timer|socket|path|target|mount|automount|slice|scope|swap|device)$"
+    r"|^(?:group|import)\.calendar\.google\.com$")
 _PREFIX_AT_START_RE = re.compile(KNOWN_PREFIX)
 _PREFIX_AT_SEGMENT_RE = re.compile(r"(?<=[-_./:=+])" + KNOWN_PREFIX + _TOKEN_CHARS + r"{8,}")
 _FREE_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])" + KNOWN_PREFIX + r"(?P<body>" + _TOKEN_CHARS + r"{8,})")
@@ -274,21 +287,47 @@ _LABEL_KEY_RE = re.compile(r"(?i)label|hint|placeholder|prompt|text|title|messag
 LOCAL_BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)[ \t]+(?P<v>[A-Za-z0-9_\-./+=]{16,})")
 _PLACEHOLDER_RE = re.compile(r"(?i)^<[^>]*>$|\$\{|os\.getenv")
 _FIXTURE_MARKERS = ("synth", "fake", "dummy", "beispiel", "example", "test", "platzhalter",
-                    "changeme", "gueltig", "ungueltig", "xxx")
-_SEGMENT_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
+                    "changeme", "gueltig", "ungueltig", "xxx", "geheim", "schluessel",
+                    "schlüssel", "page", "expired")
+_SEGMENT_RE = re.compile(r"[A-ZÄÖÜ]?[a-zäöüß]+|[A-ZÄÖÜ]+(?![a-zäöüß])|\d+")
+_WORD_PART_RE = re.compile(r"[A-Za-zÄÖÜäöüß]+|\d{1,3}")
 
 
-def _alarm_address(m):
-    """'' for an exempt address (no-reply or reserved domain), else the address."""
-    addr = m.group(0).rstrip(".-")  # RX_EMAIL may take a sentence-final dot along
-    if NOREPLY_RE.fullmatch(addr) or RESERVED_DOMAIN_RE.match(addr.rsplit("@", 1)[1]):
-        return ""
-    return m.group(0)
+def allowed_addresses(cwd=None):
+    """The clone's declared identities, lower-cased: user.email plus the addresses in
+    imprint.allowedIdentity ("Name <address>" or a bare address), the same list
+    .githooks/pre-push reads."""
+    out = set()
+    for line in (_git(["config", "--get", "user.email"], cwd) + "\n"
+                 + _git(["config", "--get-all", "imprint.allowedIdentity"], cwd)).splitlines():
+        m = re.search(r"<([^<>\s]+@[^<>\s]+)>", line) or re.fullmatch(r"\s*(\S+@\S+)\s*", line)
+        if m:
+            out.add(m.group(1).lower())
+    return frozenset(out)
 
 
-def alarm_view(text):
+_SYNTHETIC_ADDRESS_RE = re.compile(r"[A-Za-z0-9]@[A-Za-z0-9]\.[A-Za-z]{2,}")  # a@b.com: a fixture
+
+
+def _exempt_address(addr, allowed=frozenset()):
+    domain = addr.rsplit("@", 1)[1]
+    return bool(NOREPLY_RE.fullmatch(addr) or RESERVED_DOMAIN_RE.match(domain)
+                or NOT_ADDRESS_DOMAIN_RE.match(domain) or _SYNTHETIC_ADDRESS_RE.fullmatch(addr)
+                or addr.lower() in allowed)
+
+
+def alarm_view(text, allowed=frozenset()):
     """Text as the local alarm sees it: exempt addresses removed, all else unchanged."""
-    return RX_EMAIL.sub(_alarm_address, text)
+    def repl(m):
+        addr = m.group(0).rstrip(".-")  # RX_EMAIL may take a sentence-final dot along
+        return "" if _exempt_address(addr, allowed) else m.group(0)
+    return RX_EMAIL.sub(repl, text)
+
+
+def _word_value(v):
+    """Two or more parts, all letters or short digit runs: a name, not a key."""
+    parts = [p for p in re.split(r"[-_./:+=]+", v) if p]
+    return len(parts) >= 2 and all(_WORD_PART_RE.fullmatch(p) for p in parts)
 
 
 def _entropy(v):
@@ -301,14 +340,17 @@ def _known_prefix(v):
     return bool(_PREFIX_AT_START_RE.match(v) or _PREFIX_AT_SEGMENT_RE.search(v))
 
 
-def _fixture(v):
-    """Placeholder, or a value with a fixture segment (word starting with a marker)."""
+def _fixture(v, first_only=False):
+    """Placeholder, or a value with a fixture segment (word starting with a marker);
+    first_only (password keys): only if the value STARTS with a fixture segment, so
+    "synth-password" is a fixture but "mein geheimes Passwort 2024" is not."""
     if len(set(v)) <= 1 or _PLACEHOLDER_RE.search(v):
         return True
     squashed = re.sub(r"[^a-z]", "", v.lower())
     if "changeme" in squashed or "replaceme" in squashed:
         return True
-    return any(seg.lower().startswith(_FIXTURE_MARKERS) for seg in _SEGMENT_RE.findall(v))
+    segments = _SEGMENT_RE.findall(v)[:1] if first_only else _SEGMENT_RE.findall(v)
+    return any(seg.lower().startswith(_FIXTURE_MARKERS) for seg in segments)
 
 
 def _looks_random(v):
@@ -323,17 +365,18 @@ def _kv_alarm(m):
         v = m.group("qv")
         if _known_prefix(v):
             return True
-        if _fixture(v):
+        if _fixture(v, first_only=pw):
             return False
         if pw:
             return len(v) >= 8
-        return not any(c.isspace() for c in v) and _looks_random(v)
+        return not any(c.isspace() for c in v) and not _word_value(v) and _looks_random(v)
     v = m.group("uv")
-    if _fixture(v) and not _known_prefix(v):
+    if _fixture(v, first_only=pw) and not _known_prefix(v):
         return False
     if pw:
         return len(v) >= 8 and any(c.isdigit() for c in v) and "." not in v
-    return len(v) >= 20 and any(c.isalpha() for c in v) and sum(c.isdigit() for c in v) >= 4
+    return (len(v) >= 20 and any(c.isalpha() for c in v) and sum(c.isdigit() for c in v) >= 4
+            and not _word_value(v))
 
 
 def local_alarm(text):
@@ -342,7 +385,7 @@ def local_alarm(text):
         return True
     if any(any(c.isdigit() for c in m.group("body")) for m in _FREE_PREFIX_RE.finditer(text)):
         return True
-    if any(_known_prefix(m.group("v")) or not _fixture(m.group("v"))
+    if any(_known_prefix(m.group("v")) or not (_fixture(m.group("v")) or _word_value(m.group("v")))
            for m in LOCAL_BEARER_RE.finditer(text)):
         return True
     return any(_kv_alarm(m) for m in LOCAL_KV_RE.finditer(text))
@@ -363,9 +406,10 @@ def added_lines(diff_text):
     return "\n".join(out)
 
 
-def leak_found(message, diff_text, file_names):
+def leak_found(message, diff_text, file_names, allowed=frozenset()):
     """Local leak alarm for one change: message, added diff lines and file names."""
-    return any(local_alarm(alarm_view(t)) for t in (message or "", added_lines(diff_text or ""), file_names or ""))
+    return any(local_alarm(alarm_view(t, allowed))
+               for t in (message or "", added_lines(diff_text or ""), file_names or ""))
 
 
 def _git(args, cwd=None):
