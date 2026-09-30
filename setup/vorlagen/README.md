@@ -79,15 +79,26 @@ setup/vorlagen/rechte-anwenden.sh agy
 
 Beide Unterbefehle:
 
-* prüfen zuerst, dass `jq` und `envsubst` vorhanden sind, lösen die Vorlagendatei relativ zum
-  eigenen Skriptpfad auf (nicht zum Arbeitsverzeichnis) und verlangen eine existierende,
-  gültige JSON-Zieldatei (`jq -e .`); `agy` verlangt zusätzlich, dass `PROJEKTE` und
-  `TRUSTED_WORKSPACE` gesetzt und nicht leer sind (`:?`);
-* zeigen den Diff und fragen ausdrücklich nach (`Anwenden? [j/N]`); ohne `j`/`J` bricht das
-  Skript ohne jede Änderung ab;
+* prüfen zuerst, dass `jq`, `envsubst`, `cmp` und `sha256sum` (u. a.) vorhanden sind, lösen die
+  Vorlagendatei relativ zum eigenen Skriptpfad auf (nicht zum Arbeitsverzeichnis) und verlangen
+  eine existierende, gültige JSON-Zieldatei (`jq -e .`); `agy` verlangt zusätzlich, dass
+  `PROJEKTE` und `TRUSTED_WORKSPACE` gesetzt und nicht leer sind (`:?`);
+* brechen ab, wenn ein Ziel (nach Symlink-Auflösung) in den eigenen Checkout dieses Skripts
+  zeigt — ein Symlink von `~/.gemini/antigravity-cli/statusline.py` (oder `~/.claude/settings.json`)
+  in eine versionierte Datei im Repository würde sonst genau diese Datei überschreiben, statt
+  der persönlichen Konfiguration;
+* zeigen für jedes in diesem Aufruf anstehende Ziel den Diff und fragen einmal für alle
+  zusammen ausdrücklich nach (`Anwenden? [j/N]`); ohne `j`/`J` bricht das Skript ohne jede
+  Änderung ab, auch wenn mehrere Ziele etwas zu tun hätten;
+* halten bei `claude`/`agy` den `sha256sum` der jeweiligen `settings.json` schon beim
+  Zusammenbauen der neuen Fassung fest und prüfen ihn nach der Rückfrage erneut — ändert sich
+  die Zieldatei währenddessen (ein anderer Prozess, ein gleichzeitiges "immer erlauben"), bricht
+  das Skript ohne jede Änderung ab, statt eine Sicherung des schon veralteten Standes anzulegen;
 * legen bei Zustimmung zuerst eine Sicherung mit sekundengenauem Zeitstempel neben der
-  Zieldatei an (`cp -p -n`), erhalten die Rechte der Zieldatei (`chmod --reference`) und
-  übernehmen die neue Datei erst danach per atomarem `mv`;
+  Zieldatei an (`cp -p -n`, bei einem fehlschlagenden `cp` wird eine dabei schon unvollständig
+  angelegte Sicherung wieder entfernt), bestätigen sie per `cmp -s` gegen das Original, erhalten
+  die Rechte der Zieldatei (`chmod --reference`) und übernehmen die neue Datei erst danach per
+  atomarem `mv`;
 * schreiben, wenn die Zieldatei ein Symlink ist, auf die Datei, auf die er zeigt
   (`readlink -f`) — der Symlink selbst bleibt erhalten.
 
@@ -101,9 +112,12 @@ zur Plausibilität, dass `permissions.deny` im Ergebnis nicht leer ist.
 
 `agy` ersetzt `~/.gemini/antigravity-cli/settings.json` komplett durch `agy-settings.json` mit
 `envsubst` für `${PROJEKTE}`/`${TRUSTED_WORKSPACE}` (validiert danach per `jq -e .`, dass das
-Ergebnis gültiges JSON ist und kein unersetztes `${` mehr enthält) und installiert
-`setup/vorlagen/statusline.py` per `install -m 0755` nach
-`~/.gemini/antigravity-cli/statusline.py`.
+Ergebnis gültiges JSON ist und kein unersetztes `${` mehr enthält). `statusline.py` wird davon
+unabhängig behandelt, nicht nur dann, wenn `settings.json` sich ändert: Fehlt
+`~/.gemini/antigravity-cli/statusline.py`, installiert das Skript sie ohne Rückfrage per
+`install -m 0755` (dabei wird nichts überschrieben); existiert sie schon und weicht von
+`setup/vorlagen/statusline.py` ab, zeigt das Skript auch dafür einen eigenen Diff und fragt mit
+derselben Rückfrage wie `settings.json` nach — eine Vorlage bestätigt die andere nicht mit.
 
 Laufende agy-Hubs schreiben eine geänderte `settings.json` sonst zurück (gemessen 2026-09-30,
 00:49; die beendete Prozesszeile lautete "…/.gemini/bin/agy --hub …"). `agy` zeigt dafür vor dem
@@ -123,18 +137,33 @@ setup/vorlagen/rechte-anwenden.sh rueckbau <Zeitstempel>
 ```
 
 `claude` und `agy` erzeugen je einen eigenen Zeitstempel (zwei getrennte Aufrufe, siehe
-„Anwenden" oben, jeweils in der letzten Ausgabezeile). `rueckbau <Zeitstempel>` spielt zurück,
-was zu genau diesem Zeitstempel tatsächlich gesichert wurde — `~/.claude/settings.json`, wenn
-dazu ein `claude`-Lauf existiert, `~/.gemini/antigravity-cli/settings.json`, wenn dazu ein
-`agy`-Lauf existiert — und bricht ohne jede Änderung ab, wenn zu diesem Zeitstempel gar keine
-Sicherung existiert. `statusline.py` gehört nur zu einem `agy`-Lauf: nur wenn zum selben
-Zeitstempel auch `settings.json.bak-<Zeitstempel>` von `agy` existiert, entscheidet das Skript,
-ob `statusline.py` zurückgespielt wird (Sicherung vorhanden) oder entfernt (existierte vor dem
-Anwenden nicht) — ein `rueckbau` zu einem `claude`-Zeitstempel fasst `statusline.py` gar nicht
-erst an. Auch hier zuerst der Hub-Hinweis: ein laufender Hub würde die soeben zurückgespielte
-Sicherung sonst erneut mit dem zwischenzeitlich angewendeten Stand überschreiben.
+„Anwenden" oben, jeweils in der letzten Ausgabezeile). `rueckbau <Zeitstempel>` prüft zuerst für
+`~/.claude/settings.json`, `~/.gemini/antigravity-cli/settings.json` und
+`~/.gemini/antigravity-cli/statusline.py` unabhängig voneinander, ob dazu tatsächlich eine
+Sicherung existiert (nicht leer, bei den JSON-Zielen zusätzlich gültiges JSON) — eine Datei, die
+`agy` frisch installiert hat (keine Sicherung, weil vorher nichts da war), erkennt es an einer
+eigenen Marker-Datei. Bricht ohne jede Änderung ab, wenn zu diesem Zeitstempel gar nichts davon
+existiert oder eine vorhandene Sicherung leer oder ungültig ist. Zeigt dann für jedes
+betroffene Ziel den Diff (bzw. bei einer Entfernung einen Hinweis) und fragt einmal für alle
+zusammen nach (`Anwenden? [j/N]`); erst danach sichert es den *aktuellen* Stand jeder
+betroffenen Datei unter einem eigenen, neuen Zeitstempel (den es am Ende ausgibt — auch dieser
+Rückbau lässt sich damit per `rueckbau` rückgängig machen) und spielt per Zwischendatei und
+atomarem `mv` zurück, mit erhaltenen Dateirechten (`chmod --reference`). Für „existierte vor dem
+Anwenden nicht" verschiebt es die Datei auf ihren eigenen Sicherungsnamen, statt sie zu löschen.
+Auch hier zuerst der Hub-Hinweis, vor der Rückfrage: ein laufender Hub würde die soeben
+zurückgespielte Sicherung sonst erneut mit dem zwischenzeitlich angewendeten Stand überschreiben.
 
 ## Testskript
+
+`rechte-anwenden-test.sh` prüft `rechte-anwenden.sh` selbst (nicht die angewendeten Vorlagen):
+ein scheiterndes `cp` bei der Sicherung, eine Änderung der Zieldatei während der Diff-Rückfrage,
+ein Abbruch per `HUP`/`INT`/`TERM` während der Rückfrage, dass `statusline.py` unabhängig von
+`settings.json` installiert wird, ein Symlink-Ziel in den eigenen Checkout und ein
+vollständiger `rueckbau`-Rundlauf. Jedes Szenario legt sein eigenes Fake-HOME per `mktemp -d`
+an, ändert nie eine echte Datei unter dem eigenen `HOME` und räumt sich selbst auf; die dafür
+nötigen Stub-Werkzeuge (`cp`, `diff`) löst es zur Laufzeit über `command -v` auf, statt einen
+Rechnerpfad fest einzucodieren. `.github/workflows/check.yml` führt es bei jedem `check`-Lauf
+mit aus.
 
 `agy-rechte-test.sh` prüft eine bereits angewendete `agy-settings.json` gegen die Fälle T1–T8
 plus T6b (Lesen erlaubt/verweigert, Schreiben erlaubt/verweigert, `systemctl`-Teilfreigabe, `git

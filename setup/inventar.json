@@ -31,6 +31,7 @@
     "quelle": "setup/vorlagen/statusline.py",
     "ziel": "${HOME}/.gemini/antigravity-cli/statusline.py",
     "rechte": true,
-    "beschreibung": "Statuszeilen-Skript für agy; agy führt es aus, wer es schreibt führt darüber Code aus, deshalb rechte:true; nur der Mensch kopiert es, siehe setup/vorlagen/README.md"
+    "anwenden": "ersetzen",
+    "beschreibung": "Statuszeilen-Skript für agy; agy führt es aus, wer es schreibt führt darüber Code aus, deshalb rechte:true; nur der Mensch kopiert es, siehe setup/vorlagen/README.md. Wird von rechte-anwenden.sh agy per install -m 0755 installiert."
   }
 ]
