@@ -7,7 +7,14 @@
 # Aufruf:
 #   setup/vorlagen/rechte-anwenden.sh claude
 #   setup/vorlagen/rechte-anwenden.sh agy
+#   setup/vorlagen/rechte-anwenden.sh agy-statusline
 #   setup/vorlagen/rechte-anwenden.sh rueckbau <Zeitstempel>
+#
+# Die drei Anwenden-Unterbefehle sind die Aufrufe, die "imprint-dev setup
+# --apply" für die drei rechte:true-Einträge in setup/inventar.json druckt
+# (claude-rechte-vorlage, agy-rechte-vorlage, agy-statusline — der Aufruf ist
+# jeweils die id ohne die Endung "-rechte-vorlage"); --apply schreibt so ein
+# Ziel nie selbst, siehe setup/vorlagen/README.md.
 #
 # claude mergt den permissions-Block aus setup/vorlagen/claude-rechte.json in
 # ${HOME}/.claude/settings.json (jq -s '.[0] * .[1]', ein tiefer Merge; dabei
@@ -26,15 +33,24 @@
 # setup/vorlagen/agy-settings.json neu (envsubst für ${PROJEKTE} und
 # ${TRUSTED_WORKSPACE}, mit derselben sha256sum-Race-Prüfung wie oben) und
 # behandelt setup/vorlagen/statusline.py (Ziel
-# ${HOME}/.gemini/antigravity-cli/statusline.py) unabhängig davon: fehlt sie,
-# installiert das Skript sie ohne Rückfrage (nichts wird dabei überschrieben);
-# existiert sie schon und weicht ab, zeigt das Skript auch dafür einen
-# eigenen Diff und fragt separat nach — eine Vorlage bestätigt die andere
-# nicht mit. Beide Vorbedingungen (u. a., dass keines der beiden Ziele per
-# Symlink in den eigenen Checkout dieses Skripts zeigt) werden geprüft,
-# bevor irgendetwas geschrieben wird, insbesondere vor einem mv der
-# settings.json — eine kaputte statusline.py-Vorbedingung darf keinen schon
-# geänderten settings.json-Stand zurücklassen.
+# ${HOME}/.gemini/antigravity-cli/statusline.py) unabhängig davon, über
+# dieselbe Prüfung/Diff/Rückfrage-Logik wie der eigenständige Unterbefehl
+# agy-statusline (siehe unten): eine Vorlage bestätigt die andere nicht mit.
+# Beide Vorbedingungen (u. a., dass keines der beiden Ziele per Symlink in
+# den eigenen Checkout dieses Skripts zeigt, und dass beide Ziele reguläre,
+# beschreibbare Dateien bzw. Verzeichnisse sind) werden geprüft, bevor
+# irgendetwas geschrieben wird, insbesondere vor einem mv der settings.json
+# — eine kaputte statusline.py-Vorbedingung darf keinen schon geänderten
+# settings.json-Stand zurücklassen.
+#
+# agy-statusline installiert nur setup/vorlagen/statusline.py nach
+# ${HOME}/.gemini/antigravity-cli/statusline.py, mit denselben Prüfungen wie
+# der statusline.py-Teil von agy: fehlt die Zieldatei, zeigt das Skript den
+# ganzen neuen Inhalt als Diff gegen /dev/null und fragt trotzdem nach —
+# eine neu zu installierende Datei wird nicht mehr stillschweigend anwendet
+# (Leitungsentscheid, Runde 6); existiert sie schon und weicht ab, zeigt es
+# den gewohnten Diff. Beide Fälle bekommen dieselbe sha256sum-Race-Prüfung
+# zwischen Rückfrage und Schreiben wie claude/agy.
 #
 # Beide Unterbefehle zeigen vor jeder Änderung den Diff und fragen
 # ausdrücklich nach; ohne "j"/"J" bricht das Skript ohne jede Änderung ab,
@@ -66,7 +82,23 @@
 # nicht" verschiebt es die Datei auf ihren eigenen Sicherungsnamen, statt
 # sie zu löschen. rueckbau bricht ohne jede Änderung ab, wenn zu
 # <Zeitstempel> gar keine Sicherung existiert oder eine vorhandene
-# Sicherung leer oder (bei JSON-Zielen) kein gültiges JSON ist.
+# Sicherung leer oder (bei JSON-Zielen) kein gültiges JSON mit genau einem
+# Dokument ist (jq -s 'length==1', wie bei claude/agy). Wie claude/agy hält
+# rueckbau den sha256sum jedes tatsächlich zurückzuspielenden Ziels schon
+# beim Diff fest und prüft ihn nach der Rückfrage erneut, bevor es etwas
+# schreibt; und wie claude/agy bricht es ab, wenn ein Ziel (nach
+# Symlink-Auflösung) in den eigenen Checkout zeigt oder keine reguläre,
+# beschreibbare Datei ist.
+#
+# Kamen claude und agy aus zwei getrennten Aufrufen mit UNTERSCHIEDLICHEN
+# Zeitstempeln (möglich, wenn sie nicht in derselben Sekunde liefen) und
+# sollen beide zurückgespielt werden: den JÜNGEREN (späteren) Zeitstempel
+# zuerst zurückspielen, den älteren danach. rueckbau legt bei jedem Aufruf
+# selbst eine neue Sicherung des gerade aktuellen Standes an; in der
+# falschen Reihenfolge (älterer zuerst) könnte diese eigene, in Echtzeit
+# gebildete Sicherung zufällig genau auf den noch ausstehenden jüngeren
+# Zeitstempel fallen und von jenem zweiten Aufruf fälschlich als dessen
+# Sicherung gelesen werden (gemessen in rechte-anwenden-test.sh, T6).
 #
 # Laufende agy-Hubs schreiben eine soeben geänderte agy-settings.json sonst
 # zurück (gemessen 2026-09-30). Das Skript tötet dafür keinen Prozess selbst
@@ -137,13 +169,22 @@ need_apply_tools() {
   need mktemp readlink chmod diff cp mv grep install cmp sha256sum
 }
 
-# Bei einem Symlink wird auf die Datei geschrieben, auf die er zeigt
-# (readlink -f); der Symlink selbst bleibt unverändert. Kein Symlink: der
-# Pfad bleibt wie er ist.
+# Löst den GANZEN Zielpfad kanonisch auf (readlink -f), nicht nur den Fall,
+# dass die Zieldatei selbst ein Symlink ist — ein Zwischenverzeichnis wie
+# ~/.claude kann ebenso gut ein Symlink sein (z. B. in eine Kopie dieses
+# Checkouts), ohne dass die Datei darin selbst ein Symlink ist; ein Test nur
+# auf "[ -L "$ziel" ]" würde diesen Fall übersehen. Der Aufrufer prüft den
+# zurückgegebenen Pfad erst danach mit pruefe_nicht_checkout — nie vorher.
+# readlink -f schlägt fehl, wenn ein Verzeichnis AUF DEM WEG zum Ziel (nicht
+# nur die Zieldatei selbst) noch gar nicht existiert (z. B. ~/.gemini fehlt
+# komplett, weil agy nie angewendet wurde); in dem Fall gibt es nichts zum
+# Auflösen und damit auch keinen Symlink, über den ein Angriff liefe — der
+# unveränderte, unaufgelöste Pfad ist dann sicher genug, um ihn weiterzugeben
+# (der Aufrufer erkennt "existiert nicht" ohnehin selbst über [ -e/-f ]).
 resolve_ziel() {
-  local ziel="$1"
-  if [ -L "$ziel" ]; then
-    readlink -f "$ziel"
+  local ziel="$1" resolved
+  if resolved=$(readlink -f "$ziel" 2>/dev/null); then
+    printf '%s\n' "$resolved"
   else
     printf '%s\n' "$ziel"
   fi
@@ -162,6 +203,31 @@ pruefe_nicht_checkout() {
       die "Ziel zeigt (per Symlink) in den eigenen Checkout, nicht in \$HOME: $resolved"
       ;;
   esac
+}
+
+# pruefe_ziel_ok <aufgelöster Pfad>: bricht ab, wenn eine schon vorhandene
+# Zieldatei keine reguläre Datei ist (z. B. ein Verzeichnis, FIFO oder
+# Gerätedatei) oder nicht beschreibbar ist — beides würde sichern/mv bzw.
+# install erst mitten in der Anwendung scheitern lassen, nachdem für einen
+# anderen Eintrag desselben Aufrufs (z. B. settings.json bei "agy") schon
+# etwas geschrieben wurde. Fehlt die Zieldatei noch (z. B. eine frisch zu
+# installierende statusline.py), muss stattdessen ihr Zielverzeichnis
+# existieren und beschreibbar sein.
+pruefe_ziel_ok() {
+  local resolved="$1"
+  if [ -e "$resolved" ]; then
+    if [ ! -f "$resolved" ]; then
+      die "Ziel ist keine reguläre Datei: $resolved"
+    fi
+    if [ ! -w "$resolved" ]; then
+      die "Ziel ist nicht beschreibbar: $resolved"
+    fi
+  else
+    local verz="${resolved%/*}"
+    if [ ! -d "$verz" ] || [ ! -w "$verz" ]; then
+      die "Zielverzeichnis fehlt oder ist nicht beschreibbar: $verz"
+    fi
+  fi
 }
 
 hub_hinweis() {
@@ -232,6 +298,122 @@ sichern() {
   SICHERN_BAK="$bak"
 }
 
+need_statusline_tools() {
+  need mktemp readlink chmod diff cp mv install cmp sha256sum
+}
+
+# Geteilte statusline.py-Logik für "agy" und den eigenständigen Unterbefehl
+# "agy-statusline" — eine Vorlage, ein Codepfad, damit beide nie
+# auseinanderlaufen. Ergebnisse liegen in den globalen Variablen
+# STATUSLINE_QUELLE/STATUSLINE_RESOLVED/STATUSLINE_EXISTIERTE/STATUSLINE_VOR_SHA.
+STATUSLINE_QUELLE=""
+STATUSLINE_RESOLVED=""
+STATUSLINE_EXISTIERTE=0
+STATUSLINE_VOR_SHA=""
+
+# statusline_vorbereiten: löst Quelle/Ziel auf und prüft beide
+# Vorbedingungen (nicht der eigene Checkout, reguläre/beschreibbare Datei
+# bzw. beschreibbares Zielverzeichnis) — VOR jeder Änderung, auch vor einem
+# mv der settings.json in "agy".
+statusline_vorbereiten() {
+  STATUSLINE_QUELLE="$script_dir/statusline.py"
+  if [ ! -f "$STATUSLINE_QUELLE" ]; then
+    die "Vorlage fehlt: $STATUSLINE_QUELLE"
+  fi
+  STATUSLINE_RESOLVED=$(resolve_ziel "${HOME}/.gemini/antigravity-cli/statusline.py")
+  pruefe_nicht_checkout "$STATUSLINE_RESOLVED"
+  pruefe_ziel_ok "$STATUSLINE_RESOLVED"
+  if [ -e "$STATUSLINE_RESOLVED" ]; then
+    STATUSLINE_EXISTIERTE=1
+    STATUSLINE_VOR_SHA=$(sha256sum "$STATUSLINE_RESOLVED") || die "sha256sum fehlgeschlagen: $STATUSLINE_RESOLVED"
+  else
+    STATUSLINE_EXISTIERTE=0
+    STATUSLINE_VOR_SHA=""
+  fi
+}
+
+# statusline_diff_zeigen: zeigt Diff bzw. (Datei fehlt) den ganzen neuen
+# Inhalt als Diff gegen /dev/null und gibt 0 zurück, wenn eine Rückfrage
+# nötig ist. Eine fehlende Datei braucht seit Runde 6 IMMER eine Rückfrage
+# (Leitungsentscheid) — sie wird nicht mehr stillschweigend installiert.
+statusline_diff_zeigen() {
+  if [ "$STATUSLINE_EXISTIERTE" -eq 1 ]; then
+    echo "Ersetzen von $STATUSLINE_RESOLVED durch $STATUSLINE_QUELLE:"
+    zeige_diff "$STATUSLINE_RESOLVED" "$STATUSLINE_QUELLE"
+    return $?
+  fi
+  echo "Neu installieren: $STATUSLINE_RESOLVED (aus $STATUSLINE_QUELLE, Datei fehlt bisher):"
+  diff -u /dev/null "$STATUSLINE_QUELLE" || true
+  return 0
+}
+
+# statusline_race_pruefen: nach der Rückfrage, vor jedem Schreiben erneut
+# geprüft — dieselbe sha256sum-Race-Prüfung wie bei settings.json in
+# claude/agy, auf beide Richtungen: eine Datei, die während der Rückfrage
+# geändert wurde, oder eine, die währenddessen neu aufgetaucht ist, obwohl
+# sie vorher fehlte.
+statusline_race_pruefen() {
+  if [ "$STATUSLINE_EXISTIERTE" -eq 1 ]; then
+    if [ ! -e "$STATUSLINE_RESOLVED" ]; then
+      die "$STATUSLINE_RESOLVED wurde während der Rückfrage entfernt — abgebrochen ohne Änderung"
+    fi
+    local nach_sha
+    nach_sha=$(sha256sum "$STATUSLINE_RESOLVED") || die "sha256sum fehlgeschlagen: $STATUSLINE_RESOLVED"
+    if [ "$nach_sha" != "$STATUSLINE_VOR_SHA" ]; then
+      die "$STATUSLINE_RESOLVED wurde während der Rückfrage geändert — abgebrochen ohne Änderung"
+    fi
+  else
+    if [ -e "$STATUSLINE_RESOLVED" ]; then
+      die "$STATUSLINE_RESOLVED wurde während der Rückfrage angelegt — abgebrochen ohne Änderung"
+    fi
+  fi
+}
+
+# statusline_schreiben <ts>: sichert (falls vorhanden) und schreibt per
+# Zwischendatei und atomarem mv/install; setzt bei einer Neuinstallation den
+# Marker für rueckbau.
+statusline_schreiben() {
+  local ts="$1"
+  if [ "$STATUSLINE_EXISTIERTE" -eq 1 ]; then
+    local sbak
+    sichern "$STATUSLINE_RESOLVED" "$ts"
+    sbak="$SICHERN_BAK"
+    statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+    install -m 0755 "$STATUSLINE_QUELLE" "$statusline_tmp" || die "install fehlgeschlagen: $statusline_tmp"
+    mv "$statusline_tmp" "$STATUSLINE_RESOLVED" || die "mv fehlgeschlagen: $STATUSLINE_RESOLVED"
+    statusline_tmp=""
+    echo "Angewendet. Sicherung: $sbak"
+  else
+    if [ -e "${STATUSLINE_RESOLVED}.installed-${ts}" ]; then
+      die "Marker existiert schon: ${STATUSLINE_RESOLVED}.installed-${ts}"
+    fi
+    statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+    install -m 0755 "$STATUSLINE_QUELLE" "$statusline_tmp" || die "install fehlgeschlagen: $statusline_tmp"
+    mv "$statusline_tmp" "$STATUSLINE_RESOLVED" || die "mv fehlgeschlagen: $STATUSLINE_RESOLVED"
+    statusline_tmp=""
+    : > "${STATUSLINE_RESOLVED}.installed-${ts}" || die "Marker fehlgeschlagen: ${STATUSLINE_RESOLVED}.installed-${ts}"
+    echo "Installiert (fehlte): $STATUSLINE_RESOLVED"
+  fi
+}
+
+cmd_agy_statusline() {
+  need_statusline_tools
+  statusline_vorbereiten
+
+  if statusline_diff_zeigen; then
+    bestaetigen_oder_abbrechen
+  else
+    exit 0
+  fi
+
+  statusline_race_pruefen
+
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  statusline_schreiben "$ts"
+  echo "Zeitstempel für rueckbau: $ts"
+}
+
 cmd_claude() {
   need_apply_tools
 
@@ -244,8 +426,8 @@ cmd_claude() {
   if [ ! -f "$ziel" ]; then
     die "Zieldatei fehlt: $ziel"
   fi
-  if ! jq -e . "$ziel" >/dev/null 2>&1; then
-    die "Zieldatei ist kein gültiges JSON: $ziel"
+  if ! jq -e -s 'length==1' "$ziel" >/dev/null 2>&1; then
+    die "Zieldatei ist kein gültiges JSON mit genau einem Dokument: $ziel"
   fi
 
   local resolved
@@ -303,8 +485,8 @@ cmd_agy() {
   if [ ! -f "$ziel" ]; then
     die "Zieldatei fehlt: $ziel"
   fi
-  if ! jq -e . "$ziel" >/dev/null 2>&1; then
-    die "Zieldatei ist kein gültiges JSON: $ziel"
+  if ! jq -e -s 'length==1' "$ziel" >/dev/null 2>&1; then
+    die "Zieldatei ist kein gültiges JSON mit genau einem Dokument: $ziel"
   fi
 
   : "${PROJEKTE:?PROJEKTE muss gesetzt sein}"
@@ -313,19 +495,13 @@ cmd_agy() {
   local resolved
   resolved=$(resolve_ziel "$ziel")
   pruefe_nicht_checkout "$resolved"
+  pruefe_ziel_ok "$resolved"
 
-  local statusline_quelle="$script_dir/statusline.py"
-  if [ ! -f "$statusline_quelle" ]; then
-    die "Vorlage fehlt: $statusline_quelle"
-  fi
-  local statusline_ziel="${HOME}/.gemini/antigravity-cli/statusline.py"
-  local statusline_resolved
-  statusline_resolved=$(resolve_ziel "$statusline_ziel")
-  # Vorbedingungen für statusline.py werden hier geprüft, VOR jedem
-  # Schreiben — insbesondere vor dem mv der settings.json unten: ein
-  # Symlink von statusline.py in den eigenen Checkout darf keinen schon
-  # geänderten settings.json-Stand zurücklassen.
-  pruefe_nicht_checkout "$statusline_resolved"
+  # statusline.py-Vorbedingungen (Checkout-Symlink, reguläre/beschreibbare
+  # Datei) werden hier geprüft, VOR jedem Schreiben — insbesondere vor dem
+  # mv der settings.json unten: eine kaputte statusline.py-Vorbedingung darf
+  # keinen schon geänderten settings.json-Stand zurücklassen.
+  statusline_vorbereiten
 
   hub_hinweis
 
@@ -339,8 +515,8 @@ cmd_agy() {
     envsubst '${HOME} ${PROJEKTE} ${TRUSTED_WORKSPACE}' \
     < "$vorlage" > "$tmp" || die "envsubst fehlgeschlagen"
 
-  if ! jq -e . "$tmp" >/dev/null 2>&1; then
-    die "envsubst-Ergebnis ist kein gültiges JSON — PROJEKTE/TRUSTED_WORKSPACE prüfen"
+  if ! jq -e -s 'length==1' "$tmp" >/dev/null 2>&1; then
+    die "envsubst-Ergebnis ist kein gültiges JSON mit genau einem Dokument — PROJEKTE/TRUSTED_WORKSPACE prüfen"
   fi
   if grep -qF '${' "$tmp"; then
     die "unersetztes \${ im Ergebnis — PROJEKTE/TRUSTED_WORKSPACE prüfen"
@@ -353,14 +529,11 @@ cmd_agy() {
     settings_frage=1
   fi
 
-  # statusline.py unabhängig von settings.json behandelt: fehlt sie, wird
-  # sie unten ohne Rückfrage installiert (nichts wird dabei überschrieben).
-  # Existiert sie schon, zeigt das Skript auch dafür einen eigenen Diff.
-  if [ -e "$statusline_resolved" ]; then
-    echo "Ersetzen von $statusline_resolved durch $statusline_quelle:"
-    if zeige_diff "$statusline_resolved" "$statusline_quelle"; then
-      statusline_frage=1
-    fi
+  # statusline.py unabhängig von settings.json behandelt, über denselben
+  # Codepfad wie der eigenständige Unterbefehl agy-statusline: eine
+  # fehlende Datei braucht seit Runde 6 ebenfalls eine Rückfrage.
+  if statusline_diff_zeigen; then
+    statusline_frage=1
   fi
 
   # Eine einzige Rückfrage für alles, was in diesem Aufruf ansteht — vor
@@ -377,14 +550,22 @@ cmd_agy() {
       die "$resolved wurde während der Rückfrage geändert — abgebrochen ohne Änderung"
     fi
   fi
+  if [ "$statusline_frage" -eq 1 ]; then
+    statusline_race_pruefen
+  fi
 
   local ts
   ts="$(date +%Y%m%d-%H%M%S)"
   if [ "$settings_frage" -eq 1 ] && [ -e "${resolved}.bak-${ts}" ]; then
     die "Sicherung existiert schon: ${resolved}.bak-${ts}"
   fi
-  if [ "$statusline_frage" -eq 1 ] && [ -e "${statusline_resolved}.bak-${ts}" ]; then
-    die "Sicherung existiert schon: ${statusline_resolved}.bak-${ts}"
+  if [ "$statusline_frage" -eq 1 ]; then
+    if [ "$STATUSLINE_EXISTIERTE" -eq 1 ] && [ -e "${STATUSLINE_RESOLVED}.bak-${ts}" ]; then
+      die "Sicherung existiert schon: ${STATUSLINE_RESOLVED}.bak-${ts}"
+    fi
+    if [ "$STATUSLINE_EXISTIERTE" -eq 0 ] && [ -e "${STATUSLINE_RESOLVED}.installed-${ts}" ]; then
+      die "Marker existiert schon: ${STATUSLINE_RESOLVED}.installed-${ts}"
+    fi
   fi
 
   local ausgegeben_ts=0
@@ -401,26 +582,14 @@ cmd_agy() {
     ausgegeben_ts=1
   fi
 
-  if [ ! -e "$statusline_resolved" ]; then
-    install -m 0755 "$statusline_quelle" "$statusline_resolved" || die "install fehlgeschlagen: $statusline_resolved"
-    : > "${statusline_resolved}.installed-${ts}" || die "Marker fehlgeschlagen: ${statusline_resolved}.installed-${ts}"
-    echo "Installiert (fehlte): $statusline_resolved"
-    [ "$ausgegeben_ts" -eq 1 ] || { echo "Zeitstempel für rueckbau: $ts"; ausgegeben_ts=1; }
-  elif [ "$statusline_frage" -eq 1 ]; then
-    local sbak
-    sichern "$statusline_resolved" "$ts"
-    sbak="$SICHERN_BAK"
-    statusline_tmp=$(mktemp "${statusline_resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
-    install -m 0755 "$statusline_quelle" "$statusline_tmp" || die "install fehlgeschlagen: $statusline_tmp"
-    mv "$statusline_tmp" "$statusline_resolved" || die "mv fehlgeschlagen: $statusline_resolved"
-    statusline_tmp=""
-    echo "Angewendet. Sicherung: $sbak"
+  if [ "$statusline_frage" -eq 1 ]; then
+    statusline_schreiben "$ts"
     [ "$ausgegeben_ts" -eq 1 ] || { echo "Zeitstempel für rueckbau: $ts"; ausgegeben_ts=1; }
   fi
 }
 
 cmd_rueckbau() {
-  need cp readlink jq mktemp chmod diff mv
+  need cp readlink jq mktemp chmod diff mv cmp sha256sum
 
   local ts="${1:?Zeitstempel fehlt (rechte-anwenden.sh rueckbau <Zeitstempel>)}"
 
@@ -428,30 +597,34 @@ cmd_rueckbau() {
 
   local claude_resolved claude_bak
   claude_resolved=$(resolve_ziel "${HOME}/.claude/settings.json")
+  pruefe_nicht_checkout "$claude_resolved"
   claude_bak="${claude_resolved}.bak-${ts}"
 
   local agy_resolved agy_bak
   agy_resolved=$(resolve_ziel "${HOME}/.gemini/antigravity-cli/settings.json")
+  pruefe_nicht_checkout "$agy_resolved"
   agy_bak="${agy_resolved}.bak-${ts}"
 
   local statusline_resolved statusline_bak statusline_marker
   statusline_resolved=$(resolve_ziel "${HOME}/.gemini/antigravity-cli/statusline.py")
+  pruefe_nicht_checkout "$statusline_resolved"
   statusline_bak="${statusline_resolved}.bak-${ts}"
   statusline_marker="${statusline_resolved}.installed-${ts}"
 
   local restore_claude=0 restore_agy=0 restore_statusline=0 remove_statusline=0
 
   # Jede Sicherung wird geprüft, BEVOR irgendetwas angefasst wird: leer
-  # oder (bei den JSON-Zielen) kein gültiges JSON zählt nicht als
-  # Sicherung, sondern bricht den ganzen Rückbau ohne jede Änderung ab.
+  # oder (bei den JSON-Zielen) kein gültiges JSON mit genau einem Dokument
+  # zählt nicht als Sicherung, sondern bricht den ganzen Rückbau ohne jede
+  # Änderung ab.
   if [ -f "$claude_bak" ]; then
     [ -s "$claude_bak" ] || die "Sicherung ist leer, kein Rückbau: $claude_bak"
-    jq -e . "$claude_bak" >/dev/null 2>&1 || die "Sicherung ist kein gültiges JSON, kein Rückbau: $claude_bak"
+    jq -e -s 'length==1' "$claude_bak" >/dev/null 2>&1 || die "Sicherung ist kein gültiges JSON mit genau einem Dokument, kein Rückbau: $claude_bak"
     restore_claude=1
   fi
   if [ -f "$agy_bak" ]; then
     [ -s "$agy_bak" ] || die "Sicherung ist leer, kein Rückbau: $agy_bak"
-    jq -e . "$agy_bak" >/dev/null 2>&1 || die "Sicherung ist kein gültiges JSON, kein Rückbau: $agy_bak"
+    jq -e -s 'length==1' "$agy_bak" >/dev/null 2>&1 || die "Sicherung ist kein gültiges JSON mit genau einem Dokument, kein Rückbau: $agy_bak"
     restore_agy=1
   fi
   if [ -f "$statusline_bak" ]; then
@@ -468,24 +641,72 @@ cmd_rueckbau() {
     die "keine Sicherung zu Zeitstempel $ts gefunden ($claude_bak, $agy_bak, $statusline_bak)"
   fi
 
+  # Ziele, die dieser Aufruf tatsächlich zurückspielt, müssen VORAB reguläre,
+  # beschreibbare Dateien sein — sonst könnte claude schon zurückgespielt
+  # sein, bevor agy an einer unbeschreibbaren Zieldatei scheitert.
+  [ "$restore_claude" -eq 1 ] && pruefe_ziel_ok "$claude_resolved"
+  [ "$restore_agy" -eq 1 ] && pruefe_ziel_ok "$agy_resolved"
+
   echo "Rückbau zu Zeitstempel $ts:"
+  local claude_vor_sha="" agy_vor_sha="" statusline_vor_sha=""
   if [ "$restore_claude" -eq 1 ]; then
     echo "-- $claude_resolved:"
     diff -u "$claude_resolved" "$claude_bak" || true
+    # sha256sum schon jetzt festgehalten (wie bei claude/agy beim Anwenden),
+    # damit eine Änderung zwischen dieser Anzeige und dem mv unten erkannt
+    # wird, statt eine Sicherung über einen inzwischen veralteten Stand zu
+    # legen.
+    if [ -e "$claude_resolved" ]; then
+      claude_vor_sha=$(sha256sum "$claude_resolved") || die "sha256sum fehlgeschlagen: $claude_resolved"
+    fi
   fi
   if [ "$restore_agy" -eq 1 ]; then
     echo "-- $agy_resolved:"
     diff -u "$agy_resolved" "$agy_bak" || true
+    if [ -e "$agy_resolved" ]; then
+      agy_vor_sha=$(sha256sum "$agy_resolved") || die "sha256sum fehlgeschlagen: $agy_resolved"
+    fi
   fi
   if [ "$restore_statusline" -eq 1 ]; then
     echo "-- $statusline_resolved:"
     diff -u "$statusline_resolved" "$statusline_bak" || true
+    if [ -e "$statusline_resolved" ]; then
+      statusline_vor_sha=$(sha256sum "$statusline_resolved") || die "sha256sum fehlgeschlagen: $statusline_resolved"
+    fi
   fi
   if [ "$remove_statusline" -eq 1 ]; then
     echo "-- $statusline_resolved wird entfernt (existierte vor dem zugehörigen Anwenden nicht)"
   fi
 
   bestaetigen_oder_abbrechen
+
+  if [ "$restore_claude" -eq 1 ]; then
+    local claude_nach_sha=""
+    if [ -e "$claude_resolved" ]; then
+      claude_nach_sha=$(sha256sum "$claude_resolved") || die "sha256sum fehlgeschlagen: $claude_resolved"
+    fi
+    if [ "$claude_nach_sha" != "$claude_vor_sha" ]; then
+      die "$claude_resolved wurde während der Rückfrage geändert — abgebrochen ohne Änderung"
+    fi
+  fi
+  if [ "$restore_agy" -eq 1 ]; then
+    local agy_nach_sha=""
+    if [ -e "$agy_resolved" ]; then
+      agy_nach_sha=$(sha256sum "$agy_resolved") || die "sha256sum fehlgeschlagen: $agy_resolved"
+    fi
+    if [ "$agy_nach_sha" != "$agy_vor_sha" ]; then
+      die "$agy_resolved wurde während der Rückfrage geändert — abgebrochen ohne Änderung"
+    fi
+  fi
+  if [ "$restore_statusline" -eq 1 ]; then
+    local statusline_nach_sha=""
+    if [ -e "$statusline_resolved" ]; then
+      statusline_nach_sha=$(sha256sum "$statusline_resolved") || die "sha256sum fehlgeschlagen: $statusline_resolved"
+    fi
+    if [ "$statusline_nach_sha" != "$statusline_vor_sha" ]; then
+      die "$statusline_resolved wurde während der Rückfrage geändert — abgebrochen ohne Änderung"
+    fi
+  fi
 
   # Der aktuelle Stand wird zuerst gesichert, unter einem eigenen, neuen
   # Zeitstempel — auch dieser Rückbau soll sich per rueckbau rückgängig
@@ -559,11 +780,14 @@ main() {
     agy)
       cmd_agy
       ;;
+    agy-statusline)
+      cmd_agy_statusline
+      ;;
     rueckbau)
       cmd_rueckbau "${2:-}"
       ;;
     *)
-      echo "Nutzung: $0 claude|agy|rueckbau <Zeitstempel>" >&2
+      echo "Nutzung: $0 claude|agy|agy-statusline|rueckbau <Zeitstempel>" >&2
       exit 2
       ;;
   esac

@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # rechte-anwenden-test.sh — testet setup/vorlagen/rechte-anwenden.sh gegen
-# die Runde-5-Befunde aus PR 36 (CL-012): ein scheiterndes cp bei der
-# Sicherung, ein gleichzeitiger Schreibzugriff während der Diff-Rückfrage,
-# ein Abbruch per HUP/INT/TERM während der Rückfrage, statusline.py
-# unabhängig von settings.json, ein Symlink-Ziel in den eigenen Checkout
-# und ein vollständiger Rückbau. Jedes Szenario legt sein eigenes
-# Fake-HOME per mktemp -d an, ändert nie eine echte Datei unter dem
-# eigenen HOME und räumt sich danach selbst auf. Ohne Netz- oder
-# Systemzugriff, gedacht für .github/workflows/check.yml.
+# die Runde-5- und Runde-6-Befunde aus PR 36 (CL-012): ein scheiterndes cp
+# bei der Sicherung, ein gleichzeitiger Schreibzugriff während der
+# Diff-Rückfrage, ein Abbruch per HUP/INT/TERM während der Rückfrage,
+# statusline.py unabhängig von settings.json (seit Runde 6 auch mit
+# Rückfrage bei einer Neuinstallation), ein Symlink-Ziel in den eigenen
+# Checkout (auch über ein symlinked Zwischenverzeichnis), eine
+# settings.json mit mehr als einem JSON-Dokument, ein nicht beschreibbares
+# bzw. kein reguläres Ziel, der eigenständige Unterbefehl agy-statusline
+# und ein vollständiger Rückbau. Jedes Szenario legt sein eigenes Fake-HOME
+# per mktemp -d an, ändert nie eine echte Datei unter dem eigenen HOME und
+# räumt sich danach selbst auf. Ohne Netz- oder Systemzugriff, gedacht für
+# .github/workflows/check.yml.
 
 set -uo pipefail
 
@@ -204,10 +208,20 @@ t5_symlink_in_checkout() {
   fi
 }
 
-# --- T6 (Befund 5): rueckbau zeigt den Diff, fragt einmal nach, sichert
-# den aktuellen Stand vorher unter einem neuen Zeitstempel und spielt dann
-# claude, agy und eine frisch installierte statusline.py wieder zurück
-# (letztere per Marker entfernt, weil sie vorher nicht existierte). ---
+# --- T6 (Befund 5, Runde 6: Zeitstempel-Flackern behoben): rueckbau zeigt
+# den Diff, fragt einmal nach, sichert den aktuellen Stand vorher unter
+# einem neuen Zeitstempel und spielt dann claude, agy und eine frisch
+# installierte statusline.py wieder zurück (letztere per Marker entfernt,
+# weil sie vorher nicht existierte). claude und agy laufen in getrennten
+# Aufrufen und können — je nach Sekundengrenze — unterschiedliche
+# Zeitstempel bekommen; der Test liest deshalb den Zeitstempel aus der
+# jeweils letzten Ausgabezeile "Zeitstempel für rueckbau: …" JEDES Aufrufs
+# (nicht aus einem Sicherungs-Dateinamen) und ruft rueckbau einmal je
+# unterschiedlichem Zeitstempel auf. Ein Test, der nur den
+# .claude-Zeitstempel gelesen und rueckbau nur damit aufgerufen hätte, wäre
+# genau dann flackernd gewesen, wenn agy einen anderen Zeitstempel bekam
+# (Befund aus Runde 6) — der agy-Anteil (settings.json + statusline.py)
+# wäre dann unbemerkt nicht zurückgespielt worden. ---
 t6_rueckbau_rundlauf() {
   local h; neues_home h
 
@@ -215,17 +229,32 @@ t6_rueckbau_rundlauf() {
   vor_claude=$(cat "$h/.claude/settings.json")
   vor_agy=$(cat "$h/.gemini/antigravity-cli/settings.json")
 
-  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1 || { report "T6 Rückbau-Rundlauf" 1 "claude-Anwenden fehlgeschlagen"; return; }
-  echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy >/dev/null 2>&1 || { report "T6 Rückbau-Rundlauf" 1 "agy-Anwenden fehlgeschlagen"; return; }
+  local claude_out agy_out
+  claude_out=$(echo j | HOME="$h" bash "$skript" claude 2>&1) || { report "T6 Rückbau-Rundlauf" 1 "claude-Anwenden fehlgeschlagen: $claude_out"; return; }
+  agy_out=$(echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy 2>&1) || { report "T6 Rückbau-Rundlauf" 1 "agy-Anwenden fehlgeschlagen: $agy_out"; return; }
 
-  local ts; ts=$(find "$h/.claude" -name '*.bak-*' | sed -E 's/.*\.bak-//')
-  if [ -z "$ts" ]; then
-    report "T6 Rückbau-Rundlauf" 1 "kein Zeitstempel gefunden"
+  local ts_claude ts_agy
+  ts_claude=$(printf '%s\n' "$claude_out" | sed -n 's/^Zeitstempel für rueckbau: //p' | tail -1)
+  ts_agy=$(printf '%s\n' "$agy_out" | sed -n 's/^Zeitstempel für rueckbau: //p' | tail -1)
+  if [ -z "$ts_claude" ] || [ -z "$ts_agy" ]; then
+    report "T6 Rückbau-Rundlauf" 1 "kein Zeitstempel in der Ausgabe gefunden (claude=[$ts_claude], agy=[$ts_agy])"
     return
   fi
 
-  echo j | HOME="$h" bash "$skript" rueckbau "$ts" >/dev/null 2>&1
-  local rc=$?
+  # agy läuft chronologisch NACH claude, ts_agy ist also nie kleiner als
+  # ts_claude. rueckbau legt bei jedem Aufruf eine eigene, neue Sicherung
+  # des GERADE AKTUELLEN Standes unter einem frischen Zeitstempel an; würde
+  # dieser zweite Aufruf zuerst für ts_claude laufen, könnte seine eigene
+  # (später, in Echtzeit gebildete) Sicherung zufällig genau auf ts_agy
+  # fallen und von einem anschließenden "rueckbau ts_agy" fälschlich als
+  # dessen Sicherung gelesen werden. Der jüngere Zeitstempel zuerst schließt
+  # das aus: eine Selbst-Sicherung entsteht dabei immer erst NACH ts_agy,
+  # kann also nie mit dem noch ausstehenden, kleineren ts_claude kollidieren.
+  local rc=0
+  if [ "$ts_agy" != "$ts_claude" ]; then
+    echo j | HOME="$h" bash "$skript" rueckbau "$ts_agy" >/dev/null 2>&1 || rc=$?
+  fi
+  echo j | HOME="$h" bash "$skript" rueckbau "$ts_claude" >/dev/null 2>&1 || rc=$?
 
   local nach_claude nach_agy
   nach_claude=$(cat "$h/.claude/settings.json")
@@ -236,7 +265,97 @@ t6_rueckbau_rundlauf() {
     report "T6 Rückbau-Rundlauf (claude+agy+statusline)" 0
   else
     report "T6 Rückbau-Rundlauf (claude+agy+statusline)" 1 \
-      "rc=$rc, claude wiederhergestellt=$([ "$vor_claude" = "$nach_claude" ] && echo ja || echo nein), agy wiederhergestellt=$([ "$vor_agy" = "$nach_agy" ] && echo ja || echo nein), statusline entfernt=$([ ! -e "$h/.gemini/antigravity-cli/statusline.py" ] && echo ja || echo nein)"
+      "rc=$rc, ts_claude=$ts_claude, ts_agy=$ts_agy, claude wiederhergestellt=$([ "$vor_claude" = "$nach_claude" ] && echo ja || echo nein), agy wiederhergestellt=$([ "$vor_agy" = "$nach_agy" ] && echo ja || echo nein), statusline entfernt=$([ ! -e "$h/.gemini/antigravity-cli/statusline.py" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T7 (Befund 1, Runde 6): der ganze Zielpfad wird IMMER mit readlink -f
+# aufgelöst, auch wenn nur ein Zwischenverzeichnis (nicht die Zieldatei
+# selbst) ein Symlink ist — z. B. ~/.claude als Symlink in eine Kopie des
+# Checkouts. Muss ohne jede Änderung abgelehnt werden. ---
+t7_symlink_zwischenverzeichnis() {
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  local planted="$repo/planted-claude-dir"
+  mkdir -p "$planted"
+  cat >"$planted/settings.json" <<'EOF'
+{"env":{},"permissions":{"allow":[],"deny":["x"]}}
+EOF
+  ln -s "$planted" "$h/.claude"
+
+  local vor; vor=$(cat "$planted/settings.json")
+  echo j | HOME="$h" bash "$kopie_skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$planted/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T7 Symlink-Zwischenverzeichnis (~/.claude) wird abgelehnt" 0
+  else
+    report "T7 Symlink-Zwischenverzeichnis (~/.claude) wird abgelehnt" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T8 (Befund 2, Runde 6): der eigenständige Unterbefehl agy-statusline
+# installiert statusline.py unabhängig von agy/settings.json, braucht
+# weder PROJEKTE noch TRUSTED_WORKSPACE, und braucht auch für eine
+# Neuinstallation eine Rückfrage (Befund 5). ---
+t8_agy_statusline_eigenstaendig() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+
+  local out
+  out=$(echo j | HOME="$h" bash "$skript" agy-statusline 2>&1)
+  local rc=$?
+
+  if [ "$rc" -eq 0 ] && [ -x "$h/.gemini/antigravity-cli/statusline.py" ] \
+     && printf '%s' "$out" | grep -qF 'Neu installieren'; then
+    report "T8 agy-statusline installiert eigenständig, ohne PROJEKTE/TRUSTED_WORKSPACE" 0
+  else
+    report "T8 agy-statusline installiert eigenständig, ohne PROJEKTE/TRUSTED_WORKSPACE" 1 "rc=$rc, output=[$out]"
+  fi
+}
+
+# --- T9 (Befund 7, Runde 6): eine settings.json mit mehr als einem
+# aneinandergehängten JSON-Dokument wird abgelehnt, ohne jede Änderung. ---
+t9_mehrere_json_dokumente() {
+  local h; neues_home h
+  printf '{"a":1}\n{"b":2}\n' >"$h/.claude/settings.json"
+  local vor; vor=$(cat "$h/.claude/settings.json")
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T9 settings.json mit mehr als einem JSON-Dokument wird abgelehnt" 0
+  else
+    report "T9 settings.json mit mehr als einem JSON-Dokument wird abgelehnt" 1 "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T10 (Befund 3, Runde 6): agy prüft vorab, dass ALLE seine Ziele
+# (settings.json UND statusline.py) reguläre, beschreibbare Dateien sind —
+# eine statusline.py, die ein Verzeichnis ist, darf settings.json nicht
+# mehr anfassen (kein Teilschreiben). ---
+t10_agy_ziel_kein_teilschreiben() {
+  local h; neues_home h
+  mkdir -p "$h/.gemini/antigravity-cli/statusline.py"
+  local vor; vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T10 agy bricht vor jeder Änderung ab, wenn statusline.py kein reguläres Ziel ist" 0
+  else
+    report "T10 agy bricht vor jeder Änderung ab, wenn statusline.py kein reguläres Ziel ist" 1 \
+      "rc=$rc, settings unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
   fi
 }
 
@@ -248,6 +367,10 @@ t3_signal_raeumt_auf TERM 143
 t4_statusline_unabhaengig
 t5_symlink_in_checkout
 t6_rueckbau_rundlauf
+t7_symlink_zwischenverzeichnis
+t8_agy_statusline_eigenstaendig
+t9_mehrere_json_dokumente
+t10_agy_ziel_kein_teilschreiben
 
 echo "---"
 echo "$pass PASS, $fail FAIL"
