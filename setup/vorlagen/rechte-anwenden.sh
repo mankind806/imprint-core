@@ -106,7 +106,7 @@ zeige_diff_und_frage() {
     return 1
   fi
   local ans=""
-  read -r -p "Anwenden? [j/N] " ans || ans=""
+  read -r -p "Anwenden? [j/N]" ans || ans=""
   if [ "$ans" != "j" ] && [ "$ans" != "J" ]; then
     echo "Abgebrochen ohne Änderung." >&2
     exit 1
@@ -215,15 +215,27 @@ cmd_agy() {
     exit 0
   fi
 
+  local statusline_ziel statusline_resolved
+  statusline_ziel="${HOME}/.gemini/antigravity-cli/statusline.py"
+  statusline_resolved=$(resolve_ziel "$statusline_ziel")
+
   local ts bak
   ts="$(date +%Y%m%d-%H%M%S)"
+  # Beide Sicherungs-Zielpfade auf Kollision prüfen, bevor irgendetwas
+  # geschrieben wird — sonst bliebe bei einer Kollision erst bei
+  # statusline.py ein schon geänderter settings.json-Stand ohne Rückweg
+  # zurück (kein passendes rueckbau für dessen halb angewendeten Lauf).
+  if [ -e "${resolved}.bak-${ts}" ]; then
+    die "Sicherung existiert schon: ${resolved}.bak-${ts}"
+  fi
+  if [ -e "$statusline_resolved" ] && [ -e "${statusline_resolved}.bak-${ts}" ]; then
+    die "Sicherung existiert schon: ${statusline_resolved}.bak-${ts}"
+  fi
+
   bak="$(sichern "$resolved" "$ts")"
   chmod --reference="$resolved" "$tmp"
   mv "$tmp" "$resolved"
 
-  local statusline_ziel statusline_resolved
-  statusline_ziel="${HOME}/.gemini/antigravity-cli/statusline.py"
-  statusline_resolved=$(resolve_ziel "$statusline_ziel")
   if [ -e "$statusline_resolved" ]; then
     sichern "$statusline_resolved" "$ts" >/dev/null
   fi

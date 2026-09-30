@@ -3,23 +3,26 @@
 Zwei Vorlagen mit den geprüften Rechte-Regeln aus einer angewendeten, getesteten Konfiguration.
 **Nur der Mensch wendet sie an** (Nutzerentscheid CL-119/CL-123), mit dem geprüften Skript
 `setup/vorlagen/rechte-anwenden.sh` (siehe „Anwenden" unten) — nie mit einem eigenen `cp` von
-Hand. `imprint-dev setup --apply` gibt es seit PR 38, aber es schreibt ein Rechte-Ziel
-(`rechte: true`, wie beide Einträge hier) nie selbst: für so ein Ziel rendert `--apply` die
-Vorlage nur in eine Cache-Datei unter `$XDG_CACHE_HOME/imprint` und druckt zwei `cp`-Befehle
-(Sicherung, dann Cache → Ziel) auf stdout; ausgeführt wird davon nichts (siehe
-`tools/imprint-dev/setup.go`, `runSetupApply` und `writeRechteCache`). Gemessen gegen `gh pr
-diff 38` am 2026-09-30 druckt `--apply` diese zwei `cp`-Befehle für **jeden** Rechte-Ziel-
-Eintrag gleich, unabhängig vom Feld `anwenden` im Inventar — auch für `claude-rechte.json`
-(`anwenden: fragment-merge`). Der zweite, gedruckte `cp`-Befehl kopiert dabei roh und kennt
-keinen Fragment-Merge; ihn für `claude-rechte.json` auszuführen würde `hooks`, `env`,
-`enabledPlugins`, `sandbox` und `permissions.defaultMode` aus der bestehenden Datei löschen.
-Deshalb bleibt für `claude-rechte.json` weiterhin `setup/vorlagen/rechte-anwenden.sh claude`
-(bzw. dessen `jq -s '.[0] * .[1]'`-Muster) Pflicht, nie der von `--apply` gedruckte `cp`-Befehl
-— das gilt so lange, bis PR 38 oder eine Folge-Änderung das Feld `anwenden: fragment-merge`
-selbst auswertet und für einen solchen Eintrag keinen rohen `cp` mehr druckt (siehe
-Merge-Reihenfolge im Pull-Request-Text). Beide Vorlagen tragen trotzdem weiterhin eine eigene
-Deny-Regel gegen den `--apply`-Aufruf selbst — vorsorglich, damit kein Agent auch nur die
-Cache-Datei erzeugen oder die gedruckten Befehle selbst ausführen kann.
+Hand, und für `claude-rechte.json` (`anwenden: fragment-merge` in `setup/inventar.json`) auch
+nie mit dem von `imprint-dev setup --apply` gedruckten `cp`-Befehl: ein roher `cp` kennt keinen
+Fragment-Merge und würde `hooks`, `env`, `enabledPlugins`, `sandbox` und
+`permissions.defaultMode` aus der bestehenden `~/.claude/settings.json` löschen. `--apply` gibt
+es seit PR 38 und schreibt ein Rechte-Ziel (`rechte: true`, wie beide Einträge hier) nie selbst:
+für so ein Ziel rendert es die Vorlage nur in eine Cache-Datei unter `$XDG_CACHE_HOME/imprint`
+und druckt zwei `cp`-Befehle (Sicherung, dann Cache → Ziel) auf stdout; ausgeführt wird davon
+nichts (siehe `tools/imprint-dev/setup.go`, `runSetupApply` und `writeRechteCache`).
+
+**Merge-Voraussetzung** (siehe Merge-Reihenfolge im Pull-Request-Text): PR 38 muss das Feld
+`anwenden` auswerten und darf für einen `fragment-merge`-Eintrag keinen rohen `cp` mehr drucken
+— stattdessen den Aufruf `setup/vorlagen/rechte-anwenden.sh claude` (bzw. dessen
+`jq -s '.[0] * .[1]'`-Muster). Gemessen gegen `gh pr diff 38`, Head `887ce90`, 2026-09-30
+00:53 UTC (Momentaufnahme, kann bei einem späteren PR-38-Stand schon erledigt sein): noch nicht
+umgesetzt — `--apply` druckt dort für jeden Rechte-Ziel-Eintrag denselben rohen `cp`-Befehl,
+unabhängig vom Feld `anwenden`, auch für `claude-rechte.json`. Solange das nicht behoben ist,
+bleibt `setup/vorlagen/rechte-anwenden.sh claude` für diesen Eintrag Pflicht, gleich was
+`--apply` druckt. Beide Vorlagen tragen trotzdem weiterhin eine eigene Deny-Regel gegen den
+`--apply`-Aufruf selbst — vorsorglich, damit kein Agent auch nur die Cache-Datei erzeugen oder
+die gedruckten Befehle selbst ausführen kann.
 
 ## Die zwei Vorlagen
 
@@ -49,18 +52,19 @@ Abweichung, keine Auslassung durch Versehen.
 `${XDG_CACHE_HOME}`/`${XDG_DATA_HOME}`) auf** (siehe `tools/imprint-dev/setup.go`, `expandZiel`
 für `ziel`, `renderTemplate` für den Vorlagen-Inhalt; `--apply` nutzt denselben `replacer` wie
 `--plan`). `${PROJEKTE}` und `${TRUSTED_WORKSPACE}` sind reine Textplatzhalter in den
-Vorlagen-Inhalten; sie werden von keinem der beiden Unterbefehle ersetzt, sondern müssen vor dem
-Anwenden von Hand oder mit `envsubst` gesetzt sein. Deshalb zeigen `setup --plan` und die
+Vorlagen-Inhalten; sie werden von keinem der beiden Unterbefehle ersetzt, sondern müssen als
+Umgebungsvariablen gesetzt sein, bevor `setup/vorlagen/rechte-anwenden.sh agy` sie per
+`envsubst` einsetzt (siehe „Anwenden" unten). Deshalb zeigen `setup --plan` und die
 gedruckten `--apply`-Befehle diese beiden Einträge immer als `abweichend` — das ist erwartet,
 nicht ein Fehler der Vorlage (siehe Abweichungen unten).
 
 `statusLine.command` in `agy-settings.json` zeigt auf `${HOME}/.gemini/antigravity-cli/statusline.py`,
 nicht auf einen Checkout-Pfad: agy läuft das Kommando direkt aus, und ein Checkout-Pfad wäre nach
-einem `git worktree remove` oder einem Verschieben des Klons weg. Beim Anwenden kopiert der Mensch
-`setup/vorlagen/statusline.py` selbst dorthin (siehe „Anwenden" unten); das Inventar trägt dafür
-den Eintrag `agy-statusline` (Typ `copy`, `rechte: true` — agy führt diese Datei direkt aus, wer
-sie schreibt, führt damit Code in agys Kontext aus; das ist Rechte-Inhalt, nicht nur ihr Aufrufpfad
-in `agy-settings.json`). Der Mensch-Schritt zum Kopieren steht in „Anwenden" oben.
+einem `git worktree remove` oder einem Verschieben des Klons weg. Beim Anwenden installiert
+`setup/vorlagen/rechte-anwenden.sh agy` `setup/vorlagen/statusline.py` dorthin (siehe „Anwenden"
+unten); das Inventar trägt dafür den Eintrag `agy-statusline` (Typ `copy`, `rechte: true` — agy
+führt diese Datei direkt aus, wer sie schreibt, führt damit Code in agys Kontext aus; das ist
+Rechte-Inhalt, nicht nur ihr Aufrufpfad in `agy-settings.json`).
 
 ## Anwenden (nur der Mensch)
 
@@ -184,7 +188,10 @@ Schlüssel.
   Deny-Regeln sind vorsorglich: den Unterbefehl `--apply` gibt es seit PR 38, aber er schreibt
   ein Rechte-Ziel nie selbst — für so ein Ziel rendert er nur eine Cache-Datei und druckt zwei
   `cp`-Befehle, ausgeführt wird nichts (siehe Kopf dieser Datei und `runSetupApply` in
-  `tools/imprint-dev/setup.go`). Die Deny-Regeln bleiben trotzdem stehen, damit kein Agent auch
+  `tools/imprint-dev/setup.go`). Der zweite, gedruckte `cp`-Befehl kopiert dabei roh und kennt
+  keinen Fragment-Merge — für `claude-rechte.json` (`anwenden: fragment-merge`) gilt deshalb
+  auch hier `setup/vorlagen/rechte-anwenden.sh claude`, nie dieser gedruckte Befehl (siehe Kopf
+  dieser Datei). Die Deny-Regeln bleiben trotzdem stehen, damit kein Agent auch
   nur diesen Cache-Schritt anstößt oder die gedruckten `cp`-Befehle selbst ausführt. Auf der
   `agy`-Seite matchen die Regeln nur den exakten, wörtlichen
   Präfix (**nicht geprüft**, ob agy Glob-Wildcards in `command(...)` überhaupt unterstützt); ein
