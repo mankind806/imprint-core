@@ -11,9 +11,12 @@ Validates:
     address found by the local masking in the commit message, the ADDED diff lines or
     the file list sets leak_prob to 1.0, with or without a TypeSafe key. leak_prob >= 0.5
     is a hard block (exit 1), also in fail-open mode. Never a local hit: addresses in
-    trailer lines (Co-Authored-By:, Assisted-by:, Signed-off-by:) and the no-reply
-    addresses in NOREPLY_RE (tool and forge identities, not personal data); every
-    other address, in message or diff, still blocks. Removed and context lines raise
+    trailer lines (Co-Authored-By:, Assisted-by:, Signed-off-by:), the no-reply
+    addresses in NOREPLY_RE (tool and forge identities, not personal data) and
+    addresses on reserved domains (RFC 2606/6761: example.com/.org/.net and *.example,
+    *.test, *.invalid, *.localhost, with subdomains; test fixtures); every other
+    address, in message or diff, still blocks. This only narrows the local alarm:
+    what goes to TypeSafe is masked exactly as before. Removed and context lines raise
     no alarm: a commit that deletes a leaked value must not be blocked for it.
 
 Usage:
@@ -37,13 +40,23 @@ TRAILER_LINE_RE = re.compile(r"(?im)^[ \t]*(?:co-authored-by|assisted-by|signed-
 NOREPLY_RE = re.compile(
     r"(?i)(?<![\w.+-])(?:noreply@anthropic\.com|noreply@google\.com|noreply@github\.com"
     r"|[\w.+-]+@users\.noreply\.github\.com)(?!\.?[\w-])")
+RESERVED_DOMAIN_RE = re.compile(
+    r"(?i)^(?:[\w-]+\.)*(?:example\.(?:com|org|net)|[\w-]+\.(?:example|test|invalid|localhost))$")
+
+
+def _alarm_address(m):
+    """'' for an exempt address (no-reply or reserved domain), else the address."""
+    addr = m.group(0).rstrip(".-")  # RX_EMAIL may take a sentence-final dot along
+    if NOREPLY_RE.fullmatch(addr) or RESERVED_DOMAIN_RE.match(addr.rsplit("@", 1)[1]):
+        return ""
+    return m.group(0)
 
 
 def alarm_view(text):
-    """Text as the local leak alarm sees it: trailer-line addresses and no-reply
-    addresses removed, everything else unchanged."""
+    """Text as the local leak alarm sees it: trailer-line addresses, no-reply
+    addresses and reserved-domain addresses removed, everything else unchanged."""
     text = TRAILER_LINE_RE.sub(lambda m: tc.RX_EMAIL.sub("", m.group(0)), text)
-    return NOREPLY_RE.sub("", text)
+    return tc.RX_EMAIL.sub(_alarm_address, text)
 
 
 QUESTIONS = {

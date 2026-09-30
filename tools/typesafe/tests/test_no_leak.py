@@ -260,23 +260,47 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         r = self.run_check(diff_line, msg=msg)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    # Real-looking addresses below are synthetic and built from parts, so this
+    # test file's own diff carries none.
     def test_real_address_in_body_blocks(self):
         at = "@"
-        r = self.run_check("retries = 3\n", msg=f"docs: tidy\n\nKontakt: erika.muster{at}mail.example\n")
+        r = self.run_check("retries = 3\n", msg=f"docs: tidy\n\nKontakt: max.mustermann{at}gmx.de\n")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_real_address_in_diff_blocks(self):
         at = "@"
-        r = self.run_check(f"owner = erika.muster{at}mail.example\n")
+        r = self.run_check(f"owner = max.mustermann{at}gmx.de\n")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
-    def test_lookalike_noreply_blocks(self):
+    def test_lookalike_noreply_and_reserved_block(self):
         at = "@"
-        r = self.run_check(f"owner = noreply{at}github.com.mail.example\n")
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for addr in (f"noreply{at}github.com.attacker.io", f"nutzer{at}example.com.attacker.io",
+                     f"nutzer{at}mail.test.de"):
+            with self.subTest(addr=addr):
+                r = self.run_check(f"owner = {addr}\n")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_reserved_domains_pass(self):
+        at = "@"
+        addrs = [f"nutzer{at}example.com", f"a{at}example.org", f"b{at}example.net",
+                 f"c{at}mail.example.com", f"a{at}b.test", f"d{at}mail.example",
+                 f"e{at}host.invalid", f"f{at}dev.localhost", f"G{at}Mail.Example.COM"]
+        r = self.run_check("fixtures = [" + ", ".join(addrs) + "]\n",
+                           msg=f"test: fixtures\n\nSee x{at}b.test.")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_reserved_domains_still_masked_toward_typesafe(self):
+        mod = load_tool("ts-commit-check")
+        rec = Recorder()
+        at = "@"
+        with mock.patch.object(tc, "post", rec):
+            res = mod.check_commit("test: fixtures", f"+owner = nutzer{at}example.com\n", "a | 1 +")
+        self.assertIsNone(res["leak_prob"])
+        self.assertNotIn(f"nutzer{at}example.com", rec.calls[0])
+        self.assertIn("<email>", rec.calls[0])
 
     def test_address_in_subject_blocks(self):
-        r = self.run_check("retries = 3\n", msg="docs: mail " + "ops" + "@" + "bots.example")
+        r = self.run_check("retries = 3\n", msg="docs: mail " + "ops" + "@" + "gmx.de")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_api_key_without_key_blocks(self):
