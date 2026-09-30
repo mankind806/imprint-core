@@ -65,7 +65,9 @@ var (
 	opaqueCandidateRE = regexp.MustCompile(`[A-Za-z0-9_\-+/]{24,}={0,2}`)
 
 	// streetRE matches German street names + house number (e.g. "Musterstraße 12", "Hauptstr. 4b", "Am Markt 1").
-	streetRE = regexp.MustCompile(`\b(?:(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+(?:\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+\s+)*(?:Straße|Strasse|Str\.|Str\b|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:straße|strasse|str\.|str\b|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile|pfad|steig|gäßchen|gaesschen)))\s+\d+[a-zA-Z]?(?:\s*[-/]\s*\d+[a-zA-Z]?)?\b`)
+	// The range end is capped at 4 digits so a following 5-digit postcode is never read as a
+	// range end (its PLZ+Ort then gets its own match via plzOrtRE).
+	streetRE = regexp.MustCompile(`\b(?:(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+(?:\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+\s+)*(?:Straße|Strasse|Str\.|Str\b|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:straße|strasse|str\.|str\b|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile|pfad|steig|gäßchen|gaesschen)))\s+\d+[a-zA-Z]?(?:\s*[-/]\s*\d{1,4}[a-zA-Z]?)?\b`)
 
 	// plzOrtRE matches German postal code + city (e.g. "10115 Berlin", "80331 München").
 	// The "am"/"an der" suffix is generic (any capitalized word, matching

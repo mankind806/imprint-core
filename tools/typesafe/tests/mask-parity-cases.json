@@ -217,6 +217,36 @@
       "text": "Mail an müller@firma.test bitte",
       "must_not_contain": ["müller", "firma.test"],
       "min_counts": {"email": 1}
+    },
+    {
+      "id": "address_street_range_does_not_eat_plz_slash",
+      "text": "Lieferung an Wachtelweg 17 / 54321 Wachtstadt",
+      "must_not_contain": ["Wachtelweg", "54321", "Wachtstadt"],
+      "min_counts": {"address": 2}
+    },
+    {
+      "id": "address_street_range_does_not_eat_plz_hyphen",
+      "text": "Lieferung an Wachtelweg 17 - 54321 Wachtstadt",
+      "must_not_contain": ["Wachtelweg", "54321", "Wachtstadt"],
+      "min_counts": {"address": 2}
+    },
+    {
+      "id": "address_street_range_hyphen",
+      "text": "Lieferung an Musterstraße 12-14 bitte klingeln",
+      "must_not_contain": ["Musterstraße", "-14"],
+      "min_counts": {"address": 1}
+    },
+    {
+      "id": "address_street_range_slash",
+      "text": "Neue Adresse: Hauptstr. 12/1 ab Montag",
+      "must_not_contain": ["Hauptstr", "/1"],
+      "min_counts": {"address": 1}
+    },
+    {
+      "id": "address_street_range_spaced_letters",
+      "text": "Lieferung an Musterstraße 12a - 14b bitte klingeln",
+      "must_not_contain": ["Musterstraße", "14b"],
+      "min_counts": {"address": 1}
     }
   ]
 }
