@@ -847,10 +847,183 @@ t24_geerbte_acl_entfernt() {
   fi
 }
 
+# --- T25 (Befund 1, Runde 11): eine frisch installierte statusline.py
+# übernimmt NIE die ACL des Checkouts — läuft gegen eine Kopie von
+# vorlagen/, deren statusline.py eine eigene, dem Ziel fremde ACL trägt.
+# Nur ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t25_statusline_uebernimmt_nie_checkout_acl() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (übersprungen, getfacl/setfacl fehlen)" 0
+    return
+  fi
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+  local kopie_statusline="$repo/setup/vorlagen/statusline.py"
+  if ! setfacl -m u:"$(id -u)":rwx "$kopie_statusline" 2>/dev/null; then
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (übersprungen, setfacl schlägt hier fehl)" 0
+    return
+  fi
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  echo j | HOME="$h" bash "$kopie_skript" agy-statusline >/dev/null 2>&1
+  local rc=$?
+  local acl_ziel; acl_ziel=$(getfacl -c "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && ! printf '%s' "$acl_ziel" | grep -Eq '^user:[^:]+:'; then
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (Neuinstallation)" 0
+  else
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (Neuinstallation)" 1 "rc=$rc, ACL=[$acl_ziel]"
+  fi
+}
+
+# --- T26 (Befund 1, Runde 11): beim Ersetzen einer bestehenden
+# statusline.py kommt die ACL vom BESTEHENDEN Ziel, nicht vom Checkout —
+# das bestehende Ziel und der Checkout tragen hier je eine andere,
+# unterscheidbare ACL. Nur ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t26_statusline_ersetzen_acl_vom_ziel() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels (übersprungen)" 0
+    return
+  fi
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+  local kopie_statusline="$repo/setup/vorlagen/statusline.py"
+  if ! setfacl -m u:"$(id -u)":r-- "$kopie_statusline" 2>/dev/null; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels (übersprungen)" 0
+    return
+  fi
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  # Ziel existiert schon, mit anderem Inhalt (damit ein Diff ansteht) und
+  # einer eigenen ACL, die sich vom Checkout unterscheidet.
+  printf '#!/usr/bin/env python3\nprint("alt")\n' >"$h/.gemini/antigravity-cli/statusline.py"
+  chmod 0755 "$h/.gemini/antigravity-cli/statusline.py"
+  if ! setfacl -m u:"$(id -u)":rwx "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels (übersprungen)" 0
+    return
+  fi
+
+  echo j | HOME="$h" bash "$kopie_skript" agy-statusline >/dev/null 2>&1
+  local rc=$?
+  local acl_ziel; acl_ziel=$(getfacl -c "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && printf '%s' "$acl_ziel" | grep -q "user:$(id -un):rwx"; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels, nicht die des Checkouts" 0
+  else
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels, nicht die des Checkouts" 1 \
+      "rc=$rc, ACL=[$acl_ziel]"
+  fi
+}
+
+# --- T27 (Befund 2a, Runde 11): fehlen getfacl/setfacl und trägt
+# statusline.py eine ACL, muss "agy" abbrechen, BEVOR settings.json
+# geschrieben wird. Nur ausgeführt, wenn getfacl/setfacl real vorhanden
+# sind (um die ACL überhaupt setzen zu können). ---
+t27_agy_statusline_acl_vor_settings() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab (übersprungen)" 0
+    return
+  fi
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  printf '#!/usr/bin/env python3\nprint("alt")\n' >"$h/.gemini/antigravity-cli/statusline.py"
+  chmod 0755 "$h/.gemini/antigravity-cli/statusline.py"
+  if ! setfacl -m u:"$(id -u)":rwx "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null; then
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab (übersprungen)" 0
+    return
+  fi
+
+  local stub; neuer_stub_dir stub
+  local prog
+  for prog in bash jq mktemp readlink chmod diff cp mv grep install cmp sha256sum ls realpath env cat sleep date; do
+    command -v "$prog" >/dev/null 2>&1 && ln -s "$(command -v "$prog")" "$stub/$prog"
+  done
+
+  local vor_settings; vor_settings=$(cat "$h/.gemini/antigravity-cli/settings.json")
+  echo j | PATH="$stub" HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" \
+    "$stub/bash" "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach_settings; nach_settings=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor_settings" = "$nach_settings" ]; then
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab" 0
+  else
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab" 1 \
+      "rc=$rc, settings unverändert=$([ "$vor_settings" = "$nach_settings" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T28 (Befund 2b, Runde 11): rueckbau erkennt eine vom Zielverzeichnis
+# geerbte ACL schon in der frühen Vorab-Prüfung (nicht erst am
+# tatsächlichen mktemp) — hier trägt NUR das agy-Zielverzeichnis ein
+# Default-ACL. Ein gestubbter "date" erzwingt denselben Zeitstempel für
+# claude und agy, damit ein einziger rueckbau-Aufruf beide zusammen
+# zurückspielen soll (genau das im Befund beschriebene Szenario, nicht dem
+# Zufall überlassen) — ohne getfacl/setfacl darf rueckbau claude dabei
+# NICHT zurückspielen, bevor es an agy scheitert (all-or-nothing). Nur
+# ausgeführt, wenn getfacl/setfacl real vorhanden sind. ---
+t28_rueckbau_default_acl_frueh_erkannt() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing (übersprungen)" 0
+    return
+  fi
+  local h; neues_home h
+  if ! setfacl -d -m u:"$(id -u)":rwx "$h/.gemini/antigravity-cli" 2>/dev/null; then
+    report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing (übersprungen, Default-ACL hier nicht setzbar)" 0
+    return
+  fi
+
+  local datestub; datestub=$(mktemp -d); aufraeumen_dirs+=("$datestub")
+  local real_date; real_date=$(command -v date)
+  local ts_fix="20261231-235900"
+  printf '#!/usr/bin/env bash\nif [ "$1" = "+%%Y%%m%%d-%%H%%M%%S" ]; then echo %s; else exec "%s" "$@"; fi\n' \
+    "$ts_fix" "$real_date" >"$datestub/date"
+  chmod +x "$datestub/date"
+
+  echo j | PATH="$datestub:$PATH" HOME="$h" bash "$skript" claude >/dev/null 2>&1 \
+    || { report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing" 1 "claude-Anwenden fehlgeschlagen"; return; }
+  echo j | PATH="$datestub:$PATH" HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" \
+    bash "$skript" agy >/dev/null 2>&1 \
+    || { report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing" 1 "agy-Anwenden fehlgeschlagen"; return; }
+
+  local stub; neuer_stub_dir stub
+  local prog
+  for prog in bash jq mktemp readlink chmod diff cp mv grep install cmp sha256sum ls realpath env cat sleep date; do
+    command -v "$prog" >/dev/null 2>&1 && ln -s "$(command -v "$prog")" "$stub/$prog"
+  done
+
+  local vor_claude; vor_claude=$(cat "$h/.claude/settings.json")
+  local vor_agy; vor_agy=$(cat "$h/.gemini/antigravity-cli/settings.json")
+  echo j | PATH="$stub" HOME="$h" "$stub/bash" "$skript" rueckbau "$ts_fix" >/dev/null 2>&1
+  local rc=$?
+  local nach_claude; nach_claude=$(cat "$h/.claude/settings.json")
+  local nach_agy; nach_agy=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor_claude" = "$nach_claude" ] && [ "$vor_agy" = "$nach_agy" ]; then
+    report "T28 rueckbau erkennt geerbte ACL im agy-Zielverzeichnis vorab, claude bleibt unverändert (all-or-nothing)" 0
+  else
+    report "T28 rueckbau erkennt geerbte ACL im agy-Zielverzeichnis vorab, claude bleibt unverändert (all-or-nothing)" 1 \
+      "rc=$rc, claude unverändert=$([ "$vor_claude" = "$nach_claude" ] && echo ja || echo nein), agy unverändert=$([ "$vor_agy" = "$nach_agy" ] && echo ja || echo nein)"
+  fi
+}
+
 t21_home_symlink
 t22_zeichensatz
 t23_acl_werkzeuge_fehlen_vorab
 t24_geerbte_acl_entfernt
+t25_statusline_uebernimmt_nie_checkout_acl
+t26_statusline_ersetzen_acl_vom_ziel
+t27_agy_statusline_acl_vor_settings
+t28_rueckbau_default_acl_frueh_erkannt
 
 echo "---"
 echo "$pass PASS, $fail FAIL"

@@ -442,14 +442,24 @@ render_agy_vorlage() {
 
 # hat_acl <Datei>: true (rc=0), wenn die Datei eine erweiterte ACL trägt.
 # Ist getfacl da, direkt darüber geprüft (benannte user:/group:-Einträge
-# jenseits der drei Basis-Einträge) — zuverlässiger als das "+" nach den
-# Rechten, das nicht jede "stat"-Implementierung anhängt (gemessen: uutils
-# "stat -c %A" lässt es weg, "ls -ld" zeigt es korrekt an). Ohne getfacl
-# wird ersatzweise "ls -ld" geprüft (POSIX/Linux-Konvention).
+# jenseits der drei Basis-Einträge) — das ist eindeutig. Ohne getfacl, aber
+# mit getfattr: prüft gezielt das Attribut "system.posix_acl_access", das
+# nur bei einer echten POSIX-ACL existiert — ein SELinux-Kontext
+# ("security.selinux") setzt es nicht. Ohne beide Werkzeuge ersatzweise
+# "ls -ld" (das "+" nach den Rechten, POSIX/Linux-Konvention für
+# irgendeine erweiterte Sicherheitseigenschaft): das kann unter SELinux
+# fälschlich als ACL gelesen werden, wenn nur der SELinux-Kontext den
+# Unterschied macht (gemessen: uutils "ls -ld" hängt "+" auch dafür an) —
+# nur der letzte, ungenaueste Ausweg, wenn weder getfacl noch getfattr da
+# sind (Info-Hinweis, Runde 11).
 hat_acl() {
   local datei="$1"
   if command -v getfacl >/dev/null 2>&1; then
     getfacl -c "$datei" 2>/dev/null | grep -Eq '^(user|group):[^:]+:|^mask::'
+    return $?
+  fi
+  if command -v getfattr >/dev/null 2>&1; then
+    getfattr -n system.posix_acl_access -- "$datei" >/dev/null 2>&1
     return $?
   fi
   local eintrag
@@ -480,6 +490,25 @@ pruefe_acl_werkzeuge() {
   if [ -e "$zwischendatei" ] && hat_acl "$zwischendatei"; then
     die "$zwischendatei hat schon jetzt eine (vermutlich vom Zielverzeichnis per Default-ACL geerbte) ACL, aber setfacl fehlt, um sie zu entfernen: $zwischendatei"
   fi
+}
+
+# pruefe_acl_werkzeuge_frueh <aufgelöster Pfad> <Quelle>: wie
+# pruefe_acl_werkzeuge, aber mit einer echten, frisch per mktemp im
+# selben Verzeichnis angelegten und sofort wieder entfernten Probe-Datei
+# statt der (möglicherweise gar nicht vorhandenen) Zieldatei selbst — nur
+# eine echte, neu angelegte Datei zeigt zuverlässig, ob das Verzeichnis
+# eine Default-ACL an neue Dateien vererbt (Befund 2b, Runde 11: rueckbaus
+# eigene, frühere Prüfung fragte nur die Zieldatei selbst, nicht das
+# Verzeichnis, und übersah so eine geerbte ACL bis zum tatsächlichen
+# mktemp weiter unten — nachdem claude schon zurückgespielt war). Nutzt
+# die globale Variable rueckbau_tmp, damit die EXIT-Falle die Probe auch
+# bei einem Abbruch mitten in pruefe_acl_werkzeuge aufräumt.
+pruefe_acl_werkzeuge_frueh() {
+  local resolved="$1" quelle="$2"
+  rueckbau_tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+  pruefe_acl_werkzeuge "$quelle" "$rueckbau_tmp"
+  rm -f "$rueckbau_tmp"
+  rueckbau_tmp=""
 }
 
 # kopiere_acl <von> <nach>: überträgt eine erweiterte ACL der Quelle auf
@@ -519,6 +548,24 @@ kopiere_rechte() {
   local von="$1" nach="$2"
   chmod --reference="$von" "$nach" || die "chmod fehlgeschlagen: $nach"
   kopiere_acl "$von" "$nach"
+}
+
+# entferne_acl <Datei>: entfernt eine erweiterte ACL bedingungslos, ohne
+# sie je von einer Quelle zu übernehmen — für ein frisch installiertes
+# Ziel, das keine sinnvolle ACL-Referenz hat (eine neu installierte
+# statusline.py: die "Quelle" ist der eigene Checkout, dessen zufällige
+# ACL nie auf das installierte Ziel übertragen werden darf — statusline.py
+# bekommt ihre Rechte fest über "install -m 0755", nicht von einer Quelle
+# übernommen, Befund 1, Runde 11).
+entferne_acl() {
+  local datei="$1"
+  if hat_acl "$datei"; then
+    if command -v setfacl >/dev/null 2>&1; then
+      setfacl -b "$datei" || die "ACL auf $datei konnte nicht entfernt werden"
+    else
+      die "$datei hat eine ACL, aber setfacl fehlt, um sie zu entfernen: $datei"
+    fi
+  fi
 }
 
 bestaetigen_oder_abbrechen() {
@@ -588,6 +635,21 @@ statusline_vorbereiten() {
     STATUSLINE_EXISTIERTE=0
     STATUSLINE_VOR_SHA=""
   fi
+
+  # Die Zwischendatei entsteht schon hier, nicht erst in statusline_schreiben
+  # (nach der Rückfrage) — sonst würde ein fehlendes getfacl/setfacl bei
+  # "agy" erst NACH der Rückfrage UND NACH dem schon geschriebenen
+  # settings.json auffallen (Befund 2a, Runde 11). Referenz für
+  # pruefe_acl_werkzeuge ist das bestehende Ziel (dessen ACL statusline_
+  # schreiben später per kopiere_acl übernimmt) — oder, existiert noch
+  # nichts, "/dev/null" (keine ACL): die Quelle im Checkout liefert nie die
+  # ACL für eine Neuinstallation, siehe entferne_acl (Befund 1, Runde 11).
+  statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+  if [ "$STATUSLINE_EXISTIERTE" -eq 1 ]; then
+    pruefe_acl_werkzeuge "$STATUSLINE_RESOLVED" "$statusline_tmp"
+  else
+    pruefe_acl_werkzeuge "/dev/null" "$statusline_tmp"
+  fi
 }
 
 # statusline_diff_zeigen: zeigt Diff bzw. (Datei fehlt) den ganzen neuen
@@ -632,22 +694,23 @@ statusline_race_pruefen() {
 # Marker für rueckbau.
 statusline_schreiben() {
   local ts="$1"
+  # statusline_tmp existiert schon (statusline_vorbereiten hat sie angelegt
+  # und die ACL-Werkzeuge dafür schon vor der Rückfrage geprüft, Befund 2a,
+  # Runde 11) — hier nur noch befüllt.
   if [ "$STATUSLINE_EXISTIERTE" -eq 1 ]; then
     local sbak
-    # mktemp (und damit die ACL-Werkzeug-Prüfung) VOR sichern: sonst bräche
-    # ein fehlendes setfacl erst NACH einer schon angelegten Sicherung ab,
-    # mit einer überzähligen .bak-Datei als Rest (Befund 3, Runde 10).
-    statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
-    pruefe_acl_werkzeuge "$STATUSLINE_QUELLE" "$statusline_tmp"
     sichern "$STATUSLINE_RESOLVED" "$ts"
     sbak="$SICHERN_BAK"
     install -m 0755 "$STATUSLINE_QUELLE" "$statusline_tmp" || die "install fehlgeschlagen: $statusline_tmp"
     # statusline.py bekommt ihre Rechte fest über "install -m 0755", nicht
-    # von einer Quelle übernommen — nur die ACL wird abgeglichen (Befund 4,
-    # Runde 10: die Quelle im Repository trägt normalerweise keine ACL, ein
-    # vom Zielverzeichnis per Default-ACL geerbtes ACL auf der Zwischen-
-    # datei darf trotzdem nicht überleben).
-    kopiere_acl "$STATUSLINE_QUELLE" "$statusline_tmp"
+    # von einer Quelle übernommen. Die ACL kommt vom BESTEHENDEN Ziel, nie
+    # vom Checkout (dessen eigene, zufällige ACL — z. B. u:nobody:rwx auf
+    # einem CI-Runner — sonst auf das installierte Ziel übertragen würde,
+    # obwohl "fest 0755" dokumentiert ist, Befund 1, Runde 11); ein vom
+    # Zielverzeichnis per Default-ACL geerbtes ACL auf der Zwischendatei
+    # darf ebenfalls nicht überleben, falls das bestehende Ziel selbst
+    # keine ACL trägt (Befund 4, Runde 10).
+    kopiere_acl "$STATUSLINE_RESOLVED" "$statusline_tmp"
     mv "$statusline_tmp" "$STATUSLINE_RESOLVED" || die "mv fehlgeschlagen: $STATUSLINE_RESOLVED"
     statusline_tmp=""
     echo "Angewendet. Sicherung: $sbak"
@@ -655,10 +718,11 @@ statusline_schreiben() {
     if [ -e "${STATUSLINE_RESOLVED}.installed-${ts}" ]; then
       die "Marker existiert schon: ${STATUSLINE_RESOLVED}.installed-${ts}"
     fi
-    statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
-    pruefe_acl_werkzeuge "$STATUSLINE_QUELLE" "$statusline_tmp"
     install -m 0755 "$STATUSLINE_QUELLE" "$statusline_tmp" || die "install fehlgeschlagen: $statusline_tmp"
-    kopiere_acl "$STATUSLINE_QUELLE" "$statusline_tmp"
+    # Keine bestehende Zieldatei, deren ACL übernommen werden könnte — die
+    # ACL des Checkouts wird nie übernommen (Befund 1, Runde 11); eine vom
+    # Zielverzeichnis geerbte ACL wird bedingungslos entfernt.
+    entferne_acl "$statusline_tmp"
     mv "$statusline_tmp" "$STATUSLINE_RESOLVED" || die "mv fehlgeschlagen: $STATUSLINE_RESOLVED"
     statusline_tmp=""
     : > "${STATUSLINE_RESOLVED}.installed-${ts}" || die "Marker fehlgeschlagen: ${STATUSLINE_RESOLVED}.installed-${ts}"
@@ -1056,13 +1120,18 @@ cmd_rueckbau() {
 
   # Dieselbe ACL-Werkzeug-Prüfung wie bei claude/agy, hier schon vor der
   # Diff-Anzeige und der Rückfrage — nicht erst nach einer schon angelegten
-  # Sicherung (Befund 3, Runde 10). Die genauere Prüfung (inkl. einer vom
-  # Zielverzeichnis per Default-ACL geerbten ACL auf der jeweiligen
-  # Zwischendatei) folgt unten noch einmal, sobald diese Zwischendatei
-  # existiert.
-  [ "$restore_claude" -eq 1 ] && pruefe_acl_werkzeuge "$claude_resolved" "$claude_resolved"
-  [ "$restore_agy" -eq 1 ] && pruefe_acl_werkzeuge "$agy_resolved" "$agy_resolved"
-  [ "$restore_statusline" -eq 1 ] && [ -e "$statusline_resolved" ] && pruefe_acl_werkzeuge "$statusline_resolved" "$statusline_resolved"
+  # Sicherung. Eine Prüfung nur gegen die schon vorhandene Zieldatei selbst
+  # (wie noch in Runde 10) übersieht eine vom Zielverzeichnis per
+  # Default-ACL geerbte ACL: die zeigt sich erst an einer echten, frisch
+  # angelegten Zwischendatei in genau diesem Verzeichnis — ohne das käme
+  # der Abbruch bei "agy" erst beim tatsächlichen mktemp weiter unten,
+  # NACHDEM claude schon zurückgespielt wurde, und der Zeitstempel für
+  # einen Rückbau dieses Rückbaus würde nie ausgegeben (Befund 2b, Runde
+  # 11). Für alle Ziele dieses Aufrufs, bevor irgendetwas geschrieben wird
+  # (all-or-nothing) — siehe pruefe_acl_werkzeuge_frueh (oben).
+  [ "$restore_claude" -eq 1 ] && pruefe_acl_werkzeuge_frueh "$claude_resolved" "$claude_resolved"
+  [ "$restore_agy" -eq 1 ] && pruefe_acl_werkzeuge_frueh "$agy_resolved" "$agy_resolved"
+  [ "$restore_statusline" -eq 1 ] && [ -e "$statusline_resolved" ] && pruefe_acl_werkzeuge_frueh "$statusline_resolved" "$statusline_resolved"
 
   echo "Rückbau zu Zeitstempel $ts:"
   local claude_vor_sha="" agy_vor_sha="" statusline_vor_sha=""

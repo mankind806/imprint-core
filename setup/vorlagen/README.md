@@ -123,8 +123,15 @@ Alle drei Unterbefehle:
   währenddessen (ein anderer Prozess, ein gleichzeitiges "immer erlauben"), bricht das Skript
   ohne jede Änderung ab, statt eine Sicherung des schon veralteten Standes anzulegen;
 * prüfen, BEVOR eine Sicherung angelegt wird, ob `getfacl`/`setfacl` fehlen, obwohl sie gebraucht
-  würden (Zieldatei mit ACL, oder eine per `mktemp` im Zielverzeichnis schon angelegte
-  Zwischendatei, deren ACL ein vom Verzeichnis geerbtes Default-ACL verrät) — sonst bräche das
+  würden — geprüft wird dafür immer eine ECHTE, frisch per `mktemp` im Zielverzeichnis angelegte
+  (und sofort wieder entfernte) Probe-Datei, nicht nur eine schon vorhandene Zieldatei selbst: nur
+  eine neu angelegte Datei zeigt zuverlässig, ob das Verzeichnis eine Default-ACL an neue Dateien
+  vererbt (Befund 2b, Runde 11 — `rueckbau`s frühere Prüfung sah nur die Zieldatei an und übersah
+  so eine Verzeichnis-Default-ACL bis zum tatsächlichen Schreiben, nachdem ein anderes Ziel
+  desselben Aufrufs, z. B. `claude` bei einem gemeinsamen `rueckbau`-Zeitstempel mit `agy`, schon
+  geändert war). Bei `agy` deckt diese Prüfung `settings.json` UND `statusline.py` ab, BEVOR eine
+  von beiden geschrieben wird (Befund 2a, Runde 11 — vorher lief die Prüfung für `statusline.py`
+  erst nach der Rückfrage und nach dem schon geschriebenen `settings.json`). Sonst bräche das
   Skript erst NACH der Rückfrage und NACH einer schon angelegten Sicherung ab, mit einer
   überzähligen `.bak`-Datei als Rest (Befund 3, Runde 10);
 * legen bei Zustimmung zuerst eine Sicherung mit sekundengenauem Zeitstempel neben der
@@ -134,8 +141,11 @@ Alle drei Unterbefehle:
   vorhanden — `chmod --reference` kopiert keine ACL-Einträge) und übernehmen die neue Datei erst
   danach per atomarem `mv`; hat die Zieldatei KEINE ACL, aber die neue Zwischendatei durch ein
   Default-ACL ihres Verzeichnisses trotzdem eine, wird diese per `setfacl -b` wieder entfernt,
-  statt sie stillschweigend zu behalten (Befund 4, Runde 10) — dasselbe gilt für `rueckbau` und
-  die `statusline.py`-Installation;
+  statt sie stillschweigend zu behalten (Befund 4, Runde 10) — dasselbe gilt für `rueckbau`.
+  `statusline.py` bekommt ihre ACL nie vom eigenen Checkout (dessen zufällige ACL sonst auf jede
+  Installation übertragen würde, obwohl `statusline.py` "fest 0755" ist), sondern beim Ersetzen
+  vom bestehenden Ziel, bei einer Neuinstallation wird eine geerbte ACL bedingungslos entfernt
+  (Befund 1, Runde 11);
 * schreiben, wenn die Zieldatei (oder ein Verzeichnis auf ihrem Weg) ein Symlink ist, auf die
   Datei, auf die er zeigt (`readlink -f`) — der Symlink selbst bleibt erhalten.
 
