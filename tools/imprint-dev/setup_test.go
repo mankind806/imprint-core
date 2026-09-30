@@ -13,6 +13,8 @@ import (
 func TestSetupPlanTreeInvariants(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 
 	root := t.TempDir()
@@ -41,7 +43,7 @@ func TestSetupPlanTreeInvariants(t *testing.T) {
 			"id": "item-gleich",
 			"typ": "copy",
 			"quelle": "src/file_gleich.txt",
-			"ziel": "${HOME}/file_gleich.txt",
+			"ziel": "${XDG_CONFIG_HOME}/imprint/file_gleich.txt",
 			"rechte": false,
 			"beschreibung": "Equal file"
 		},
@@ -55,9 +57,9 @@ func TestSetupPlanTreeInvariants(t *testing.T) {
 		},
 		{
 			"id": "item-fehlt",
-			"typ": "githook",
+			"typ": "copy",
 			"quelle": "src/file_fehlt.txt",
-			"ziel": "${HOME}/missing_file.txt",
+			"ziel": "${XDG_DATA_HOME}/imprint/missing_file.txt",
 			"rechte": false,
 			"beschreibung": "Missing file"
 		}
@@ -66,9 +68,7 @@ func TestSetupPlanTreeInvariants(t *testing.T) {
 		t.Fatalf("failed to write inventar.json: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(tempHome, "file_gleich.txt"), []byte("content same\n"), 0644); err != nil {
-		t.Fatalf("failed to write target file: %v", err)
-	}
+	writeFiles(t, tempHome, map[string]string{".config/imprint/file_gleich.txt": "content same\n"})
 	xdgDir := filepath.Join(tempHome, ".config")
 	if err := os.MkdirAll(xdgDir, 0755); err != nil {
 		t.Fatalf("failed to create xdg dir: %v", err)
@@ -147,11 +147,12 @@ func TestSetupValidationAndExitCodes(t *testing.T) {
 }
 
 func TestSetupRepoOption(t *testing.T) {
+	setupTestHome(t)
 	root := t.TempDir()
 	setupDir := filepath.Join(root, "setup")
 	_ = os.MkdirAll(setupDir, 0755)
 	_ = os.WriteFile(filepath.Join(root, "src.txt"), []byte("a\n"), 0644)
-	validJSON := `[{"id": "root-item", "typ": "copy", "quelle": "src.txt", "ziel": "${HOME}/z.txt", "rechte": false, "beschreibung": "b"}]`
+	validJSON := `[{"id": "root-item", "typ": "copy", "quelle": "src.txt", "ziel": "${XDG_CONFIG_HOME}/imprint/z.txt", "rechte": false, "beschreibung": "b"}]`
 	_ = os.WriteFile(filepath.Join(setupDir, "inventar.json"), []byte(validJSON), 0644)
 
 	var stdout, stderr bytes.Buffer
@@ -199,6 +200,8 @@ func TestQuelleEscapesRoot(t *testing.T) {
 func TestSetupPlanRejectsQuelleTraversal(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 
 	// A file outside the inventory root that a traversing "quelle" must not
@@ -217,7 +220,7 @@ func TestSetupPlanRejectsQuelleTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to compute relative path: %v", err)
 	}
-	inventoryJSON := fmt.Sprintf(`[{"id": "escape-attempt", "typ": "copy", "quelle": %q, "ziel": "${HOME}/copied.txt", "rechte": false, "beschreibung": "b"}]`, filepath.ToSlash(rel))
+	inventoryJSON := fmt.Sprintf(`[{"id": "escape-attempt", "typ": "copy", "quelle": %q, "ziel": "${XDG_CONFIG_HOME}/imprint/copied.txt", "rechte": false, "beschreibung": "b"}]`, filepath.ToSlash(rel))
 	if err := os.WriteFile(filepath.Join(setupDir, "inventar.json"), []byte(inventoryJSON), 0644); err != nil {
 		t.Fatalf("failed to write inventar.json: %v", err)
 	}
@@ -233,7 +236,7 @@ func TestSetupPlanRejectsQuelleTraversal(t *testing.T) {
 	if bytes.Contains(stdout.Bytes(), []byte("top-secret-content")) {
 		t.Fatalf("secret file content leaked into output:\n%s", stdout.String())
 	}
-	if _, err := os.Stat(filepath.Join(tempHome, "copied.txt")); err == nil {
+	if _, err := os.Stat(filepath.Join(tempHome, ".config", "imprint", "copied.txt")); err == nil {
 		t.Fatalf("secret file must not have been copied to ziel")
 	}
 }
@@ -254,7 +257,14 @@ func hashTree(t *testing.T, dir string) string {
 			return err
 		}
 		var data []byte
-		if !d.IsDir() {
+		if d.Type()&fs.ModeSymlink != 0 {
+			// Record where a symlink points, never follow it.
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			data = []byte("symlink:" + target)
+		} else if !d.IsDir() {
 			data, err = os.ReadFile(p)
 			if err != nil {
 				return err

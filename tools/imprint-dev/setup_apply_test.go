@@ -12,6 +12,7 @@ import (
 func TestZielEscapesErlaubteWurzeln(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
@@ -62,6 +63,7 @@ func TestSetupExclusivity(t *testing.T) {
 func TestSetupApplyEnvGuard(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
@@ -70,7 +72,7 @@ func TestSetupApplyEnvGuard(t *testing.T) {
 	_ = os.MkdirAll(setupDir, 0755)
 	_ = os.WriteFile(filepath.Join(root, "src.txt"), []byte("data\n"), 0644)
 
-	invJSON := `[{"id": "item1", "typ": "copy", "quelle": "src.txt", "ziel": "${HOME}/dst.txt", "rechte": false, "beschreibung": "b"}]`
+	invJSON := `[{"id": "item1", "typ": "copy", "quelle": "src.txt", "ziel": "${XDG_CONFIG_HOME}/imprint/dst.txt", "rechte": false, "beschreibung": "b"}]`
 	_ = os.WriteFile(filepath.Join(setupDir, "inventar.json"), []byte(invJSON), 0644)
 
 	beforeHash := hashTree(t, tempHome)
@@ -82,13 +84,14 @@ func TestSetupApplyEnvGuard(t *testing.T) {
 		{"CLAUDECODE", "1"},
 		{"AGY_SESSION", "active"},
 		{"ANTIGRAVITY_CONFIG_DIR", "/tmp/agy"},
+		{"CLAUDECODE", ""},
+		{"AGY_SESSION", ""},
+		{"ANTIGRAVITY_CONFIG_DIR", ""},
 	}
 
 	for _, tc := range envCases {
-		t.Run(tc.key, func(t *testing.T) {
-			t.Setenv("CLAUDECODE", "")
-			t.Setenv("AGY_SESSION", "")
-			t.Setenv("ANTIGRAVITY_CONFIG_DIR", "")
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			clearApplyGuardEnv(t)
 			t.Setenv(tc.key, tc.val)
 
 			var stdout, stderr bytes.Buffer
@@ -111,13 +114,12 @@ func TestSetupApplyEnvGuard(t *testing.T) {
 func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
 	// Ensure env guard is not triggered
-	t.Setenv("CLAUDECODE", "")
-	t.Setenv("AGY_SESSION", "")
-	t.Setenv("ANTIGRAVITY_CONFIG_DIR", "")
+	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
 	setupDir := filepath.Join(root, "setup")
@@ -138,12 +140,12 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 			"id": "copy-item",
 			"typ": "copy",
 			"quelle": "copy_src.txt",
-			"ziel": "${HOME}/copy_dst.txt",
+			"ziel": "${XDG_CONFIG_HOME}/imprint/copy_dst.txt",
 			"rechte": false,
 			"beschreibung": "Copy file"
 		},
 		{
-			"id": "shim-item",
+			"id": "imprint-dev",
 			"typ": "shim",
 			"quelle": "bin/imprint-dev",
 			"ziel": "${HOME}/.local/bin/imprint-dev",
@@ -169,14 +171,14 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 	}
 
 	// Verify copy file
-	copyDstData, err := os.ReadFile(filepath.Join(tempHome, "copy_dst.txt"))
+	copyDstData, err := os.ReadFile(filepath.Join(tempHome, ".config", "imprint", "copy_dst.txt"))
 	if err != nil || string(copyDstData) != "copy content\n" {
 		t.Fatalf("copy dst file missing or incorrect: %v, content: %q", err, string(copyDstData))
 	}
 
 	// Verify shim file
 	shimDstData, err := os.ReadFile(filepath.Join(tempHome, ".local", "bin", "imprint-dev"))
-	expectedShim := "#!/bin/sh\nexec \"$IMPRINT_CORE_ROOT/bin/imprint-dev\" \"$@\"\n"
+	expectedShim := "#!/bin/sh\nexec \"$IMPRINT_CORE_ROOT\"/'bin/imprint-dev' \"$@\"\n"
 	if err != nil || string(shimDstData) != expectedShim {
 		t.Fatalf("shim dst file missing or incorrect: %v, content: %q", err, string(shimDstData))
 	}
@@ -209,12 +211,11 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 func TestSetupApplyRechteTor(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
-	t.Setenv("CLAUDECODE", "")
-	t.Setenv("AGY_SESSION", "")
-	t.Setenv("ANTIGRAVITY_CONFIG_DIR", "")
+	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
 	setupDir := filepath.Join(root, "setup")
@@ -273,6 +274,7 @@ func TestSetupApplyRechteTor(t *testing.T) {
 func TestSetupApplySystemd(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
@@ -280,9 +282,7 @@ func TestSetupApplySystemd(t *testing.T) {
 	emptyPathDir := t.TempDir()
 	t.Setenv("PATH", emptyPathDir)
 
-	t.Setenv("CLAUDECODE", "")
-	t.Setenv("AGY_SESSION", "")
-	t.Setenv("ANTIGRAVITY_CONFIG_DIR", "")
+	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
 	setupDir := filepath.Join(root, "setup")
@@ -318,10 +318,9 @@ func TestSetupApplySystemd(t *testing.T) {
 func TestSetupApplyGithook(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 
-	t.Setenv("CLAUDECODE", "")
-	t.Setenv("AGY_SESSION", "")
-	t.Setenv("ANTIGRAVITY_CONFIG_DIR", "")
+	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
 	cmdInit := exec.Command("git", "init", root)
@@ -376,12 +375,11 @@ func TestSetupApplyGithook(t *testing.T) {
 func TestSetupApplyIdempotency(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
-	t.Setenv("CLAUDECODE", "")
-	t.Setenv("AGY_SESSION", "")
-	t.Setenv("ANTIGRAVITY_CONFIG_DIR", "")
+	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
 	setupDir := filepath.Join(root, "setup")
@@ -394,7 +392,7 @@ func TestSetupApplyIdempotency(t *testing.T) {
 			"id": "file-item",
 			"typ": "copy",
 			"quelle": "file.txt",
-			"ziel": "${HOME}/file.txt",
+			"ziel": "${XDG_CONFIG_HOME}/imprint/file.txt",
 			"rechte": false,
 			"beschreibung": "File"
 		}
@@ -424,7 +422,7 @@ func TestSetupApplyIdempotency(t *testing.T) {
 	}
 
 	// Verify no .bak files created
-	if _, err := os.Stat(filepath.Join(tempHome, "file.txt.bak")); err == nil {
+	if _, err := os.Stat(filepath.Join(tempHome, ".config", "imprint", "file.txt.bak")); err == nil {
 		t.Fatalf(".bak file should not be created when file was already up to date")
 	}
 }
@@ -440,6 +438,7 @@ func TestSetupApplyIdempotency(t *testing.T) {
 func TestSetupPlanRechteGatedNeverLeaksContent(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
