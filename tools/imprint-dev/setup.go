@@ -1364,6 +1364,49 @@ func inspectGithook(repo string) inspectResult {
 	return inspectResult{status: "nicht-prüfbar", reason: fmt.Sprintf("git config core.hooksPath nicht lesbar: %v", err)}
 }
 
+// gitEnvWithoutOverrides is os.Environ() with GIT_DIR, GIT_WORK_TREE and
+// every GIT_CONFIG* variable (GIT_CONFIG, GIT_CONFIG_GLOBAL, _SYSTEM,
+// _COUNT, _KEY_*, _VALUE_*) removed, so a value inherited from the calling
+// shell or agent cannot redirect a "git -C <dir>" call away from <dir>.
+func gitEnvWithoutOverrides() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if key == "GIT_DIR" || key == "GIT_WORK_TREE" || strings.HasPrefix(key, "GIT_CONFIG") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// githookIsOwnToplevel reports whether root is a git repository's own
+// toplevel, not merely a directory inside some ancestor's repository.
+// "git -C root config --local" does not check this itself: given a root
+// with no .git of its own, it walks up and silently writes to the nearest
+// ancestor repository's config instead -- turning core.hooksPath into a
+// change to a foreign checkout that happens to contain root. The env is
+// scrubbed (gitEnvWithoutOverrides) so an inherited GIT_DIR cannot fake the
+// answer either.
+func githookIsOwnToplevel(root string) (bool, error) {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel")
+	cmd.Env = gitEnvWithoutOverrides()
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	topFi, err := os.Stat(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, err
+	}
+	rootFi, err := os.Stat(root)
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(topFi, rootFi), nil
+}
+
 // deepMerge is jq's "a * b": objects merge recursively, anything else in b
 // replaces a.
 func deepMerge(a, b any) any {
@@ -1382,8 +1425,74 @@ func deepMerge(a, b any) any {
 	return out
 }
 
+// permissionsArrayPath is a JSON path that rechte-anwenden.sh (setup/vorlagen,
+// imprint-core-CL-012) merges as a UNION of the target's own entries and the
+// template's, not as jq's "a * b" (which would replace the whole array with
+// the template's). fragmentEqual compares these two paths as a subset check
+// instead of deepMerge's replace-and-compare, so a target that already has
+// its own extra allow/deny entries plus every template entry still reads
+// "gleich" after a correct apply.
+func permissionsArrayPath(path []string) bool {
+	return len(path) == 2 && path[0] == "permissions" && (path[1] == "allow" || path[1] == "deny")
+}
+
+// arrayIsSubset reports whether every element of tmpl occurs somewhere in
+// cur, regardless of order or of extra elements cur may hold. Used only for
+// permissionsArrayPath; anything not a JSON array falls back to an exact
+// comparison.
+func arrayIsSubset(tmpl, cur any) bool {
+	tmplArr, ok := tmpl.([]any)
+	if !ok {
+		return reflect.DeepEqual(tmpl, cur)
+	}
+	curArr, ok := cur.([]any)
+	if !ok {
+		return false
+	}
+	for _, te := range tmplArr {
+		found := false
+		for _, ce := range curArr {
+			if reflect.DeepEqual(te, ce) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// fragmentEqual reports whether merging tmpl into cur (deepMerge's "a * b")
+// would change cur. It walks both trees itself instead of calling deepMerge
+// and comparing, so it can special-case permissionsArrayPath along the way:
+// there, "would not change cur" means every template entry is already
+// present in cur (arrayIsSubset), matching rechte-anwenden.sh's union merge
+// instead of jq's array replace.
+func fragmentEqual(cur, tmpl any, path []string) bool {
+	tmplMap, tmplIsMap := tmpl.(map[string]any)
+	curMap, curIsMap := cur.(map[string]any)
+	if tmplIsMap && curIsMap {
+		for k, tv := range tmplMap {
+			if !fragmentEqual(curMap[k], tv, append(append([]string{}, path...), k)) {
+				return false
+			}
+		}
+		return true
+	}
+	if tmplIsMap != curIsMap {
+		return false
+	}
+	if permissionsArrayPath(path) {
+		return arrayIsSubset(tmpl, cur)
+	}
+	return reflect.DeepEqual(tmpl, cur)
+}
+
 // fragmentStatus compares a fragment-merge template with its target: gleich
-// when deep-merging the template into the target changes nothing. Neither
+// when deep-merging the template into the target changes nothing (except
+// permissions.allow/deny, a union merge -- see fragmentEqual). Neither
 // content is ever returned, only the status.
 func fragmentStatus(soll, ist []byte) (status, reason string) {
 	var tmpl, cur any
@@ -1399,7 +1508,7 @@ func fragmentStatus(soll, ist []byte) (status, reason string) {
 	if _, ok := cur.(map[string]any); !ok {
 		return "nicht-prüfbar", "ziel ist kein JSON-Objekt"
 	}
-	if reflect.DeepEqual(deepMerge(cur, tmpl), cur) {
+	if fragmentEqual(cur, tmpl, nil) {
 		return "gleich", ""
 	}
 	return "abweichend", ""
@@ -1635,17 +1744,27 @@ func checkExecutableQuelle(invRoot, quelle string) (string, error) {
 	return qRes, nil
 }
 
+// rechteSkriptArg is the argument rechteSkriptCall prints for e: the id
+// without the suffix "-rechte-vorlage" (claude-rechte-vorlage → claude).
+func rechteSkriptArg(e setupEntry) string {
+	return strings.TrimSuffix(e.ID, "-rechte-vorlage")
+}
+
 // rechteSkriptCall is the printed call of rechteAnwendenSkript for e. The
-// argument is the id without the suffix "-rechte-vorlage" (claude-rechte-vorlage
-// → claude). The script must be an executable regular file inside the root.
+// script must be an executable regular file inside the root.
 func rechteSkriptCall(invRoot string, e setupEntry) (string, error) {
 	abs, err := checkExecutableQuelle(invRoot, rechteAnwendenSkript)
 	if err != nil {
 		return "", fmt.Errorf("anwenden=%s braucht %s im Plugin-Root: %v", e.Anwenden, rechteAnwendenSkript, err)
 	}
-	arg := strings.TrimSuffix(e.ID, "-rechte-vorlage")
-	return shellQuote(abs) + " " + shellQuote(arg), nil
+	return shellQuote(abs) + " " + shellQuote(rechteSkriptArg(e)), nil
 }
+
+// rechteSkriptAgyHinweis is the comment --apply prints next to the agy call
+// of rechteAnwendenSkript: unlike claude and agy-statusline, agy renders
+// ${PROJEKTE} and ${TRUSTED_WORKSPACE} with envsubst, so the human running
+// the printed call needs both set first (setup/vorlagen/README.md).
+const rechteSkriptAgyHinweis = "# braucht PROJEKTE=… TRUSTED_WORKSPACE=…, siehe setup/vorlagen/README.md"
 
 // printGatedCommands renders content into the cache and prints the commands a
 // human runs: a backup of an existing target, then the new content, both with
@@ -1692,107 +1811,104 @@ func printGatedCommands(stdout io.Writer, e setupEntry, zc zielCheck, content []
 	return nil
 }
 
-func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Writer) int {
-	if repoNote != "" {
-		fmt.Fprintln(stdout, repoNote)
-	}
+// applyPlan is one non-repo entry's outcome, computed without writing
+// anything: either a status already known without a write (status set, run
+// nil -- githook already "gleich"), or a write deferred to run, holding
+// every value planApplyItem already read and checked, so run itself
+// performs no validation that could still fail for a reason planApplyItem
+// could have caught.
+type applyPlan struct {
+	entry  setupEntry
+	status string
+	run    func(stdout io.Writer) (string, error)
+}
 
-	var entries []setupEntry
-	var statuses []string
-	var failures []string
-	hasRepo := false
-	add := func(e setupEntry, status string) {
-		entries = append(entries, e)
-		statuses = append(statuses, status)
-	}
-	fail := func(e setupEntry, reason string) {
-		add(e, "Fehler")
-		failures = append(failures, fmt.Sprintf("[%s] %s", e.ID, reason))
-	}
+// planApplyItem checks a non-repo entry and prepares its write, but writes
+// nothing and prints nothing itself: every read, path and conflict check
+// that can fail happens here, so runSetupApply can validate every entry
+// before committing to write any of them (see its comment).
+func planApplyItem(item processedItem) (applyPlan, error) {
+	e := item.entry
+	plan := applyPlan{entry: e}
 
-	for _, item := range items {
-		e := item.entry
+	if hasFileTarget(e.Typ) || entryIsRechteGated(e) {
+		zc := checkZiel(e)
+		if zc.status != "" {
+			return plan, fmt.Errorf("%s: %s", zc.status, zc.reason)
+		}
+		gated := entryIsRechteGated(e)
 
-		// Entries from --repo are never written, rendered or turned into a
-		// printed command: status only.
-		if item.fromRepo {
-			hasRepo = true
-			add(e, inspectItem(item, false).status+" (repo, nicht angewendet)")
-			continue
+		// A rights target with an "anwenden" field: only the human script
+		// applies it; no cache file, no cp, no jq pipe.
+		if gated && e.Anwenden != "" {
+			call, err := rechteSkriptCall(item.invRoot, e)
+			if err != nil {
+				return plan, err
+			}
+			agy := rechteSkriptArg(e) == "agy"
+			plan.run = func(stdout io.Writer) (string, error) {
+				fmt.Fprintln(stdout, call)
+				if agy {
+					fmt.Fprintln(stdout, rechteSkriptAgyHinweis)
+				}
+				return "gedruckt", nil
+			}
+			return plan, nil
 		}
 
-		if hasFileTarget(e.Typ) || entryIsRechteGated(e) {
-			zc := checkZiel(e)
-			if zc.status != "" {
-				fail(e, zc.status+": "+zc.reason)
-				continue
+		var data []byte
+		var quelleMode fs.FileMode
+		perm := writeMode(e.Typ)
+		if e.Typ == "shim" && !gated {
+			if other := shimPathConflict(filepath.Base(zc.lexical)); other != "" {
+				return plan, fmt.Errorf("verweigert: Shim-Name ist schon ein anderes Kommando in PATH (%s)", other)
 			}
-			gated := entryIsRechteGated(e)
-
-			// A rights target with an "anwenden" field: only the human script
-			// applies it; no cache file, no cp, no jq pipe.
-			if gated && e.Anwenden != "" {
-				call, err := rechteSkriptCall(item.invRoot, e)
-				if err != nil {
-					fail(e, err.Error())
-					continue
-				}
-				fmt.Fprintln(stdout, call)
-				add(e, "gedruckt")
-				continue
+			content, err := shimContent(e.Quelle)
+			if err != nil {
+				return plan, err
 			}
-
-			var data []byte
-			var quelleMode fs.FileMode
-			perm := writeMode(e.Typ)
-			if e.Typ == "shim" && !gated {
-				if other := shimPathConflict(filepath.Base(zc.lexical)); other != "" {
-					fail(e, fmt.Sprintf("verweigert: Shim-Name ist schon ein anderes Kommando in PATH (%s)", other))
-					continue
-				}
-				content, err := shimContent(e.Quelle)
-				if err != nil {
-					fail(e, err.Error())
-					continue
-				}
-				// The shim runs $IMPRINT_CORE_ROOT/<quelle>; it must exist in
-				// the root and be executable before a shim points at it.
-				if _, err := checkExecutableQuelle(item.invRoot, e.Quelle); err != nil {
-					fail(e, fmt.Sprintf("Shim-quelle nicht nutzbar: %v", err))
-					continue
-				}
-				data = []byte(content)
-			} else {
-				var qfi fs.FileInfo
-				var err error
-				data, qfi, err = readQuelle(item.invRoot, e.Quelle)
-				if err != nil {
-					fail(e, err.Error())
-					continue
-				}
-				quelleMode = qfi.Mode()
+			// The shim runs $IMPRINT_CORE_ROOT/<quelle>; it must exist in
+			// the root and be executable before a shim points at it.
+			if _, err := checkExecutableQuelle(item.invRoot, e.Quelle); err != nil {
+				return plan, fmt.Errorf("Shim-quelle nicht nutzbar: %v", err)
 			}
-
-			if e.Typ == "systemd" && !gated {
-				if other := systemdUnitElsewhere(filepath.Base(zc.lexical)); other != "" {
-					fmt.Fprintf(stdout, "# %s: Unit-Name existiert auch in %s; nur gedruckt, wie bei rechte=true\n", e.ID, other)
-					gated = true
-				}
+			data = []byte(content)
+		} else {
+			var qfi fs.FileInfo
+			var err error
+			data, qfi, err = readQuelle(item.invRoot, e.Quelle)
+			if err != nil {
+				return plan, err
 			}
+			quelleMode = qfi.Mode()
+		}
 
-			if gated {
-				content := data
-				if entryIsRechteGated(e) {
-					content = []byte(renderTemplate(string(data)))
+		systemdConflict := ""
+		if e.Typ == "systemd" && !gated {
+			if other := systemdUnitElsewhere(filepath.Base(zc.lexical)); other != "" {
+				systemdConflict = other
+				gated = true
+			}
+		}
+
+		if gated {
+			content := data
+			if entryIsRechteGated(e) {
+				content = []byte(renderTemplate(string(data)))
+			}
+			plan.run = func(stdout io.Writer) (string, error) {
+				if systemdConflict != "" {
+					fmt.Fprintf(stdout, "# %s: Unit-Name existiert auch in %s; nur gedruckt, wie bei rechte=true\n", e.ID, systemdConflict)
 				}
 				if err := printGatedCommands(stdout, e, zc, content, quelleMode); err != nil {
-					fail(e, err.Error())
-					continue
+					return "", err
 				}
-				add(e, "gedruckt")
-				continue
+				return "gedruckt", nil
 			}
+			return plan, nil
+		}
 
+		plan.run = func(stdout io.Writer) (string, error) {
 			var before func(old []byte, exists bool) error
 			switch e.Typ {
 			case "shim":
@@ -1808,40 +1924,135 @@ func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Wri
 					return nil
 				}
 			}
-			status, err := installFile(zc.resolved, data, perm, 0o755, true, before)
-			if err != nil {
-				fail(e, err.Error())
-				continue
+			return installFile(zc.resolved, data, perm, 0o755, true, before)
+		}
+		return plan, nil
+	}
+
+	switch e.Typ {
+	case "githook":
+		if inspectGithook(item.repo).status == "gleich" {
+			plan.status = "unverändert"
+			return plan, nil
+		}
+		// git -C repo config --local silently walks up to an ancestor
+		// repository's config when repo has no .git of its own; refuse
+		// instead of writing there (imprint-core-CL-011, Runde 5, Befund 1).
+		repo := item.repo
+		if ok, terr := githookIsOwnToplevel(repo); terr != nil || !ok {
+			return plan, errors.New("--root ist kein eigenes Git-Repository (kein .git); core.hooksPath würde in das Repo eines übergeordneten Verzeichnisses geschrieben, verweigert")
+		}
+		plan.run = func(io.Writer) (string, error) {
+			cmd := exec.Command("git", "-C", repo, "config", "--local", "core.hooksPath", ".githooks")
+			cmd.Env = gitEnvWithoutOverrides()
+			if err := cmd.Run(); err != nil {
+				return "", fmt.Errorf("git config fehlgeschlagen: %v", err)
 			}
-			add(e, status)
+			return "geschrieben", nil
+		}
+		return plan, nil
+	case "marketplace":
+		quelle := e.Quelle
+		plan.run = func(stdout io.Writer) (string, error) {
+			fmt.Fprintf(stdout, "claude plugin marketplace add %s\n", shellQuote(quelle))
+			return "gedruckt", nil
+		}
+		return plan, nil
+	case "mcp":
+		id, quelle := e.ID, e.Quelle
+		plan.run = func(stdout io.Writer) (string, error) {
+			fmt.Fprintf(stdout, "claude mcp add %s %s\n", shellQuote(id), shellQuote(quelle))
+			return "gedruckt", nil
+		}
+		return plan, nil
+	default:
+		return plan, fmt.Errorf("unbekannter typ %s", e.Typ)
+	}
+}
+
+// runSetupApply validates every entry before it writes any of them: a first
+// pass plans each entry (planApplyItem: every check that can fail, but no
+// write and no print) and only once every entry has planned cleanly does a
+// second pass run the writes. Without this, one invalid entry among several
+// valid ones left the valid ones already written when the invalid one's
+// failure was discovered (imprint-core-CL-011, Runde 5, Befund 2) -- an
+// inventory that fails validation now writes nothing at all.
+func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Writer) int {
+	if repoNote != "" {
+		fmt.Fprintln(stdout, repoNote)
+	}
+
+	type outcome struct {
+		entry  setupEntry
+		status string
+		run    func(stdout io.Writer) (string, error)
+	}
+	var outcomes []outcome
+	var failures []string
+	hasRepo := false
+	allPlanned := true
+
+	for _, item := range items {
+		e := item.entry
+
+		// Entries from --repo are never written, rendered or turned into a
+		// printed command: status only, computed read-only either way.
+		if item.fromRepo {
+			hasRepo = true
+			outcomes = append(outcomes, outcome{entry: e, status: inspectItem(item, false).status + " (repo, nicht angewendet)"})
 			continue
 		}
 
-		switch e.Typ {
-		case "githook":
-			if inspectGithook(item.repo).status == "gleich" {
-				add(e, "unverändert")
-				continue
-			}
-			if err := exec.Command("git", "-C", item.repo, "config", "--local", "core.hooksPath", ".githooks").Run(); err != nil {
-				fail(e, fmt.Sprintf("git config fehlgeschlagen: %v", err))
-				continue
-			}
-			add(e, "geschrieben")
-		case "marketplace":
-			fmt.Fprintf(stdout, "claude plugin marketplace add %s\n", shellQuote(e.Quelle))
-			add(e, "gedruckt")
-		case "mcp":
-			fmt.Fprintf(stdout, "claude mcp add %s %s\n", shellQuote(e.ID), shellQuote(e.Quelle))
-			add(e, "gedruckt")
-		default:
-			fail(e, fmt.Sprintf("unbekannter typ %s", e.Typ))
+		plan, err := planApplyItem(item)
+		if err != nil {
+			allPlanned = false
+			failures = append(failures, fmt.Sprintf("[%s] %s", e.ID, err.Error()))
+			outcomes = append(outcomes, outcome{entry: e, status: "Fehler"})
+			continue
 		}
+		outcomes = append(outcomes, outcome{entry: plan.entry, status: plan.status, run: plan.run})
 	}
 
 	if hasRepo {
 		fmt.Fprintln(stdout, repoStatusOnlyNote)
 	}
+
+	var entries []setupEntry
+	var statuses []string
+
+	if !allPlanned {
+		// At least one entry failed planning: write nothing at all, not
+		// even the entries that planned cleanly.
+		for _, o := range outcomes {
+			entries = append(entries, o.entry)
+			if o.status != "" {
+				statuses = append(statuses, o.status)
+			} else {
+				statuses = append(statuses, "nicht angewendet")
+			}
+		}
+		printStatusTable(stdout, entries, statuses)
+		for _, f := range failures {
+			fmt.Fprintln(stderr, "imprint-dev setup: "+f)
+		}
+		return exitViolation
+	}
+
+	for _, o := range outcomes {
+		entries = append(entries, o.entry)
+		if o.run == nil {
+			statuses = append(statuses, o.status)
+			continue
+		}
+		status, err := o.run(stdout)
+		if err != nil {
+			statuses = append(statuses, "Fehler")
+			failures = append(failures, fmt.Sprintf("[%s] %s", o.entry.ID, err.Error()))
+			continue
+		}
+		statuses = append(statuses, status)
+	}
+
 	printStatusTable(stdout, entries, statuses)
 	for _, f := range failures {
 		fmt.Fprintln(stderr, "imprint-dev setup: "+f)
