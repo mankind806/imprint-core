@@ -1,15 +1,24 @@
 # Rechte-Vorlagen für Claude Code und agy
 
 Zwei Vorlagen mit den geprüften Rechte-Regeln aus einer angewendeten, getesteten Konfiguration.
-**Nur der Mensch wendet sie an** (Nutzerentscheid CL-119/CL-123). `imprint-dev setup --apply`
-gibt es seit PR 38, aber es schreibt ein Rechte-Ziel (`rechte: true`, wie beide Einträge hier)
-nie selbst: für so ein Ziel rendert `--apply` die Vorlage nur in eine Cache-Datei unter
-`$XDG_CACHE_HOME/imprint` und druckt zwei `cp`-Befehle (Sicherung, dann Cache → Ziel) auf
-stdout; ausgeführt wird davon nichts (siehe `tools/imprint-dev/setup.go`, `runSetupApply` und
-`writeRechteCache`). Der gedruckte zweite `cp`-Befehl kopiert dabei roh — er kennt kein
-Fragment-Merge —, deshalb bleibt für `claude-rechte.json` weiterhin der jq-Merge unten
-Pflicht, nicht der gedruckte Befehl. Beide Vorlagen tragen trotzdem weiterhin eine eigene
-Deny-Regel gegen genau diesen Befehl — vorsorglich, damit kein Agent auch nur die
+**Nur der Mensch wendet sie an** (Nutzerentscheid CL-119/CL-123), mit dem geprüften Skript
+`setup/vorlagen/rechte-anwenden.sh` (siehe „Anwenden" unten) — nie mit einem eigenen `cp` von
+Hand. `imprint-dev setup --apply` gibt es seit PR 38, aber es schreibt ein Rechte-Ziel
+(`rechte: true`, wie beide Einträge hier) nie selbst: für so ein Ziel rendert `--apply` die
+Vorlage nur in eine Cache-Datei unter `$XDG_CACHE_HOME/imprint` und druckt zwei `cp`-Befehle
+(Sicherung, dann Cache → Ziel) auf stdout; ausgeführt wird davon nichts (siehe
+`tools/imprint-dev/setup.go`, `runSetupApply` und `writeRechteCache`). Gemessen gegen `gh pr
+diff 38` am 2026-09-30 druckt `--apply` diese zwei `cp`-Befehle für **jeden** Rechte-Ziel-
+Eintrag gleich, unabhängig vom Feld `anwenden` im Inventar — auch für `claude-rechte.json`
+(`anwenden: fragment-merge`). Der zweite, gedruckte `cp`-Befehl kopiert dabei roh und kennt
+keinen Fragment-Merge; ihn für `claude-rechte.json` auszuführen würde `hooks`, `env`,
+`enabledPlugins`, `sandbox` und `permissions.defaultMode` aus der bestehenden Datei löschen.
+Deshalb bleibt für `claude-rechte.json` weiterhin `setup/vorlagen/rechte-anwenden.sh claude`
+(bzw. dessen `jq -s '.[0] * .[1]'`-Muster) Pflicht, nie der von `--apply` gedruckte `cp`-Befehl
+— das gilt so lange, bis PR 38 oder eine Folge-Änderung das Feld `anwenden: fragment-merge`
+selbst auswertet und für einen solchen Eintrag keinen rohen `cp` mehr druckt (siehe
+Merge-Reihenfolge im Pull-Request-Text). Beide Vorlagen tragen trotzdem weiterhin eine eigene
+Deny-Regel gegen den `--apply`-Aufruf selbst — vorsorglich, damit kein Agent auch nur die
 Cache-Datei erzeugen oder die gedruckten Befehle selbst ausführen kann.
 
 ## Die zwei Vorlagen
@@ -55,66 +64,71 @@ in `agy-settings.json`). Der Mensch-Schritt zum Kopieren steht in „Anwenden" o
 
 ## Anwenden (nur der Mensch)
 
+Das frühere Rezept aus `cp`/`jq`/`envsubst`-Zeilen zum Abtippen ist durch ein geprüftes Skript
+ersetzt, `setup/vorlagen/rechte-anwenden.sh` (`bash`, `set -euo pipefail`). Es hat zwei
+Unterbefehle, einen je Vorlage — ausgeführt wird nach wie vor nur vom Menschen, nie automatisch:
+
 ```sh
-pkill -f 'agy --hub'   # sonst schreiben laufende Hubs den alten Stand zurück (gemessen 2026-09-30,
-                         # 00:49; die beendete Prozesszeile lautete "…/.gemini/bin/agy --hub …")
-pgrep -af -- '--hub'    # Kontrolle: muss leer sein - sonst die angezeigten PIDs gezielt beenden
-                         # statt erneut pkill zu raten
-
-ts="$(date +%Y%m%d-%H%M%S)"
-cp -n ~/.gemini/antigravity-cli/settings.json "$HOME/.gemini/antigravity-cli/settings.json.bak-$ts"
-cp -n ~/.claude/settings.json "$HOME/.claude/settings.json.bak-$ts"
-[ -f ~/.gemini/antigravity-cli/statusline.py ] && \
-  cp -n ~/.gemini/antigravity-cli/statusline.py "$HOME/.gemini/antigravity-cli/statusline.py.bak-$ts"
-
-: "${PROJEKTE:?PROJEKTE muss gesetzt sein}" "${TRUSTED_WORKSPACE:?TRUSTED_WORKSPACE muss gesetzt sein}" && \
-  HOME="$HOME" PROJEKTE="$PROJEKTE" TRUSTED_WORKSPACE="$TRUSTED_WORKSPACE" \
-  envsubst '${HOME} ${PROJEKTE} ${TRUSTED_WORKSPACE}' \
-  < setup/vorlagen/agy-settings.json > ~/.gemini/antigravity-cli/settings.json
-
-install -m 0755 setup/vorlagen/statusline.py ~/.gemini/antigravity-cli/statusline.py
-
-# claude-rechte.json liefert NUR den permissions-Block, nicht die ganze Datei. NIEMALS die
-# Vorlage direkt über ~/.claude/settings.json kopieren (kein `cp settings.json.neu
-# ~/.claude/settings.json` aus der Vorlagen-Datei selbst) — das würde hooks, env,
-# enabledPlugins, sandbox und defaultMode aus der bestehenden Datei löschen. Stattdessen nur
-# .permissions ersetzen, alles andere aus der bestehenden Datei behalten (Sicherung liegt schon
-# oben als settings.json.bak-$ts) und vor dem Übernehmen den Diff ansehen:
-jq -s '.[0] * {permissions: .[1].permissions}' \
-  ~/.claude/settings.json setup/vorlagen/claude-rechte.json \
-  > "$HOME/.claude/settings.json.neu-$ts"
-diff -u ~/.claude/settings.json "$HOME/.claude/settings.json.neu-$ts"   # erst ansehen …
-mv "$HOME/.claude/settings.json.neu-$ts" ~/.claude/settings.json       # … dann übernehmen
+setup/vorlagen/rechte-anwenden.sh claude
+setup/vorlagen/rechte-anwenden.sh agy
 ```
 
-Die Sicherungen laufen vor der `:?`-Prüfung, weil sie selbst nichts überschreiben, das nicht schon
-da ist (`cp -n`), und weil sie unabhängig von `PROJEKTE`/`TRUSTED_WORKSPACE` sinnvoll sind. Die
-`:?`-Prüfung selbst steht in derselben `&&`-Kette wie der `envsubst`-Aufruf: bricht sie ab, läuft
-die Kette dahinter nicht weiter, und `>` truncatet die Zieldatei nicht erst und scheitert dann erst
-an einem leeren `PROJEKTE` — ein `:?` in einer eigenen, vorangehenden Zeile würde das nicht
-verhindern, weil eine interaktive Shell nach dessen Fehlermeldung einfach mit der nächsten Zeile
-weiterläuft. `$HOME` selbst ist immer gesetzt; der Mensch wählt bewusst, wie weit
-`TRUSTED_WORKSPACE` reicht (siehe Platzhalter oben) — es wird hier absichtlich nicht auf `$HOME`
-vorbelegt. `cp -n` überschreibt eine schon vorhandene Sicherung mit demselben Zeitstempel nicht;
-derselbe `$ts` für alle drei Kopien hält sie zusammen.
+Beide Unterbefehle:
 
-`envsubst` mit der eingeschränkten Variablenliste lässt jedes andere `$`-Zeichen in den Dateien
-unverändert.
+* prüfen zuerst, dass `jq` und `envsubst` vorhanden sind, lösen die Vorlagendatei relativ zum
+  eigenen Skriptpfad auf (nicht zum Arbeitsverzeichnis) und verlangen eine existierende,
+  gültige JSON-Zieldatei (`jq -e .`); `agy` verlangt zusätzlich, dass `PROJEKTE` und
+  `TRUSTED_WORKSPACE` gesetzt und nicht leer sind (`:?`);
+* zeigen den Diff und fragen ausdrücklich nach (`Anwenden? [j/N]`); ohne `j`/`J` bricht das
+  Skript ohne jede Änderung ab;
+* legen bei Zustimmung zuerst eine Sicherung mit sekundengenauem Zeitstempel neben der
+  Zieldatei an (`cp -p -n`), erhalten die Rechte der Zieldatei (`chmod --reference`) und
+  übernehmen die neue Datei erst danach per atomarem `mv`;
+* schreiben, wenn die Zieldatei ein Symlink ist, auf die Datei, auf die er zeigt
+  (`readlink -f`) — der Symlink selbst bleibt erhalten.
+
+`claude` mergt den `permissions`-Block aus `claude-rechte.json` per `jq -s '.[0] * .[1]'` in die
+bestehende `~/.claude/settings.json`. Das ist ein **tiefer** Merge: `permissions.defaultMode`
+und alle anderen Top-Level-Schlüssel (`hooks`, `env`, `enabledPlugins`, `sandbox`, …) bleiben
+unverändert, aber Listen wie `permissions.allow`/`permissions.deny` werden dabei **vollständig
+durch die Vorlage ersetzt**, nicht mit dem Bestand vereinigt — ein `jq *`-Merge überschreibt
+gleichnamige Schlüssel, statt ihre Arrays zusammenzuführen. Vor dem Übernehmen prüft das Skript
+zur Plausibilität, dass `permissions.deny` im Ergebnis nicht leer ist.
+
+`agy` ersetzt `~/.gemini/antigravity-cli/settings.json` komplett durch `agy-settings.json` mit
+`envsubst` für `${PROJEKTE}`/`${TRUSTED_WORKSPACE}` (validiert danach per `jq -e .`, dass das
+Ergebnis gültiges JSON ist und kein unersetztes `${` mehr enthält) und installiert
+`setup/vorlagen/statusline.py` per `install -m 0755` nach
+`~/.gemini/antigravity-cli/statusline.py`.
+
+Laufende agy-Hubs schreiben eine geänderte `settings.json` sonst zurück (gemessen 2026-09-30,
+00:49; die beendete Prozesszeile lautete "…/.gemini/bin/agy --hub …"). `agy` zeigt dafür vor dem
+Diff einen Hinweis inklusive `pgrep`-Kontrolle; das Skript tötet selbst keinen Prozess — ein
+`pkill`-Muster wie `agy --hub` kann auch Hubs anderer, unbeteiligter Projekte treffen, und ein
+getöteter Prozess lässt sich über `rueckbau` nicht rückgängig machen:
+
+```sh
+pgrep -af -- '--hub'    # Kontrolle: welche Hubs laufen gerade
+pkill -f 'agy --hub'    # bei Bedarf gezielt beenden, dann erst mit "j" bestätigen
+```
 
 ## Rückbau
 
 ```sh
-pkill -f 'agy --hub'   # wieder zuerst, sonst schreibt ein laufender Hub die soeben
-                         # zurückgespielte Sicherung erneut mit dem angewendeten Stand zurück
-pgrep -af -- '--hub'    # Kontrolle: muss leer sein - sonst die angezeigten PIDs gezielt beenden
-cp ~/.gemini/antigravity-cli/settings.json.bak-<Zeitstempel> ~/.gemini/antigravity-cli/settings.json
-cp ~/.claude/settings.json.bak-<Zeitstempel> ~/.claude/settings.json
-# statusline.py.bak-<Zeitstempel> existiert nur, wenn beim Anwenden schon eine Datei da war
-# (siehe "Anwenden" oben); dann ebenso zurückkopieren, sonst die Kopie einfach entfernen:
-[ -f ~/.gemini/antigravity-cli/statusline.py.bak-<Zeitstempel> ] \
-  && cp ~/.gemini/antigravity-cli/statusline.py.bak-<Zeitstempel> ~/.gemini/antigravity-cli/statusline.py \
-  || rm -f ~/.gemini/antigravity-cli/statusline.py
+setup/vorlagen/rechte-anwenden.sh rueckbau <Zeitstempel>
 ```
+
+`claude` und `agy` erzeugen je einen eigenen Zeitstempel (zwei getrennte Aufrufe, siehe
+„Anwenden" oben, jeweils in der letzten Ausgabezeile). `rueckbau <Zeitstempel>` spielt zurück,
+was zu genau diesem Zeitstempel tatsächlich gesichert wurde — `~/.claude/settings.json`, wenn
+dazu ein `claude`-Lauf existiert, `~/.gemini/antigravity-cli/settings.json`, wenn dazu ein
+`agy`-Lauf existiert — und bricht ohne jede Änderung ab, wenn zu diesem Zeitstempel gar keine
+Sicherung existiert. `statusline.py` gehört nur zu einem `agy`-Lauf: nur wenn zum selben
+Zeitstempel auch `settings.json.bak-<Zeitstempel>` von `agy` existiert, entscheidet das Skript,
+ob `statusline.py` zurückgespielt wird (Sicherung vorhanden) oder entfernt (existierte vor dem
+Anwenden nicht) — ein `rueckbau` zu einem `claude`-Zeitstempel fasst `statusline.py` gar nicht
+erst an. Auch hier zuerst der Hub-Hinweis: ein laufender Hub würde die soeben zurückgespielte
+Sicherung sonst erneut mit dem zwischenzeitlich angewendeten Stand überschreiben.
 
 ## Testskript
 
