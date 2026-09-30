@@ -96,6 +96,10 @@ Das Inventar besteht aus einer JSON-Liste von Eintrags-Objekten. Jeder Eintrag e
 * `anwenden` (String, bei `rechte=true` Pflicht, sonst optional): `ersetzen` (Standard, die ganze Zieldatei) oder `fragment-merge` (nur mit `rechte=true` und `.json`-Ziel: nur die Schlüssel der Vorlage, tief gemergt, alle anderen bleiben). Bei `rechte=true` druckt `--apply` nur den Skript-Aufruf (siehe Rechte-Tor).
 * `beschreibung` (String): Kurze Beschreibung des Eintrags.
 
+### Einträge im Plugin-Inventar
+
+* `oberflaeche` (`typ: systemd`): Dienst-Unit der Web-App (`setup/systemd/imprint-oberflaeche.service` → `${XDG_CONFIG_HOME}/systemd/user/imprint-oberflaeche.service`, nicht aktiviert).
+
 ## Status-Werte
 
 * `fehlt`: Die Zieldatei existiert nicht.
