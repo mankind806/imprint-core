@@ -52,6 +52,22 @@ jobs:
         run: sh tools/test-arrival-agy.sh
       - name: imprint-dev check
         run: go run ./tools/imprint-dev check --root . --sarif "$RUNNER_TEMP/imprint-dev.sarif"
+      - name: typesafe Python tests (offline, no key)
+        env:
+          # CI has no TypeSafe key/network: ts_common.get_key() fails open by
+          # design, and the CLI integration tests in test_tools.py accept both
+          # the "ok" (live key) and "fail_open" (no key/network, expected
+          # here) outcomes. TYPESAFE_NAMES_FILE is written explicitly, with
+          # the same synthetic names test_mask_parity.py's own case file
+          # lists, so the "name" masking tests see them regardless of which
+          # test module unittest discover picks first (mask-test.py would
+          # otherwise only create the file lazily, on its own run).
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          printf 'Max Mustermann\nErika Musterfrau\n' >"$RUNNER_TEMP/typesafe-names.txt"
+          export TYPESAFE_NAMES_FILE="$RUNNER_TEMP/typesafe-names.txt"
+          python3 -m unittest discover -s tools/typesafe -v
+          python3 tools/typesafe/tests/mask-test.py
       - name: imprint-dev commit-check
         env:
           EVENT_NAME: ${{ github.event_name }}

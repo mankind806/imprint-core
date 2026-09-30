@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""ts-review-dedup: Deduplicate and prioritize code review findings via TypeSafe Jev.
+
+Takes review reports, markdown bullet lists, or stdin.
+Classifies each finding into:
+  - Stufe 2: Blocker (Sicherheit, Datenverlust, Invariantenbruch, Panik)
+  - Stufe 1: Mittel (Logikfehler, fehlende Tests, Randfälle)
+  - Stufe 0: Nit (Kosmetik, Formatierung, Stil)
+Detects duplicates/redundant points and outputs a prioritized Markdown action checklist.
+
+Usage:
+  ts-review-dedup review1.md [review2.md ...]
+  cat review.md | ts-review-dedup
+  ts-review-dedup "1. Dead code in client.go" "2. Line 458 unused var"
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
+import ts_common as tc  # noqa: E402
+
+FINDING_RX = re.compile(r"^(?:[-*+]\s+|\d+\.\s+|\[[ xX]\]\s+|Befund(?:\s+\d+)?:?\s*)(.+)$", re.MULTILINE)
+
+
+def extract_findings_from_text(text):
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = FINDING_RX.match(line)
+        if m:
+            item = m.group(1).strip()
+            # filter out markdown headers or trivial separator lines
+            if len(item) > 8 and not item.startswith("#"):
+                lines.append(item)
+        elif len(line) > 20 and not line.startswith(("#", "|", "```", "===")):
+            # Prose finding paragraph
+            lines.append(line)
+    return lines
+
+
+def build_questions(findings):
+    questions = {}
+    for i, f in enumerate(findings):
+        questions[f"sev_{i}"] = {
+            "type": "score",
+            "instructions": (
+                f"Assess the severity of finding #{i+1}:\n\"{f}\"\n"
+                "Level 0: Nit, cosmetic, spelling, formatting, naming style.\n"
+                "Level 1: Medium risk, missing test, unhandled error, edge-case bug.\n"
+                "Level 2: Blocker, security vulnerability, data loss, panic, race condition, or invariant break."
+            ),
+            "criteria": [
+                "Level 0: Nit or cosmetic",
+                "Level 1: Medium bug or test gap",
+                "Level 2: Blocker, security or data loss"
+            ]
+        }
+        if i > 0:
+            # Check duplicate against preceding items
+            preceding = "\n".join(f"#{j+1}: {findings[j]}" for j in range(i))
+            questions[f"dup_{i}"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Is finding #{i+1} (\"{f}\") essentially addressing the exact same problem or redundant with any of these preceding findings?\n"
+                    f"{preceding}"
+                )
+            }
+    return questions
+
+
+def triage_findings(findings):
+    if not findings:
+        return {"status": "ok", "findings": [], "message": "Keine Befunde übergeben"}
+
+    # Limit to top 20 findings per run to respect token limits
+    capped_findings = findings[:20]
+
+    # Masking before anything leaves the machine (privacy: only masked text goes to TypeSafe)
+    masked_findings = []
+    total_hits = {}
+    for f in capped_findings:
+        mf, h = tc.mask_detail(f)
+        masked_findings.append(mf)
+        total_hits = tc.add_counts(total_hits, h)
+
+    state = {
+        "findings_list": "\n".join(f"Finding #{i+1}: {mf}" for i, mf in enumerate(masked_findings))
+    }
+
+    questions = build_questions(masked_findings)
+    answers = tc.post(state, questions)
+
+    if not answers:
+        return {
+            "status": "fail_open",
+            "findings": [{"text": f, "level": 1, "is_dup": False} for f in findings],
+            "message": "TypeSafe API nicht erreichbar oder Key fehlt (fail-open)",
+            "masked_detail": total_hits
+        }
+
+    results = []
+    for i, orig_text in enumerate(capped_findings):
+        score_res = tc.score_level(answers, f"sev_{i}")
+        lvl, conf = score_res if score_res else (1, 0.5)
+
+        is_dup = False
+        dup_prob = 0.0
+        if i > 0:
+            dup_prob = tc.noul(answers, f"dup_{i}") or 0.0
+            if dup_prob >= 0.65:
+                is_dup = True
+
+        results.append({
+            "index": i + 1,
+            "text": orig_text,
+            "level": lvl,
+            "confidence": conf,
+            "is_duplicate": is_dup,
+            "duplicate_prob": dup_prob
+        })
+
+    return {
+        "status": "ok",
+        "findings": results,
+        "masked_detail": total_hits,
+        "raw_answers": answers
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="TypeSafe Review-Befund Deduplizierung und Triage (Jev)")
+    parser.add_argument("files_or_text", nargs="*", help="Review-Dateien (.md) oder Befund-Texte")
+    parser.add_argument("--json", action="store_true", help="JSON-Ausgabe")
+    args = parser.parse_args()
+
+    raw_text = ""
+    findings = []
+
+    if args.files_or_text:
+        for item in args.files_or_text:
+            if os.path.isfile(item):
+                try:
+                    with open(item, "r", encoding="utf-8") as f:
+                        findings.extend(extract_findings_from_text(f.read()))
+                except Exception as e:
+                    print(f"Warnung: Datei {item} konnte nicht gelesen werden: {e}", file=sys.stderr)
+            else:
+                findings.extend(extract_findings_from_text(item))
+    elif not sys.stdin.isatty():
+        raw_text = sys.stdin.read()
+        findings.extend(extract_findings_from_text(raw_text))
+
+    if not findings:
+        print("Keine Befunde zum Triagieren gefunden.")
+        sys.exit(0)
+
+    res = triage_findings(findings)
+
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+
+    if res["status"] == "fail_open":
+        print(f"Hinweis: {res['message']}")
+        for f in res["findings"]:
+            print(f"- [ ] {f['text']}")
+        sys.exit(0)
+
+    # Sort into categories: Blockers (2), Medium (1), Nits (0)
+    items = res["findings"]
+    blockers = [x for x in items if x["level"] == 2 and not x["is_duplicate"]]
+    mediums = [x for x in items if x["level"] == 1 and not x["is_duplicate"]]
+    nits = [x for x in items if x["level"] == 0 and not x["is_duplicate"]]
+    duplicates = [x for x in items if x["is_duplicate"]]
+
+    print("═══════════════════════════════════════════════════════════════")
+    print(f" TypeSafe Review Triage ({len(items)} Befunde, {len(duplicates)} Duplikate erkannt)")
+    print("═══════════════════════════════════════════════════════════════\n")
+
+    if blockers:
+        print("### 🚨 Blocker (Stufe 2 – Stoppt Merge)")
+        for b in blockers:
+            print(f"- [ ] **#{b['index']}** {b['text']} *(Konfidenz: {b['confidence']:.2f})*")
+        print()
+
+    if mediums:
+        print("### ⚠️ Nachbesserungen (Stufe 1 – Wichtig)")
+        for m in mediums:
+            print(f"- [ ] **#{m['index']}** {m['text']} *(Konfidenz: {m['confidence']:.2f})*")
+        print()
+
+    if nits:
+        print("### 💡 Hinweise & Nits (Stufe 0 – Optional)")
+        for n in nits:
+            print(f"- [ ] **#{n['index']}** {n['text']} *(Konfidenz: {n['confidence']:.2f})*")
+        print()
+
+    if duplicates:
+        print("### 🔄 Duplikate (bereits oben abgedeckt)")
+        for d in duplicates:
+            print(f"- ~~#{d['index']} {d['text']}~~ *(Duplikat-Wk: {d['duplicate_prob']:.2f})*")
+        print()
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

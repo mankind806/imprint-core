@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""ts-ci-triage RUN_ID [-R owner/repo] [--json]   (or a failed-job log on stdin)
+
+Classifies a failed GitHub Actions run via TypeSafe: wackelig / umgebung / echt.
+Only the last 150 log lines of `gh run view --log-failed`, MASKED (ts_common.mask),
+go to TypeSafe. Rule "nur verschärfen": the result never lets a failure be ignored;
+for "wackelig" the hint says so explicitly. Fail-open: no key / API error -> exit 0.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
+import ts_common as tc  # noqa: E402
+
+QUESTIONS = {
+    "cause": {
+        "type": "choice",
+        "instructions": "What is the most likely cause of this CI failure, based on the log excerpt?",
+        "criteria": {
+            "wackelig": "flaky: timing or performance thresholds in tests, network, transient infrastructure",
+            "umgebung": "environment, setup, dependency or permissions problem",
+            "echt": "a real code or test failure caused by the change",
+        },
+    }
+}
+LABEL = {"wackelig": "wackelig", "umgebung": "Umgebung/Setup", "echt": "echter Fehler"}
+HINT_WACKELIG = "Hinweis: vermutlich wackelig – trotzdem nicht ignorieren; Rerun und Ursache prüfen"
+
+
+def fetch_log(run_id, repo):
+    cmd = ["gh", "run", "view", str(run_id), "--log-failed"]
+    if repo:
+        cmd += ["-R", repo]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "gh fehlgeschlagen").strip().splitlines()[-1][:200])
+    return "\n".join(r.stdout.splitlines()[-150:])
+
+
+def classify(log):
+    masked, hits = tc.mask_detail(log)
+    ans = tc.post(masked, QUESTIONS)
+    try:
+        a = ans["cause"]
+        probs = {k: float(v) for k, v in a["probabilities"].items()}
+        cause, conf = a["choice"], float(a["confidence"])
+    except Exception:
+        return {"status": "unreachable", "masked_detail": hits}
+    return {"status": "ok", "cause": cause, "confidence": conf, "probabilities": probs,
+            "masked_detail": hits,
+            "hint": HINT_WACKELIG if cause == "wackelig" else None}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="CI-Fehler mit TypeSafe einordnen")
+    ap.add_argument("run_id", nargs="?", help="GitHub-Actions-Run-ID (sonst Log auf stdin)")
+    ap.add_argument("-R", "--repo", help="owner/repo")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+
+    if a.run_id:
+        try:
+            log = fetch_log(a.run_id, a.repo)
+        except Exception as e:
+            print(f"Log nicht abrufbar: {e}")
+            sys.exit(1)
+    elif not sys.stdin.isatty():
+        log = "\n".join(sys.stdin.read().splitlines()[-150:])
+    else:
+        ap.error("Run-ID oder Log auf stdin nötig")
+    if not log.strip():
+        print("Kein Fehlerlog gefunden")
+        sys.exit(1)
+
+    res = classify(log)
+    if a.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+    elif res["status"] != "ok":
+        print("TypeSafe nicht erreichbar")
+    else:
+        m = res["masked_detail"]
+        print(f"CI-Fehler: {LABEL.get(res['cause'], res['cause'])} (Konfidenz {res['confidence']:.2f}; "
+              f"maskiert: Schlüsselwort {m['secret_kw']}, E-Mail {m['email']}, undurchsichtig {m['opaque']})")
+        if res["hint"]:
+            print(res["hint"])
+    sys.exit(0)  # fail-open
+
+
+if __name__ == "__main__":
+    main()

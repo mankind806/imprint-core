@@ -138,6 +138,7 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 | Measuring hook | hook on `SubagentStart`, `SubagentStop` | Appends one JSON line per event to the plugin's data directory |
 | Update watch | hook on `SessionStart`, on by default; `IMPRINT_UPDATE_WATCH=0` turns it off | After an upgrade of the host that runs the session, Claude Code or Codex, notes that a review of its changelog is due ([docs/update-watch.md](docs/update-watch.md)) |
 | `imprint-dev` | Go tool in `tools/` | `gen` the card payloads, `check` the repository's own rules, `measure` subagent runs, `hook-typesafe-check` and `hook-skill-suggestion` |
+| [`tools/typesafe`](tools/typesafe/README.md) | Standalone Python CLIs (stdlib only) | `ts-agent-dispatch`, `ts-commit-check`, `ts-decision-check`, `ts-review-dedup`, `ts-pr-triage`, `ts-ci-triage`, `ts-route`, `ts-done-check` — masked-only data path, fail-open without a TypeSafe key |
 | TypeSafe Hook | hooks on `PostToolUse` and `UserPromptSubmit` (Opt-in) | Rein beratende Hinweise bei fehlender Provenienz, fehlender Regel-Durchsetzung, Duplikat-Fakten oder passendem Skill-Vorschlag je Eingabe |
 | Pre-push hook | `.githooks/pre-push`, this repository, opt-in | Refuses undeclared identities and the shapes personal data takes |
 

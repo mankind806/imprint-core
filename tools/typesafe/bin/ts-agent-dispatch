@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""ts-agent-dispatch: TypeSafe-powered subagent router for Antigravity & Claude.
+
+Determines:
+ 1. model_tier (Choice: flash / pro / inherit): Optimal model choice for speed and cost.
+ 2. worktree_required (Noul): Enforces "each writing subagent works alone in its own git worktree".
+ 3. risk_level (Score 0..2): 0=reversible (no review), 1=medium (1 review round), 2=high (blind review).
+ 4. complexity (Choice: trivial / moderate / complex): Scope of changes.
+
+Usage:
+  ts-agent-dispatch "Task description or delegation prompt"
+  ts-agent-dispatch -f prompt.txt
+  ts-agent-dispatch --json "Task description"
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
+import ts_common as tc  # noqa: E402
+
+QUESTIONS = {
+    "model_tier": {
+        "type": "choice",
+        "instructions": (
+            "Which model tier is best suited for executing this task efficiently and reliably?\n"
+            "Criteria:\n"
+            "- flash: Read-only codebase research, simple file search, quick lookups, trivial typo fixes, or verification.\n"
+            "- pro: Deep architectural reasoning, multi-step refactoring, cryptography, security, auth, database migration, or subtle concurrency debugging.\n"
+            "- inherit: Standard feature implementation, straightforward code editing, or standard unit tests."
+        ),
+        "criteria": {
+            "flash": "Read-only research, quick search, doc fix, verification",
+            "pro": "Deep reasoning, security, crypto, db migration, multi-step architecture",
+            "inherit": "Standard feature implementation or writing typical unit tests"
+        }
+    },
+    "mutates_files": {
+        "type": "noul",
+        "instructions": "Does this task involve creating, editing, deleting, or committing code files or repository state (as opposed to strictly read-only inspection/research)?"
+    },
+    "risk_level": {
+        "type": "score",
+        "instructions": (
+            "What is the review risk level of this delegated task?\n"
+            "Level 0: Reversible, trivial, docs, comments, or read-only research.\n"
+            "Level 1: Medium risk, standard business logic, parsers, or non-sensitive features.\n"
+            "Level 2: High risk: cryptography, authentication, secrets, network access, database schema migration."
+        ),
+        "criteria": [
+            "Level 0: trivial, reversible, docs, or read-only",
+            "Level 1: medium risk internal logic or parser",
+            "Level 2: high risk, security, auth, crypto, db schema, or external communication"
+        ]
+    },
+    "complexity": {
+        "type": "choice",
+        "instructions": "What is the expected complexity of this task?",
+        "criteria": {
+            "trivial": "1-2 simple steps or single-file adjustment",
+            "moderate": "Standard feature or bugfix spanning 2-4 files",
+            "complex": "Extensive architectural work spanning multiple packages or subsystems"
+        }
+    }
+}
+
+
+def dispatch_task(prompt_text):
+    if not prompt_text:
+        return {"status": "error", "message": "Keine Aufgabenbeschreibung übergeben"}
+
+    # Masking before anything leaves the machine (privacy: only masked text goes to TypeSafe)
+    masked_prompt, hits = tc.mask_detail(prompt_text)
+    if len(masked_prompt) > 8000:
+        masked_prompt = masked_prompt[:8000] + "\n... [gekürzt für Dispatch]"
+
+    state = {
+        "task_prompt": masked_prompt
+    }
+
+    answers = tc.post(state, QUESTIONS)
+    if not answers:
+        return {
+            "status": "fail_open",
+            "model_tier": "inherit",
+            "workspace_mode": "branch",
+            "risk_level": 1,
+            "review_depth": "Eine Runde Review nötig (mittleres Risiko)",
+            "message": "TypeSafe API nicht erreichbar oder Key fehlt (fail-open)",
+            "masked_detail": hits
+        }
+
+    tier_res = tc.choice(answers, "model_tier")
+    tier, tier_conf, tier_probs = tier_res if tier_res else ("inherit", 0.5, {})
+
+    mutates = tc.noul(answers, "mutates_files") or 0.0
+    needs_worktree = mutates >= 0.5
+    workspace_mode = "branch" if needs_worktree else "inherit"
+
+    risk_res = tc.score_level(answers, "risk_level")
+    risk_lvl, risk_conf = risk_res if risk_res else (1, 0.5)
+
+    comp_res = tc.choice(answers, "complexity")
+    comp, comp_conf, comp_probs = comp_res if comp_res else ("moderate", 0.5, {})
+
+    review_depth = [
+        "Kein Review nötig (reversibel / read-only)",
+        "Eine Runde Review nötig (mittleres Risiko)",
+        "Blind-Review bis nichts mehr gefunden wird (Sicherheit/Netz/Krypto)"
+    ][risk_lvl]
+
+    # Map to Antigravity invoke_subagent parameter values
+    model_param = {
+        "flash": "flash",
+        "pro": "pro",
+        "inherit": "inherit"
+    }.get(tier, "inherit")
+
+    return {
+        "status": "ok",
+        "model_tier": tier,
+        "model_confidence": tier_conf,
+        "model_probs": tier_probs,
+        "model_param": model_param,
+        "mutates_files_prob": mutates,
+        "workspace_mode": workspace_mode,
+        "needs_worktree": needs_worktree,
+        "risk_level": risk_lvl,
+        "risk_confidence": risk_conf,
+        "review_depth": review_depth,
+        "complexity": comp,
+        "complexity_confidence": comp_conf,
+        "masked_detail": hits,
+        "raw_answers": answers
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="TypeSafe Subagent Dispatch & Routing (Jev)")
+    parser.add_argument("prompt", nargs="*", help="Aufgabenbeschreibung oder Delegations-Prompt")
+    parser.add_argument("-f", "--file", help="Datei mit Aufgabenbeschreibung")
+    parser.add_argument("--json", action="store_true", help="JSON-Ausgabe")
+    args = parser.parse_args()
+
+    prompt_text = ""
+    if args.file:
+        try:
+            with open(args.file, "r", encoding="utf-8") as f:
+                prompt_text = f.read().strip()
+        except Exception as e:
+            print(f"Fehler beim Lesen der Datei: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.prompt:
+        prompt_text = " ".join(args.prompt).strip()
+    elif not sys.stdin.isatty():
+        prompt_text = sys.stdin.read().strip()
+
+    if not prompt_text:
+        print("Keine Aufgabenbeschreibung übergeben.")
+        sys.exit(1)
+
+    res = dispatch_task(prompt_text)
+
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+
+    if res["status"] == "fail_open":
+        print(f"Hinweis: {res['message']}")
+        print(f" • Empfohlenes Modell   : {res['model_tier']}")
+        print(f" • Workspace-Modus      : {res['workspace_mode']}")
+        sys.exit(0)
+
+    m = res["masked_detail"]
+    print("═══════════════════════════════════════════════════════════════")
+    print(" TypeSafe Subagent Dispatch Empfehlung (Jev)")
+    print("═══════════════════════════════════════════════════════════════")
+    print(f" • Modell-Tier          : {res['model_tier'].upper()} (Konfidenz: {res['model_confidence']:.2f})")
+    print(f" • invoke_subagent Model: \"{res['model_param']}\"")
+    print(f" • Worktree erforderlich: {'JA (Schreibend)' if res['needs_worktree'] else 'NEIN (Read-only)'} (Wk: {res['mutates_files_prob']:.2f})")
+    print(f" • Workspace-Parameter  : \"{res['workspace_mode']}\"")
+    print(f" • Risiko-Stufe         : {res['risk_level']}/2 (Konfidenz: {res['risk_confidence']:.2f})")
+    print(f" • Erforderliche Prüfung: {res['review_depth']}")
+    print(f" • Komplexität          : {res['complexity']} (Konfidenz: {res['complexity_confidence']:.2f})")
+    print(f" • Lokale Maskierung    : Schlüssel {m['secret_kw']}, E-Mail {m['email']}, Token {m['opaque']}")
+    print("═══════════════════════════════════════════════════════════════")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,98 @@
+{
+  "//": "Shared masking test cases for ts_common.mask_detail (Python, canonical) and its Go counterpart (imprint-core tools/imprint-dev/typesafe.go MaskDetail, ported in a later package). All names/addresses/keys below are synthetic fixtures, never real data. 'names' lists the entries that must be present in TYPESAFE_NAMES_FILE for the 'name' category cases to hit.",
+  "names": ["Max Mustermann", "Erika Musterfrau"],
+  "cases": [
+    {
+      "id": "secret_kw_bearer",
+      "text": "curl -H 'Authorization: Bearer sk-fake-AbC123XYZ0000' https://api.example.com/v1/x",
+      "must_not_contain": ["sk-fake-AbC123XYZ0000"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_keyval_apikey",
+      "text": "export API_KEY=fakeSecretValue999",
+      "must_not_contain": ["fakeSecretValue999"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_keyval_password",
+      "text": "password: hunter2fake",
+      "must_not_contain": ["hunter2fake"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "email_simple",
+      "text": "Kontakt: test.user@example.org für Rückfragen",
+      "must_not_contain": ["test.user@example.org"],
+      "min_counts": {"email": 1}
+    },
+    {
+      "id": "address_street_number",
+      "text": "Lieferung an Musterstraße 12 bitte vor 18 Uhr",
+      "must_not_contain": ["Musterstraße 12"],
+      "min_counts": {"address": 1}
+    },
+    {
+      "id": "address_street_abbrev_with_letter_suffix",
+      "text": "Neue Adresse: Hauptstr. 4b ab nächstem Monat",
+      "must_not_contain": ["Hauptstr. 4b"],
+      "min_counts": {"address": 1}
+    },
+    {
+      "id": "address_plz_ort",
+      "text": "Wohnort laut Formular: 80331 München",
+      "must_not_contain": ["80331 München"],
+      "min_counts": {"address": 1}
+    },
+    {
+      "id": "name_full",
+      "text": "Termin mit Max Mustermann am Dienstag",
+      "must_not_contain": ["Max Mustermann"],
+      "min_counts": {"name": 1}
+    },
+    {
+      "id": "name_second_person",
+      "text": "Erika Musterfrau hat den Vertrag unterschrieben",
+      "must_not_contain": ["Erika Musterfrau"],
+      "min_counts": {"name": 1}
+    },
+    {
+      "id": "opaque_hash_like",
+      "text": "commit ref abcdefABCDEF0123456789ghijkl for the release",
+      "must_not_contain": ["abcdefABCDEF0123456789ghijkl"],
+      "min_counts": {"opaque": 1}
+    },
+    {
+      "id": "negative_plain_command",
+      "text": "pytest -q tests/test_api.py",
+      "must_not_contain": [],
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0}
+    },
+    {
+      "id": "negative_commit_message",
+      "text": "fix: refresh token handling on reconnect",
+      "must_not_contain": [],
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0}
+    },
+    {
+      "id": "mixed_secret_and_email",
+      "text": "token=abcd1234efgh5678, bitte an sync.bot@example.net melden",
+      "must_not_contain": ["abcd1234efgh5678", "sync.bot@example.net"],
+      "min_counts": {"secret_kw": 1, "email": 1}
+    },
+    {
+      "id": "name_case_insensitive",
+      "text": "bericht ueber max mustermann von gestern",
+      "must_not_contain": ["max mustermann"],
+      "min_counts": {"name": 1},
+      "note": "Python's name regex is case-insensitive ((?i)). The Go port (imprint-core tools/imprint-dev/typesafe.go MaskDetail) matches this since imprint-core-CL-013a: the per-name regexp.MustCompile now carries an explicit (?i) prefix."
+    },
+    {
+      "id": "address_plz_ort_generic_suffix",
+      "text": "Wohnort laut Formular: 12345 Musterstadt am Fluss",
+      "must_not_contain": ["12345 Musterstadt am Fluss"],
+      "min_counts": {"address": 1},
+      "note": "Python's PLZ+Ort pattern accepts any '(am|an der|im) <Capitalized word>' suffix generically. Since imprint-core-CL-013a, Go's plzOrtRE generalizes the 'am'/'an der' suffix the same way (any capitalized word); 'im'/'ob der' stay a fixed list (im Breisgau, ob der Tauber) so 'PLZ ist 10115 Berlin im Brief.' still leaves 'im Brief' unmasked (typesafe_test.go TestMaskAddresses) - a narrower parity than Python's fully generic 'im' handling, intentional and covered by both test suites."
+    }
+  ]
+}

@@ -55,7 +55,11 @@ var (
 	streetRE = regexp.MustCompile(`\b(?:(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+(?:\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+\s+)*(?:Straße|Strasse|Str\.|Str\b|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:straße|strasse|str\.|str\b|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile|pfad|steig|gäßchen|gaesschen)))\s+\d+[a-zA-Z]?(?:\s*[-/]\s*\d+[a-zA-Z]?)?\b`)
 
 	// plzOrtRE matches German postal code + city (e.g. "10115 Berlin", "80331 München").
-	plzOrtRE = regexp.MustCompile(`\b\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+(?:\s+(?:am Main|am Rhein|am Neckar|an der Oder|an der Elbe|an der Donau|an der Lahn|im Breisgau|ob der Tauber))?\b`)
+	// The "am"/"an der" suffix is generic (any capitalized word, matching
+	// ts_common.py's parity behavior, e.g. "12345 Musterstadt am Fluss"); "im"/"ob
+	// der" stay a fixed list so "10115 Berlin im Brief." still leaves "im Brief"
+	// unmasked (typesafe_test.go TestMaskAddresses).
+	plzOrtRE = regexp.MustCompile(`\b\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+(?:\s+(?:(?:am|an der)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+|im Breisgau|ob der Tauber))?\b`)
 )
 
 // MaskCounts records the number of redactions by category.
@@ -226,9 +230,11 @@ func MaskDetail(text string) (string, MaskCounts) {
 	})
 
 	// 7. names: from TYPESAFE_NAMES_FILE or ~/.config/typesafe/names.txt
+	// Case-insensitive to match ts_common.py's get_name_regex ((?i)), e.g.
+	// "max mustermann" lowercase must also be masked.
 	if names := loadNames(getNamesFilePath()); len(names) > 0 {
 		for _, name := range names {
-			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+			re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
 			text = re.ReplaceAllStringFunc(text, func(m string) string {
 				counts.Name++
 				return "<name>"
