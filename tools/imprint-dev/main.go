@@ -3,7 +3,8 @@
 //	imprint-dev gen   [--root dir]
 //	imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
 //	imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
-//	imprint-dev setup --plan [--root dir] [--repo path]
+//	imprint-dev setup (--plan | --check) [--root dir] [--repo path]
+//	imprint-dev setup --apply --root dir [--repo path]
 //	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
 //	    [--pr-body-file file] [--same-repo] [--sarif file]
 //	imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
@@ -14,8 +15,10 @@
 // program can decide over the plugin tree and reports every finding. measure reports the
 // subagent runs that hooks/log-subagent.sh logged: duration, model, effort and
 // whether a run went over the target; it exits 0 whatever it reports. setup compares
-// setup inventory entries against target files without writing; exit 0 when
-// inventory parses, 2 on usage or invalid inventory. commit-check
+// (--plan, --check) or applies (--apply) setup inventory entries; what it may read,
+// show and write is bounded by the path checks in setup.go; exit 0 all good, 1 drift
+// (--check) or a refused/failed entry (--apply), 2 on usage, invalid inventory or the
+// agent env guard. commit-check
 // checks a range of new commits, and on a pull request its body, against
 // .imprint/commit.conf and CONTRIBUTING.md's rules for commit messages (N78, N79,
 // N96); see commitcheck.go. hook-typesafe-check runs opt-in advisory checks on
@@ -54,7 +57,8 @@ const usageText = `usage:
   imprint-dev gen   [--root dir]
   imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
   imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
-  imprint-dev setup --plan [--root dir] [--repo path]
+  imprint-dev setup (--plan | --check) [--root dir] [--repo path]
+  imprint-dev setup --apply --root dir [--repo path]
   imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
       [--pr-body-file file] [--same-repo] [--sarif file]
   imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
@@ -65,8 +69,11 @@ check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could
          an overdue re-check date warns, and fails only with --release
 measure  reports subagent runs from the hook's log (default $CLAUDE_PLUGIN_DATA/subagent-log.jsonl);
          an overrun is reported, not a failure: exit 0, or 2 if the log cannot be read
-setup    compares setup inventory entries against target files without writing;
-         exit 0 on success, 2 on usage or invalid inventory
+setup    --plan/--check compare setup inventory entries against their targets without writing,
+         --apply (explicit --root that is the imprint plugin) writes only allowlisted targets of
+         the plugin's own inventory (--repo: status only); rights targets are only printed;
+         exit 0 all good, 1 drift, a refused/failed entry or an unreadable --repo inventory
+         (--check), 2 on usage, invalid inventory, plugin identity or env guard
 commit-check   checks a range of new commits (and, with --pr-body-file, a pull request's
          body) against .imprint/commit.conf and CONTRIBUTING.md's commit-message rules;
          exit 0 no findings, 1 a finding, 2 the check could not run
