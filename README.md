@@ -295,6 +295,16 @@ TypeSafe Hook-Budget, Skill-Vorschlag-Allowlist, Adress- und Namensmaskierung (C
 - **Skill-Vorschlag Allowlist:** `CheckSkillSuggestion` auf die 4 kanonischen imprint-Skills (`delegation-contract`, `knowledge-keeping`, `measure-before-asserting`, `session-handover`) beschränkt; unbekannte Vorschläge oder Halluzinationen werden verworfen.
 - **Adress- und Namensmaskierung:** `MaskDetail` und `Mask` um Adressen (`<address>`, Straße+Hausnummer und PLZ+Ort) sowie Namen (`<name>`, aus `TYPESAFE_NAMES_FILE` bzw. `~/.config/typesafe/names.txt`, Vor-/Nachname-Split nach Länge absteigend mit `\b`) erweitert. `MaskCounts` um `Address` und `Name` ergänzt.
 
+**0.10.0** (2026-09-30; ships when the owner merges it):
+
+- **Setup command with rights gate (#38):** Added `imprint-dev setup --apply` and `--check` to validate and apply local inventory entries against allowlisted target paths, backed by build anchor verification and an explicit rights gate.
+- **TypeSafe standalone tools (#39, #40):** Ships standard-library-only Python CLIs under `tools/typesafe` (`ts-agent-dispatch`, `ts-commit-check`, `ts-decision-check`, `ts-review-dedup`, `ts-pr-triage`, `ts-ci-triage`, `ts-route`, `ts-done-check`) with local regex masking and fail-open design.
+- **Rights templates for Claude Code and Antigravity (#36):** Rights templates (`claude-rechte.json` fragment merge, `agy-settings.json` permissions union) and helper scripts for user-reviewed permission management.
+- **Web app service unit via setup (#44):** User systemd service unit (`imprint-oberflaeche.service`) for the imprint web app, managed and verifiable via `imprint-dev setup`.
+- **Orchestration contract (#37):** Shared multi-agent orchestration specification (`docs/vertrag.md`) for coordinating lead sessions, local agent CLIs, and cloud agents with a common journal.
+- **Inventory and setup planning (#35):** Setup inventory specification (`setup/inventar.json`) and `imprint-dev setup --plan` for dry-run inspection and diff display without modifying files.
+- **Known limits (#45):** Documented boundaries and tracking limits for Cursor and GitHub Copilot CLI in `docs/known-limits.md`.
+
 **Each of the four skills goes back to text that had at least one
 adversarial read by a party that did not write it, but not every current version has had
 one.** **Not read yet:** `session-handover` as rewritten
