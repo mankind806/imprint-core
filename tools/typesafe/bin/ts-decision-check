@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""ts-decision-check: Validate proposals, plans, and diffs against a project's decision register.
+
+The register text itself (invariants, architecture boundaries, orchestration rules) is
+project-specific and configured, not hardcoded: TS_DECISION_INVARIANTS_FILE (env var) or
+--invariants-file (CLI) points at a local text file. Without either, a local, un-committed
+${XDG_CONFIG_HOME:-~/.config}/typesafe/decision-invariants.txt is used if present, else a
+small neutral default below. This keeps the tool generic across projects and avoids
+shipping one project's private architecture/journal details in a publicly shared script.
+
+Evaluates:
+ 1. violates_invariants (Noul): Does the proposal/code contradict established decisions?
+ 2. risk_area (Choice): Which architectural domain is most impacted?
+ 3. compliance (Score 0..3): Degree of architectural alignment.
+ 4. clarification_needed (Noul): Whether a formal user decision is required.
+
+Usage:
+  ts-decision-check "Proposal or feature plan description"
+  ts-decision-check -f proposal.md
+  ts-decision-check --diff HEAD~1..HEAD
+  ts-decision-check --invariants-file ./my-project-invariants.txt "..."
+  cat plan.md | ts-decision-check
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
+import ts_common as tc  # noqa: E402
+
+# Neutral, project-agnostic fallback. Real projects should supply their own register
+# via TS_DECISION_INVARIANTS_FILE or --invariants-file; nothing here names a specific
+# project, repo, journal path, or decision ID.
+GENERIC_INVARIANTS = """
+GENERIC ARCHITECTURE & PROCESS INVARIANTS (no project register configured):
+1. PRIVACY & EXTERNAL APIS:
+   - No unmasked personal data, credentials, or sensitive content to external APIs.
+   - Secrets and API keys live in a local secret store, never in git or CI.
+   - Fail-open: external APIs are optional accelerators; without a key or on error, a
+     deterministic local fallback applies.
+
+2. ARCHITECTURE & STORAGE:
+   - Respect the project's own language, runtime, and storage constraints and its
+     module/pipeline separation.
+
+3. AGENTS & ORCHESTRATION:
+   - The orchestrating agent only orchestrates; each writing subagent works alone in
+     its own worktree.
+   - Review depth follows risk: 0=reversible (no review), 1=medium (one round),
+     2=high/crypto/network/auth (blind review until clean).
+   - The project's own decision register overrides any rule text here.
+
+4. CONNECTORS & NETWORK:
+   - All network access follows the project's defined network policy.
+   - No automatic deletions or external sends without explicit user consent.
+"""
+
+
+def load_invariants(path_arg=None):
+    """Load the invariants/register text: --invariants-file, else TS_DECISION_INVARIANTS_FILE,
+    else a local ${XDG_CONFIG_HOME:-~/.config}/typesafe/decision-invariants.txt if that file
+    exists, else the neutral GENERIC_INVARIANTS default above.
+
+    An explicitly given --invariants-file that can't be read is a hard error, not a
+    silent downgrade: this is a compliance check, and a typo'd path should never
+    quietly fall back to checking against the generic default instead."""
+    if path_arg:
+        expanded = os.path.expanduser(path_arg)
+        try:
+            with open(expanded, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+        except OSError as e:
+            print(f"Fehler: --invariants-file {path_arg!r} nicht lesbar: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not text:
+            print(f"Fehler: --invariants-file {path_arg!r} ist leer", file=sys.stderr)
+            sys.exit(1)
+        return text
+
+    env_path = os.environ.get("TS_DECISION_INVARIANTS_FILE", "").strip()
+    if env_path:
+        try:
+            with open(os.path.expanduser(env_path), "r", encoding="utf-8") as f:
+                text = f.read().strip()
+                if text:
+                    return text
+        except OSError as e:
+            print(f"Hinweis: TS_DECISION_INVARIANTS_FILE={env_path!r} nicht lesbar ({e}), "
+                  "nutze neutralen Standard", file=sys.stderr)
+        return GENERIC_INVARIANTS.strip()
+
+    # Neither flag nor env var set: keep today's per-machine behaviour by looking for a
+    # local, un-committed register file before falling back to the generic default.
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    default_path = os.path.join(config_home, "typesafe", "decision-invariants.txt")
+    try:
+        with open(default_path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+            if text:
+                return text
+    except OSError:
+        pass
+    return GENERIC_INVARIANTS.strip()
+
+QUESTIONS = {
+    "violates_invariants": {
+        "type": "noul",
+        "instructions": (
+            "Does this proposal, planned change, or code diff violate any of the established "
+            "architectural invariants, privacy boundaries, or orchestration rules described in the reference?"
+        )
+    },
+    "risk_area": {
+        "type": "choice",
+        "instructions": "Which architectural or policy area is most directly challenged, affected, or at risk by this proposal?",
+        "criteria": {
+            "datenschutz_secrets": "Data privacy, unmasked external API traffic, secrets, PII, or credential storage",
+            "architektur_speicher": "Language/runtime constraints, storage invariants, schema migrations, or pipeline separation",
+            "agenten_workflow": "Multi-agent rules, worktree isolation, orchestration lock, or review depth",
+            "netz_und_sync": "Network access outside the project's defined network policy, write commands on readonly services, or connector constraints",
+            "kein_konflikt": "Fully compliant, no architectural invariants violated or at risk"
+        }
+    },
+    "compliance": {
+        "type": "score",
+        "instructions": (
+            "How well does this proposal comply with the reference architectural invariants?\n"
+            "Level 0: Direct contradiction or invariant violation.\n"
+            "Level 1: Tension, ambiguity, or missing safeguards that need clarification.\n"
+            "Level 2: Good compliance with standard safeguards.\n"
+            "Level 3: Exemplary compliance, strengthens established architecture."
+        ),
+        "criteria": [
+            "Level 0: direct contradiction or invariant violation",
+            "Level 1: tension, ambiguity, or missing safeguards",
+            "Level 2: good compliance with standard safeguards",
+            "Level 3: exemplary compliance, strengthens architecture"
+        ]
+    },
+    "clarification_needed": {
+        "type": "noul",
+        "instructions": "Does this proposal introduce a new policy or architectural ambiguity that requires an explicit user decision in the register?"
+    }
+}
+
+
+def run_cmd(cmd, cwd=None):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def get_input_text(args):
+    if args.diff:
+        diff = run_cmd(["git", "diff", args.diff], cwd=args.cwd)
+        stat = run_cmd(["git", "diff", "--stat", args.diff], cwd=args.cwd)
+        log = run_cmd(["git", "log", "-n", "3", "--oneline", args.diff], cwd=args.cwd)
+        return f"GIT DIFF ({args.diff}):\nCommits:\n{log}\nFiles:\n{stat}\nDiff:\n{diff}"
+    if args.file:
+        try:
+            with open(args.file, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception as e:
+            # Never turn a read error into proposal text: it would carry the path
+            # to TypeSafe and get "checked" instead of failing.
+            print(f"Fehler beim Lesen der Datei: {e}", file=sys.stderr)
+            sys.exit(1)
+    if args.text:
+        return " ".join(args.text).strip()
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    return ""
+
+
+def check_decision(proposal_text, invariants_file=None):
+    if not proposal_text:
+        return {"status": "error", "message": "Kein Text zur Prüfung übergeben"}
+
+    # Masking before anything leaves the machine (privacy: only masked text goes to TypeSafe)
+    masked_proposal, hits = tc.mask_detail(proposal_text)
+    if len(masked_proposal) > 10000:
+        masked_proposal = masked_proposal[:10000] + "\n... [gekürzt für Prüfung]"
+
+    # The register is project text too (names, paths, hosts): masked like the proposal.
+    masked_register, _ = tc.mask_detail(load_invariants(invariants_file))
+    state = {
+        "reference_invariants": masked_register,
+        "proposal_or_diff": masked_proposal
+    }
+
+    answers = tc.post(state, QUESTIONS)
+    if not answers:
+        return {
+            "status": "fail_open",
+            "message": "TypeSafe API nicht erreichbar oder Key fehlt (fail-open)",
+            "masked_detail": hits
+        }
+
+    violation_prob = tc.noul(answers, "violates_invariants") or 0.0
+    clarification_prob = tc.noul(answers, "clarification_needed") or 0.0
+
+    area_choice = tc.choice(answers, "risk_area")
+    if area_choice:
+        risk_area, area_conf, area_probs = area_choice
+    else:
+        risk_area, area_conf, area_probs = "unbekannt", 0.0, {}
+
+    comp = tc.score_level(answers, "compliance")
+    comp_lvl, comp_conf = comp if comp else (2, 0.5)
+
+    comp_label = [
+        "Direkter Widerspruch zu Invariante",
+        "Spannung / Klärungsbedarf",
+        "Konform mit Schutzgrenzen",
+        "Vorbildlich / Architekturkonform"
+    ][comp_lvl]
+
+    return {
+        "status": "ok",
+        "violation_prob": violation_prob,
+        "compliance_level": comp_lvl,
+        "compliance_confidence": comp_conf,
+        "compliance_label": comp_label,
+        "risk_area": risk_area,
+        "risk_area_confidence": area_conf,
+        "risk_area_probs": area_probs,
+        "clarification_needed_prob": clarification_prob,
+        "masked_detail": hits,
+        "raw_answers": answers
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Prüfung von Plänen und Code gegen ein Projekt-Entscheidungsregister")
+    parser.add_argument("text", nargs="*", help="Vorschlags- oder Plantext")
+    parser.add_argument("-f", "--file", help="Datei mit Vorschlags- oder Plantext")
+    parser.add_argument("--diff", help="Git-Commit-Range zur Prüfung des Diffs (z.B. main..HEAD)")
+    parser.add_argument("--cwd", default=".", help="Arbeitsverzeichnis")
+    parser.add_argument("--invariants-file",
+                        help="Projektspezifisches Register/Invarianten als Textdatei "
+                             "(sonst TS_DECISION_INVARIANTS_FILE, sonst "
+                             "${XDG_CONFIG_HOME:-~/.config}/typesafe/decision-invariants.txt "
+                             "falls vorhanden, sonst neutraler Standard)")
+    parser.add_argument("--json", action="store_true", help="JSON-Ausgabe")
+    args = parser.parse_args()
+
+    input_text = get_input_text(args)
+    res = check_decision(input_text, invariants_file=args.invariants_file)
+
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+
+    if res["status"] == "fail_open":
+        print(f"Hinweis: {res['message']}")
+        sys.exit(0)
+
+    if res["status"] != "ok":
+        print(f"Fehler: {res.get('message')}")
+        sys.exit(1)
+
+    m = res["masked_detail"]
+    area_names = {
+        "datenschutz_secrets": "Datenschutz & Secrets",
+        "architektur_speicher": "Architektur & Speicher",
+        "agenten_workflow": "Agenten & Worktree-Isolation",
+        "netz_und_sync": "Netzwerk & Konnektoren",
+        "kein_konflikt": "Kein Konflikt / Vollständig konform"
+    }
+    area_str = area_names.get(res["risk_area"], res["risk_area"])
+
+    print("═══════════════════════════════════════════════════════════════")
+    print(" TypeSafe Entscheidungs- und Invarianten-Prüfung (Jev)")
+    print("═══════════════════════════════════════════════════════════════")
+    print(f" • Konformitäts-Stufe : {res['compliance_level']}/3 – {res['compliance_label']} (Konfidenz: {res['compliance_confidence']:.2f})")
+    print(f" • Widerspruchs-Gefahr: Wahrscheinlichkeit {res['violation_prob']:.2f}")
+    print(f" • Betroffener Bereich: {area_str} (Konfidenz: {res['risk_area_confidence']:.2f})")
+    print(f" • Nutzerentscheid nötig: Wahrscheinlichkeit {res['clarification_needed_prob']:.2f}")
+    print(f" • Lokale Maskierung  : {tc.format_counts(m)}")
+    print("═══════════════════════════════════════════════════════════════")
+
+    if res["violation_prob"] >= 0.7 or res["compliance_level"] == 0:
+        print("⚠️ WARNUNG: Dieser Vorschlag kollidiert wahrscheinlich mit einer bestehenden Invariante!")
+        sys.exit(1)
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

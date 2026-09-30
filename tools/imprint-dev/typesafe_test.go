@@ -238,6 +238,70 @@ Hans Peter von Schmidt
 	}
 }
 
+// TestMaskParity runs the shared, language-agnostic mask test cases
+// (tools/typesafe/tests/mask-parity-cases.json) against this Go MaskDetail
+// port, so both implementations are pinned to the same expected behavior
+// without duplicating test data. See tools/typesafe/tests/test_mask_parity.py
+// for the Python side of the same case list.
+func TestMaskParity(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "typesafe", "tests", "mask-parity-cases.json"))
+	if err != nil {
+		t.Fatalf("failed to read mask-parity-cases.json: %v", err)
+	}
+
+	var spec struct {
+		Names []string `json:"names"`
+		Cases []struct {
+			ID             string         `json:"id"`
+			Text           string         `json:"text"`
+			MustNotContain []string       `json:"must_not_contain"`
+			MinCounts      map[string]int `json:"min_counts"`
+			ExactCounts    map[string]int `json:"exact_counts"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("failed to parse mask-parity-cases.json: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	namesFile := filepath.Join(tmpDir, "names.txt")
+	if err := os.WriteFile(namesFile, []byte(strings.Join(spec.Names, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write names file: %v", err)
+	}
+	t.Setenv("TYPESAFE_NAMES_FILE", namesFile)
+
+	for _, c := range spec.Cases {
+		t.Run(c.ID, func(t *testing.T) {
+			masked, counts := MaskDetail(c.Text)
+
+			countsJSON, err := json.Marshal(counts)
+			if err != nil {
+				t.Fatalf("failed to marshal counts: %v", err)
+			}
+			var countsMap map[string]int
+			if err := json.Unmarshal(countsJSON, &countsMap); err != nil {
+				t.Fatalf("failed to unmarshal counts: %v", err)
+			}
+
+			for _, secret := range c.MustNotContain {
+				if strings.Contains(masked, secret) {
+					t.Errorf("[%s] secret survived masking: %q (masked: %q)", c.ID, secret, masked)
+				}
+			}
+			for cat, min := range c.MinCounts {
+				if countsMap[cat] < min {
+					t.Errorf("[%s] category %s count %d < %d", c.ID, cat, countsMap[cat], min)
+				}
+			}
+			for cat, exact := range c.ExactCounts {
+				if countsMap[cat] != exact {
+					t.Errorf("[%s] category %s count %d != %d", c.ID, cat, countsMap[cat], exact)
+				}
+			}
+		})
+	}
+}
+
 func TestMaxPayloadBytes(t *testing.T) {
 	var receivedReq Request
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""ts-route "<task text>" [--json] [--threshold 0.6] [--repo NAME] [--lead LEAD]  (or task on stdin)
+
+Classifies a task via TypeSafe (only the MASKED task text is sent) and maps the
+answers to a routing recommendation. The mapping lives HERE, not in the model.
+
+The concrete rule set (which repos Jules may execute in, which leads exist, model
+tiers per lead) is project-specific and therefore configured, not hardcoded:
+ - TS_ROUTE_JULES_REPOS (env, regex, default empty = disabled): repos where a
+   Jules-style executor is allowed. --repo NAME checks against this pattern
+   instead of relying on the task TEXT literally naming the repo (finding:
+   Jules could never be recommended because task descriptions rarely spell out
+   the repo name in prose - see project decision log for the finding ID).
+ - --lead / ORCHESTRATOR_LEAD (env, default "Antigravity"): which agent currently
+   orchestrates; does not by itself restrict which executor (Jules / agy /
+   Claude-subagent haiku|sonnet|opus) may be recommended.
+ - JULES_EXCLUDE below lists generic safety keywords (login/secret/auth/...) that
+   always disqualify Jules regardless of repo; this is deliberately NOT
+   project-specific and stays a safe hardcoded default.
+ - The underlying rationale (equal leads, Jules-as-executor-only, review/CI
+   requirements, no unresolicited send/delete) lives in the project's own
+   decision journal, not in this script; only the resulting mapping is coded here.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
+import ts_common as tc  # noqa: E402
+
+DEFAULT_THRESHOLD = 0.6
+SIZE = ["trivial", "klein", "mittel", "gross"]
+RISK = ["nur lesend", "lokal umkehrbar", "nach außen/destruktiv/geteilt"]
+# Neutral default: no repo is Jules-eligible until a project configures this (regex).
+_JULES_REPOS_PATTERN = os.environ.get("TS_ROUTE_JULES_REPOS", "").strip()
+JULES_REPOS = re.compile(_JULES_REPOS_PATTERN, re.I) if _JULES_REPOS_PATTERN else None
+JULES_EXCLUDE = re.compile(                                              # generic safety floor, not project-specific
+    r"anmeldung|login|token|secret|geheim|passwort|sicherheit|security|auth|register|"
+    r"modul(übergreifend|e)|alle repos", re.I)
+
+QUESTIONS = {
+    "size": {"type": "score",
+             "instructions": "How large is the software task described in the text?",
+             "criteria": ["trivial one-liner", "small single file",
+                          "medium change across several files",
+                          "large multi-step work or architecture"]},
+    # wording measured 2026-09-29: the short abstract variants gave confidence 0.2-0.6, this one 0.96+
+    "risk": {"type": "score",
+             "instructions": "Does carrying out this task only read things, only change local files "
+                             "that git can undo, or affect things outside the local machine or destroy "
+                             "data (publish, push, release, delete, send, shared CI)?",
+             "criteria": ["only reads", "changes local files, reversible",
+                          "affects outside world, shared systems or destroys data"]},
+    "browser": {"type": "noul", "instructions": "The task needs a web browser (navigating, clicking, reading web pages)."},
+    "decision": {"type": "noul", "instructions": "The task needs a judgement or decision by the human user before it can be executed."},
+    "media": {"type": "noul", "instructions": "The task needs image, video or audio generation or analysis, or NotebookLM-style document synthesis."},
+}
+
+
+def round_up(ans, qid, threshold):
+    """argmax level; if unsure but the top two ADJACENT levels hold >=0.9 together, take the
+    larger (conservative) level with the summed probability as confidence."""
+    res = tc.score_level(ans, qid)
+    if res and res[1] < threshold:
+        p = {int(k): float(v) for k, v in ans[qid]["probabilities"].items()}
+        top = sorted(p, key=p.get, reverse=True)[:2]
+        if abs(top[0] - top[1]) == 1 and p[top[0]] + p[top[1]] >= 0.9:
+            return max(top), p[top[0]] + p[top[1]]
+    return res
+
+
+CLAUDE_MODELS = ["haiku", "sonnet", "sonnet", "opus"]
+AGY_MODELS = ["flash", "flash", "pro", "pro"]
+
+
+def jules_repo_ok(text, repo):
+    """True only if TS_ROUTE_JULES_REPOS is configured AND --repo (preferred) or the
+    free task text matches it. Fixes: Jules could never be recommended when the task
+    text simply didn't spell out a repo name in prose)."""
+    if JULES_REPOS is None:
+        return False
+    if repo:
+        return bool(JULES_REPOS.search(repo))
+    return bool(JULES_REPOS.search(text))
+
+
+def recommend(size, risk, browser, decision, media, text, lead="Antigravity", repo=None):
+    """Pure mapping -> dict. Order of the rules matters (first hit wins for lead).
+    executor options: Browser-Session, Antigravity (media), Jules (if repo configured
+    and eligible), Antigravity-Writer, Claude-Subagent (haiku/sonnet/opus by size) -
+    the non-chosen writer is always named as an alternative, not silently dropped."""
+    note = []
+    model = AGY_MODELS[size] if lead == "Antigravity" else CLAUDE_MODELS[size]
+    if decision >= 0.5:   # conservative: ask the user earlier
+        return dict(lead=lead, executor="niemand vor Nutzerentscheid", modell=model,
+                    hinweis="Nutzerentscheid nötig: als Auswahlfrage (Empfehlung zuerst) stellen"
+                    + ("; nach außen/destruktiv: nur nach ausdrücklichem Ja im Review-Schritt" if risk == 2 else ""))
+    if risk == 2:
+        note.append("nach außen/destruktiv: nur nach ausdrücklichem Ja des Nutzers im Review-Schritt")
+        if size >= 2:
+            note.append("Review durch unabhängigen Prüfer / die andere Lead-Seite")
+    if browser >= 0.6:
+        return dict(lead=lead, executor="Browser-Session (Chrome-Werkzeuge)",
+                    modell=model, hinweis="; ".join(note))
+    if media >= 0.6:
+        return dict(lead=lead, executor="Antigravity (Google: Bild/Video/NotebookLM)",
+                    modell=model, hinweis="; ".join(note))
+    jules_ok = (size in (1, 2) and risk <= 1 and jules_repo_ok(text, repo)
+                and not JULES_EXCLUDE.search(text))
+    if size == 3:
+        ex = f"{lead} plant als Orchestrator, Pakete an " + \
+             ("Jules (nur abgeschlossene testbare Pakete)" if jules_repo_ok(text, repo)
+              else "Subagents (Antigravity-Writer oder Claude-Subagent)")
+        note.append("in Pakete schneiden, je Paket ein Worktree, ein Writer")
+        return dict(lead=lead, executor=ex, modell=model, hinweis="; ".join(note))
+    if size == 0:
+        return dict(lead=lead, executor="Subagent (reversibel)", modell=model, hinweis="; ".join(note))
+    if jules_ok:
+        note.append("Jules-Ergebnis braucht Review + grüne CI")
+        return dict(lead=lead, executor="Jules",
+                    modell=model, hinweis="; ".join(note))
+    own = "Antigravity-Writer" if lead == "Antigravity" else f"Claude-Subagent ({model})"
+    alt = f"Claude-Subagent ({CLAUDE_MODELS[size]})" if lead == "Antigravity" else "Antigravity-Writer"
+    ex = f"{own} (Alternative: {alt})"
+    return dict(lead=lead, executor=ex, modell=model, hinweis="; ".join(note))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="TypeSafe-Routing für Aufgaben")
+    ap.add_argument("task", nargs="*", help="Aufgabentext (sonst stdin)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--lead", default=os.environ.get("ORCHESTRATOR_LEAD", "Antigravity"),
+                    choices=["Antigravity", "Claude"], help="Current orchestrator lead")
+    ap.add_argument("--repo", default=os.environ.get("TS_ROUTE_REPO", ""),
+                    help="Ziel-Repo (statt/zusätzlich zu Text-Suche gegen TS_ROUTE_JULES_REPOS geprüft)")
+    ap.add_argument("--threshold", type=float,
+                    default=float(os.environ.get("TS_ROUTE_THRESHOLD", DEFAULT_THRESHOLD)))
+    a = ap.parse_args()
+    text = " ".join(a.task).strip() or ("" if sys.stdin.isatty() else sys.stdin.read().strip())
+    if not text:
+        ap.error("kein Aufgabentext")
+
+    # Only the masked task text leaves the machine; JULES_EXCLUDE and the repo check
+    # below keep working on the original text.
+    ans = tc.post(tc.mask_detail(text)[0], QUESTIONS)
+    parsed = None
+    if ans:
+        s, r = (round_up(ans, k, a.threshold) for k in ("size", "risk"))
+        nb, nd, nm = (tc.noul(ans, k) for k in ("browser", "decision", "media"))
+        if s and r and None not in (nb, nd, nm):
+            parsed = (s, r, nb, nd, nm)
+    if not parsed:
+        out = {"status": "unsicher", "grund": "keine Antwort von TypeSafe (Key/Netz/Format)"}
+        print(json.dumps(out, ensure_ascii=False) if a.json else
+              "unsicher – Lead entscheidet (TypeSafe nicht erreichbar)")
+        return 0
+    (size, sc), (risk, rc), nb, nd, nm = parsed
+    conf = min(sc, rc)   # noul side flags never cause abstention, they only trigger rules at their own cutoffs
+    out = {"size": SIZE[size], "risk": RISK[risk], "browser": nb, "decision": nd, "media": nm,
+           "confidence": round(conf, 2), "threshold": a.threshold}
+    if conf < a.threshold:
+        out["status"] = "unsicher"
+        line = f"unsicher – Lead entscheidet (Konfidenz {conf:.2f} < {a.threshold})"
+    else:
+        rec = recommend(size, risk, nb, nd, nm, text, lead=a.lead, repo=a.repo)
+        out.update(status="ok", **rec)
+        line = (f"Empfehlung: Lead {rec['lead']}, Ausführung {rec['executor']}, "
+                f"Modell {rec['modell']} | Größe {SIZE[size]}, Risiko {RISK[risk]}, "
+                f"Konfidenz {conf:.2f}" + (f" | {rec['hinweis']}" if rec["hinweis"] else ""))
+    print(json.dumps(out, ensure_ascii=False) if a.json else line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

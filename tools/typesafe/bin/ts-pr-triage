@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""ts-pr-triage: TypeSafe-powered PR and diff triage for Antigravity & Claude.
+
+Determines:
+ 1. risk_level (Score 0..2): 0=reversibel (kein Review), 1=mittel (1 Runde), 2=hoch/Krypto/Auth/Netz (blind bis sauber)
+ 2. scope_leak (Noul): Änderungen außerhalb des deklarierten Auftrags?
+ 3. leak (Noul + lokal): Reale Tokens, Keys oder PII in Code oder Testdaten?
+    Lokal (ts_common.leak_found, jeder Commit des Bereichs einzeln) auch ohne Key:
+    ein Treffer setzt leak_prob auf 1.0. Ohne Key oder bei API-Fehler fail-open:
+    status "fail_open", exit 0, der lokale Befund wird trotzdem gemeldet.
+ 4. tests_present (Noul): Ausreichende Tests für neue Logik vorhanden?
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
+import ts_common as tc  # noqa: E402
+
+QUESTIONS = {
+    "risk": {
+        "type": "score",
+        "instructions": (
+            "What is the review risk level of this code diff according to these criteria?\n"
+            "Level 0: Pure docs, comments, trivial typo fix, or easily reversible internal test.\n"
+            "Level 1: Medium risk: new parser, formatting, internal business logic, non-sensitive feature.\n"
+            "Level 2: High risk: cryptography, authentication, secrets, network access, database schema migration, or external API clients. Also treat cryptography or secrets code, including its tests, as Level 2."
+        ),
+        "criteria": [
+            "Level 0: trivial or reversible internal change",
+            "Level 1: medium risk internal logic or parser",
+            "Level 2: high risk, security, auth, crypto, db schema, or external communication"
+        ]
+    },
+    "scope_leak": {
+        "type": "noul",
+        "instructions": "Does this diff modify files or dependencies that are unrelated to the stated commit purpose?"
+    },
+    "leak": {
+        "type": "noul",
+        "instructions": "Does this diff contain real secrets, API keys, passwords, private tokens, or real personal identifiable data (PII)?"
+    },
+    "tests_present": {
+        "type": "noul",
+        "instructions": "Does this diff include corresponding test files or unit tests covering the introduced changes?"
+    }
+}
+
+
+# Risk floor (rule "nur verschärfen": Jev may only tighten, never approve)
+SENSITIVE_PATH = re.compile(r"(^|/)(geheim|tresor|netz|anmeldung|auth|crypto|secret)/")
+CONF_FLOOR = 0.5
+
+
+def run_cmd(cmd, cwd=None):
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=10)
+    return r.stdout.strip()
+
+
+def evaluate_diff(commit_range, cwd=None):
+    log_text = run_cmd(["git", "log", "-n", "3", "--oneline", commit_range], cwd=cwd)
+    stat_text = run_cmd(["git", "diff", "--stat", commit_range], cwd=cwd)
+    diff_text = run_cmd(["git", "diff", commit_range], cwd=cwd)
+
+    # Only masked text leaves the machine (user decision 2026-09-29). Secrets and
+    # emails are found locally by the masking itself; TypeSafe judges the rest.
+    # Mask first, then cut (max 12,000 chars): a cut first could split a token or
+    # an address so that the masking no longer recognises the fragment.
+    log_text, h1 = tc.mask_detail(log_text)
+    stat_text, h2 = tc.mask_detail(stat_text)
+    diff_text, h3 = tc.mask_detail(diff_text)
+    if len(diff_text) > 12000:
+        diff_text = diff_text[:12000] + "\n... [diff truncated for triage]"
+    hits = tc.add_counts(h1, h2, h3)
+    local_hits = sum(hits.values())
+    # Local leak alarm per commit (rules in ts_common), independent of TypeSafe.
+    allowed = tc.allowed_addresses(cwd)
+    local_leak = any(tc.leak_found(*u, allowed=allowed) for u in tc.commit_units(commit_range, cwd=cwd))
+    paths = run_cmd(["git", "diff", "--name-only", commit_range], cwd=cwd).splitlines()
+
+    state = {
+        "commits": log_text,
+        "files_changed": stat_text,
+        "diff": diff_text
+    }
+
+    answers = tc.post(state, QUESTIONS)
+    risk = tc.score_level(answers, "risk") if answers else None
+    if risk is None:
+        return {"status": "fail_open",
+                "message": "TypeSafe API nicht erreichbar, Key fehlt oder Antwort ohne Risiko (fail-open)",
+                "leak_prob": 1.0 if local_leak else None,
+                "masked_locally": local_hits,
+                "masked_detail": hits}
+    risk_lvl, risk_conf = risk
+    scope_leak = tc.noul(answers, "scope_leak")
+    leak_prob = tc.noul(answers, "leak") or 0.0
+    # Local alarm only for addresses and real-looking secrets; opaque strings (hashes,
+    # long identifiers) are masked but not reported (retro test: 24/35 false alarms).
+    if local_leak:
+        leak_prob = 1.0
+
+    # risk floor: only tightens
+    floor_reasons = []
+    hit_paths = [f for f in paths if SENSITIVE_PATH.search(f)]
+    if hit_paths:
+        floor_reasons.append("Untergrenze: Pfad " + ", ".join(hit_paths[:3]))
+    if risk_conf < CONF_FLOOR:
+        floor_reasons.append(f"Untergrenze: Konfidenz {risk_conf:.2f} < {CONF_FLOOR}")
+    if floor_reasons:
+        risk_lvl = max(risk_lvl, 1)
+    tests_present = tc.noul(answers, "tests_present")
+
+    review_depth = [
+        "Kein Review nötig (reversibel)",
+        "Eine Runde Review nötig (mittleres Risiko)",
+        "Blind-Review bis nichts mehr gefunden wird (Sicherheit/Netz/Krypto)"
+    ][risk_lvl]
+
+    return {
+        "status": "ok",
+        "risk_level": risk_lvl,
+        "risk_confidence": risk_conf,
+        "review_depth": review_depth,
+        "scope_leak_prob": scope_leak,
+        "leak_prob": leak_prob,
+        "masked_locally": local_hits,
+        "masked_detail": hits,
+        "risk_floor": floor_reasons,
+        "tests_present_prob": tests_present,
+        "raw_answers": answers
+    }
+
+
+def fmt(p):
+    return "unbekannt" if p is None else f"{p:.2f}"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Triage PRs and git diffs with TypeSafe System One")
+    parser.add_argument("range", nargs="?", default="HEAD~1..HEAD", help="Git commit range, e.g. main..HEAD")
+    parser.add_argument("--cwd", default=".", help="Working directory repository")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    args = parser.parse_args()
+
+    res = evaluate_diff(args.range, cwd=args.cwd)
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+
+    if res["status"] == "fail_open":
+        print(f"Hinweis: {res['message']}")
+        if res["leak_prob"] is not None:
+            print("⚠️ Lokaler Leak-Verdacht: Secret oder E-Mail-Adresse in Nachricht, neuen "
+                  "Diff-Zeilen oder Dateinamen eines Commits. Bitte manuell prüfen.")
+        sys.exit(0)
+
+    print("═══════════════════════════════════════════════════════════════")
+    print(f" TypeSafe PR Triage für Commit-Range: {args.range}")
+    print("═══════════════════════════════════════════════════════════════")
+    print(f" • Risiko-Stufe      : {res['risk_level']} (Konfidenz: {res['risk_confidence']:.2f})")
+    for why in res["risk_floor"]:
+        print(f"   {why}")
+    print(f" • Review-Tiefe      : {res['review_depth']}")
+    print(f" • Scope-Verletzung  : Wahrscheinlichkeit {fmt(res['scope_leak_prob'])}")
+    print(f" • Secret/PII Leak   : Wahrscheinlichkeit {res['leak_prob']:.2f}"
+          f" (lokal maskiert: {res['masked_locally']}; {tc.format_counts(res['masked_detail'])};"
+          f" lokaler Alarm nur bei Adresse oder echt wirkendem Secret)")
+    print(f" • Tests vorhanden   : Wahrscheinlichkeit {fmt(res['tests_present_prob'])}")
+    print("═══════════════════════════════════════════════════════════════")
+
+
+if __name__ == "__main__":
+    main()

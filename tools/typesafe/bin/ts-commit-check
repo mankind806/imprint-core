@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""ts-commit-check: TypeSafe Jev commit message & diff validator for AGY & Claude.
+
+Validates:
+ 1. alignment (Score 0..3): Accuracy of commit message relative to actual code diff.
+ 2. omissions (Noul): Significant changes omitted from the commit message.
+ 3. conventional (Noul): Compliance with Conventional Commits syntax (feat:, fix:, docs:, etc.).
+ 4. leak (Noul + Local): Secrets, API keys, or PII in diff or commit message.
+    Local part (ts_common.leak_found, rules in ts_common next to local_alarm): an
+    email address or a value that really looks like a secret, in the commit message,
+    the ADDED diff lines or the file names, sets leak_prob to 1.0, with or without a
+    TypeSafe key. leak_prob >= 0.5 is a hard block (exit 1), also without a key and
+    also for an empty diff. Removed and context lines raise no alarm. The masking
+    toward TypeSafe is separate and more generous.
+    Range mode: TypeSafe judges the net diff and the last message; the local alarm
+    checks every commit of the range on its own (git rev-list), so a value added in
+    one commit and removed in the next still blocks.
+
+Usage:
+  ts-commit-check [COMMIT_RANGE]             # e.g. HEAD~1..HEAD (default)
+  ts-commit-check --cached                   # staged changes vs last commit or --msg
+  ts-commit-check --msg-file <file>          # git commit-msg hook mode
+  ts-commit-check --msg "feat: ..."          # explicit message string
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
+import ts_common as tc  # noqa: E402
+
+QUESTIONS = {
+    "alignment": {
+        "type": "score",
+        "instructions": (
+            "How accurately and truthfully does the commit message describe the actual changes in the diff?\n"
+            "Level 0: Complete mismatch, hallucination, or wrong scope.\n"
+            "Level 1: Partly misleading, vague, or claims things not in the diff.\n"
+            "Level 2: Accurate, consistent, and correctly reflects the changes.\n"
+            "Level 3: Exceptionally precise, clear, and perfectly aligned."
+        ),
+        "criteria": [
+            "Level 0: hallucination, total mismatch, or completely wrong",
+            "Level 1: vague, partly misleading, or unverified claims",
+            "Level 2: accurate and consistent with the diff",
+            "Level 3: exceptionally precise and perfectly aligned"
+        ]
+    },
+    "omissions": {
+        "type": "noul",
+        "instructions": "Are there significant functional changes, modified packages, or added logic in the diff that are completely unmentioned in the commit message?"
+    },
+    "conventional": {
+        "type": "noul",
+        "instructions": "Does the first line of the commit message strictly follow Conventional Commits formatting, e.g. type(scope): description or type: description (feat, fix, docs, refactor, test, chore, perf, build, ci)?"
+    },
+    "leak": {
+        "type": "noul",
+        "instructions": "Does either the commit message or the code diff contain real secrets, API keys, passwords, private tokens, or real personal identifiable data (PII)?"
+    }
+}
+
+
+def run_cmd(cmd, cwd=None):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def get_diff_and_msg(args, cwd=None):
+    """(message, diff, stat, local-alarm units, error). A unit is (message, diff,
+    file names); range mode has one unit per commit."""
+    if args.msg_file:
+        try:
+            with open(args.msg_file, "r", encoding="utf-8") as f:
+                commit_msg = f.read().strip()
+        except Exception as e:
+            return None, None, None, None, f"Could not read msg file: {e}"
+    elif args.msg:
+        commit_msg = args.msg.strip()
+    elif args.cached:
+        commit_msg = run_cmd(["git", "log", "-1", "--pretty=%B"], cwd=cwd)
+    else:
+        commit_msg = None
+
+    if args.msg_file or args.cached:
+        diff_text = run_cmd(["git", "diff", "--cached"], cwd=cwd)
+        stat_text = run_cmd(["git", "diff", "--cached", "--stat"], cwd=cwd)
+        names = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=cwd)
+        return commit_msg, diff_text, stat_text, [(commit_msg, diff_text, names)], None
+
+    resolved = resolve_range(args.range or "HEAD~1..HEAD", cwd)
+    if isinstance(resolved, str):
+        return None, None, None, None, resolved
+    start, end = resolved
+    if commit_msg is None:
+        commit_msg = run_cmd(["git", "log", "-1", "--pretty=%B", end], cwd=cwd)
+    if start is None:  # the range reaches back past the root commit: diff the root itself
+        diff_text = run_cmd(["git", "diff-tree", "-p", "--root", "--no-commit-id", end], cwd=cwd)
+        stat_text = run_cmd(["git", "diff-tree", "--stat", "--root", "--no-commit-id", end], cwd=cwd)
+        units = tc.commit_units(end + "^!", cwd=cwd)
+    else:
+        diff_text = run_cmd(["git", "diff", start, end], cwd=cwd)
+        stat_text = run_cmd(["git", "diff", "--stat", start, end], cwd=cwd)
+        units = tc.commit_units(f"{start}..{end}", cwd=cwd)
+    if args.msg:  # an explicit message is checked too
+        units.append((commit_msg, "", ""))
+    return commit_msg, diff_text, stat_text, units, None
+
+
+def resolve_range(rng, cwd=None):
+    """(start, end) commit IDs for A..B, A...B (start = merge base, as git diff A...B
+    does) or a single commit X (= X^..X); start is None when it would lie before the
+    root commit (HEAD~1..HEAD in a one-commit repository). An error text otherwise."""
+    def rev(r):
+        return run_cmd(["git", "rev-parse", "--verify", "--quiet", (r or "HEAD") + "^{commit}"], cwd=cwd)
+    if "..." in rng:
+        a, b = rng.split("...", 1)
+        end = rev(b)
+        start = run_cmd(["git", "merge-base", a or "HEAD", end], cwd=cwd) if end else ""
+    elif ".." in rng:
+        a, b = rng.split("..", 1)
+        end, start = rev(b), rev(a)
+    else:
+        a, end = rng + "^", rev(rng)
+        start = rev(a) if end else ""
+    if not end:
+        return f"Commit-Bereich {rng!r}: Ende nicht auflösbar"
+    if not start:
+        if "..." not in rng and run_cmd(["git", "rev-list", "--max-parents=0", end], cwd=cwd) == end:
+            return None, end
+        return f"Commit-Bereich {rng!r}: Anfang nicht auflösbar"
+    return start, end
+
+
+def check_commit(commit_msg, diff_text, stat_text, units=None, allowed=frozenset()):
+    """units: [(message, diff, file names)] for the local alarm; default: this change,
+    with the stat text standing in for the file names. allowed: the clone's declared
+    identities (tc.allowed_addresses), never an alarm."""
+    if units is None:
+        units = [(commit_msg, diff_text, stat_text)]
+    # Local part of the leak check (rules in ts_common): runs first, without TypeSafe
+    # and also without a message, so neither can skip it.
+    local_leak = any(tc.leak_found(*u, allowed=allowed) for u in units)
+    if not commit_msg:
+        return {"status": "error", "message": "No commit message provided",
+                "leak_prob": 1.0 if local_leak else None}
+    if not diff_text:
+        return {"status": "ok", "empty_diff": True, "message": "Diff is empty (nothing changed)",
+                "leak_prob": 1.0 if local_leak else None}
+
+    # Masking before anything leaves the machine (privacy: only masked text goes to TypeSafe).
+    # Mask first, then cut: a cut first could split a token or an address so that the
+    # masking no longer recognises the remaining fragment.
+    masked_msg, h1 = tc.mask_detail(commit_msg)
+    masked_diff, h2 = tc.mask_detail(diff_text)
+    masked_stat, h3 = tc.mask_detail(stat_text)
+    hits = tc.add_counts(h1, h2, h3)
+    if len(masked_diff) > 12000:
+        masked_diff = masked_diff[:12000] + "\n... [diff truncated for check]"
+
+    state = {
+        "commit_message": masked_msg,
+        "files_changed": masked_stat,
+        "diff": masked_diff
+    }
+
+    answers = tc.post(state, QUESTIONS)
+    if not answers:
+        return {
+            "status": "fail_open",
+            "message": "TypeSafe API unreachable or key missing (fail-open)",
+            "leak_prob": 1.0 if local_leak else None,
+            "masked_detail": hits
+        }
+
+    align = tc.score_level(answers, "alignment")
+    align_lvl, align_conf = align if align else (2, 0.5)
+
+    omissions = tc.noul(answers, "omissions") or 0.0
+    conventional = tc.noul(answers, "conventional") or 0.0
+    leak_prob = tc.noul(answers, "leak") or 0.0
+    if local_leak:
+        leak_prob = 1.0
+
+    align_label = [
+        "Unzureichend / Halluzination",
+        "Teilweise passend / vage",
+        "Präzise und konsistent",
+        "Exzellent und vollständig"
+    ][align_lvl]
+
+    return {
+        "status": "ok",
+        "alignment_level": align_lvl,
+        "alignment_confidence": align_conf,
+        "alignment_label": align_label,
+        "omissions_prob": omissions,
+        "conventional_prob": conventional,
+        "leak_prob": leak_prob,
+        "masked_detail": hits,
+        "raw_answers": answers
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="TypeSafe Commit-Message & Diff Checker (Jev)",
+        epilog="Bereichsmodus: TypeSafe sieht den Netto-Diff und die letzte Nachricht; der lokale "
+               "Leak-Alarm prüft jeden Commit des Bereichs einzeln. Ohne Key: lokaler Treffer -> exit 1.")
+    parser.add_argument("range", nargs="?", default="HEAD~1..HEAD", help="Commit range, e.g. HEAD~1..HEAD")
+    parser.add_argument("--cached", action="store_true", help="Check staged changes")
+    parser.add_argument("--msg-file", help="Path to commit message file (git commit-msg hook mode)")
+    parser.add_argument("--msg", help="Explicit commit message string")
+    parser.add_argument("--strict", action="store_true", help="Exit 1 on low alignment or omissions")
+    parser.add_argument("--cwd", default=".", help="Repository directory")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    args = parser.parse_args()
+
+    commit_msg, diff_text, stat_text, units, err = get_diff_and_msg(args, cwd=args.cwd)
+    if err:
+        if args.json:
+            print(json.dumps({"status": "error", "message": err}))
+        else:
+            print(f"Fehler: {err}")
+        sys.exit(1)
+
+    res = check_commit(commit_msg, diff_text, stat_text, units, allowed=tc.allowed_addresses(args.cwd))
+
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+
+    if res["status"] in ("error", "fail_open") or res.get("empty_diff"):
+        print("Hinweis: Diff ist leer (keine Änderungen)." if res.get("empty_diff")
+              else f"Hinweis: {res['message']}" + (" (fail-open)" if res["status"] == "error" else ""))
+        if res.get("leak_prob") is not None:
+            print("❌ ABBRUCH: Secret oder E-Mail-Adresse in Nachricht, neuen Diff-Zeilen oder "
+                  "Dateinamen (lokal erkannt, ohne TypeSafe). Bitte manuell prüfen.")
+            sys.exit(1)
+        sys.exit(0)
+
+    m = res["masked_detail"]
+    print("═══════════════════════════════════════════════════════════════")
+    print(" TypeSafe Commit-Prüfung (Jev)")
+    print("═══════════════════════════════════════════════════════════════")
+    print(f" • Übereinstimmung   : Stufe {res['alignment_level']}/3 – {res['alignment_label']} (Konfidenz: {res['alignment_confidence']:.2f})")
+    print(f" • Auslassungen      : Wahrscheinlichkeit {res['omissions_prob']:.2f}")
+    print(f" • Conventional Style: Wahrscheinlichkeit {res['conventional_prob']:.2f}")
+    print(f" • Secret/PII Leak   : Wahrscheinlichkeit {res['leak_prob']:.2f}"
+          f" (lokal maskiert: {tc.format_counts(m)})")
+    print("═══════════════════════════════════════════════════════════════")
+
+    # Hard blocker: secret leak stops execution
+    if res["leak_prob"] >= 0.5:
+        print("❌ ABBRUCH: Verdacht auf Secret- oder PII-Leak! Bitte manuell prüfen.")
+        sys.exit(1)
+
+    if args.strict:
+        if res["alignment_level"] < 2 or res["omissions_prob"] > 0.6:
+            print("❌ ABBRUCH (strict): Commit-Nachricht weicht wesentlich vom Diff ab oder lässt Änderungen aus.")
+            sys.exit(1)
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
