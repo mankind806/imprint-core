@@ -122,13 +122,20 @@ Alle drei Unterbefehle:
   beim Diff) fest und prüfen ihn nach der Rückfrage erneut — ändert sich die Zieldatei
   währenddessen (ein anderer Prozess, ein gleichzeitiges "immer erlauben"), bricht das Skript
   ohne jede Änderung ab, statt eine Sicherung des schon veralteten Standes anzulegen;
+* prüfen, BEVOR eine Sicherung angelegt wird, ob `getfacl`/`setfacl` fehlen, obwohl sie gebraucht
+  würden (Zieldatei mit ACL, oder eine per `mktemp` im Zielverzeichnis schon angelegte
+  Zwischendatei, deren ACL ein vom Verzeichnis geerbtes Default-ACL verrät) — sonst bräche das
+  Skript erst NACH der Rückfrage und NACH einer schon angelegten Sicherung ab, mit einer
+  überzähligen `.bak`-Datei als Rest (Befund 3, Runde 10);
 * legen bei Zustimmung zuerst eine Sicherung mit sekundengenauem Zeitstempel neben der
   Zieldatei an (`cp -p -n`, bei einem fehlschlagenden `cp` wird eine dabei schon unvollständig
   angelegte Sicherung wieder entfernt), bestätigen sie per `cmp -s` gegen das Original, erhalten
   die Rechte der Zieldatei (`chmod --reference`, plus eine erweiterte ACL der Zieldatei, falls
-  vorhanden — `chmod --reference` kopiert keine ACL-Einträge; fehlen dafür `getfacl`/`setfacl`,
-  bricht das Skript ab, statt die ACL stillschweigend zu verlieren) und übernehmen die neue Datei
-  erst danach per atomarem `mv`;
+  vorhanden — `chmod --reference` kopiert keine ACL-Einträge) und übernehmen die neue Datei erst
+  danach per atomarem `mv`; hat die Zieldatei KEINE ACL, aber die neue Zwischendatei durch ein
+  Default-ACL ihres Verzeichnisses trotzdem eine, wird diese per `setfacl -b` wieder entfernt,
+  statt sie stillschweigend zu behalten (Befund 4, Runde 10) — dasselbe gilt für `rueckbau` und
+  die `statusline.py`-Installation;
 * schreiben, wenn die Zieldatei (oder ein Verzeichnis auf ihrem Weg) ein Symlink ist, auf die
   Datei, auf die er zeigt (`readlink -f`) — der Symlink selbst bleibt erhalten.
 
@@ -159,9 +166,15 @@ schon vorhandener, von der Vorlage nicht getragener Schlüssel (z. B. ein von Ha
 `model`) bleibt unverändert — ein voller Ersatz hätte eigene `deny`-Regeln wie `command(make)`
 stillschweigend gelöscht.
 
-`agy` validiert `PROJEKTE`/`TRUSTED_WORKSPACE` zuerst (absoluter, mit `realpath -e` auflösbarer
-Pfad; weder `/` noch `$HOME` selbst noch ein Vorfahre von `$HOME`; kein `"`, `\`, Steuerzeichen
-oder Glob-/Regex-Metazeichen wie `*`/`?`/`[` — Runde 9, siehe unten) und rendert
+`agy` löst zuerst `$HOME` selbst kanonisch auf (`realpath -e`, nicht das rohe `$HOME` — auf einem
+Rechner mit einem symlinked Home-Verzeichnis, z. B. Bluefin/ostree (`/home` → `var/home`), wäre
+das rohe `$HOME` sonst nie byte-gleich mit dem aufgelösten Wert, und ein `TRUSTED_WORKSPACE=$HOME`
+oder ein Vorfahre davon würde unbemerkt durchgehen — Befund 1, Runde 10) und validiert
+`PROJEKTE`/`TRUSTED_WORKSPACE` sowie dieses kanonische `$HOME` gegen dieselbe Positivliste
+`^[A-Za-z0-9._/-]+$` (absoluter, mit `realpath -e` auflösbarer Pfad; weder `/` noch `$HOME` selbst
+noch ein Vorfahre von `$HOME`) — eine Verbotsliste wie bis Runde 9 (nur `*`/`?`/`[`) übersieht
+Zeichen wie `|`/`+`/`(`/`)`/`{`/`}`/`^`/`$`, die ein `write_file(...)`/`read_file(...)`-Muster
+erweitern oder verändern könnten, und unsichtbare Zeichen wie U+202E (Befund 2, Runde 10). Rendert
 `agy-settings.json` dann über `jq` (Platzhalter literal per `split`/`join` ersetzt, der
 eingesetzte Wert vorher mit `tojson` JSON-escaped), NICHT mit `envsubst`: `envsubst` fügt reinen
 Text ein, ohne JSON zu escapen, ein Wert mit einem eingebetteten `"` könnte so aus dem
@@ -169,12 +182,15 @@ umgebenden JSON-String ausbrechen und beliebige Teile der Vorlage überschreiben
 passend platziertes `"` in `TRUSTED_WORKSPACE` löschte alle 28 `deny`-Einträge der Vorlage und
 ersetzte `trustedWorkspaces`). Validiert danach per `jq -e -s 'length==1'`, dass das Ergebnis
 gültiges JSON mit genau einem Dokument ist, kein unersetztes `${` mehr enthält, `statusLine`
-(falls vorhanden) exakt `{"type":"command","command":"$HOME/.gemini/antigravity-cli/statusline.py"}`
-ist (eine manipulierte Vorlage könnte hier sonst beliebigen Code als agy-Statuszeilenbefehl
-unterbringen), und mergt das Ergebnis dann wie oben beschrieben in
-`~/.gemini/antigravity-cli/settings.json` — nach dem Merge zusätzlich geprüft: die `deny`-Liste
-umfasst vollständig die der (validierten) Vorlage, `allow` enthält nur Einträge aus Bestand und
-Vorlage, und `trustedWorkspaces` entspricht genau dem aufgelösten `TRUSTED_WORKSPACE`.
+(falls vorhanden) exakt dem fest einprogrammierten Wert entspricht — `{"type":"","command":"…/
+statusline.py"}`, `type` bewusst leer wie in der real angewendeten, getesteten
+`~/.gemini/antigravity-cli/settings.json`, nicht `"command"` (nicht gegen echtes agy-Verhalten
+verifiziert, siehe Pull-Request-Text „Runde 10") — eine manipulierte Vorlage könnte hier sonst
+beliebigen Code als agy-Statuszeilenbefehl unterbringen, und mergt das Ergebnis dann wie oben
+beschrieben in `~/.gemini/antigravity-cli/settings.json` — nach dem Merge zusätzlich geprüft: die
+`deny`-Liste umfasst vollständig die der (validierten) Vorlage, `allow` enthält nur Einträge aus
+Bestand und Vorlage, und `trustedWorkspaces` entspricht genau dem aufgelösten
+`TRUSTED_WORKSPACE`.
 `statusline.py` wird davon unabhängig behandelt, nicht nur dann,
 wenn `settings.json` sich ändert, über denselben Codepfad wie der eigenständige Unterbefehl
 `agy-statusline`: Fehlt `~/.gemini/antigravity-cli/statusline.py`, zeigt das Skript den ganzen

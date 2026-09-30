@@ -171,9 +171,24 @@ EOF
 t4_statusline_unabhaengig() {
   local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
   mkdir -p "$h/.gemini/antigravity-cli"
-  HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" \
-    envsubst '${HOME} ${PROJEKTE} ${TRUSTED_WORKSPACE}' \
-    <"$vorlagen_dir/agy-settings.json" >"$h/.gemini/antigravity-cli/settings.json"
+  # Baut die "schon angewendete" Fixture mit demselben jq-Verfahren wie
+  # render_agy_vorlage im Skript (split/join, tojson-Escaping), nicht mehr
+  # mit envsubst (Befund 5, Runde 10) — sonst würde diese Fixture nicht
+  # mehr exakt dem entsprechen, was "agy" selbst erzeugt, seit envsubst
+  # durch jq ersetzt wurde (Befund 1, Runde 9). $h enthält hier keinen
+  # Symlink, "realpath -e" liefert also denselben Wert wie $h selbst; die
+  # Auflösung steht trotzdem hier, damit die Fixture auch dann noch zu dem
+  # passt, was "agy" mit seinem eigenen home_kanon erzeugt, falls sich das
+  # je ändert.
+  local h_kanon; h_kanon=$(realpath -e "$h")
+  jq -nr --rawfile tpl "$vorlagen_dir/agy-settings.json" \
+    --arg home "$h_kanon" --arg projekte "$agy_projekte_dir" --arg tw "$agy_tw_dir" '
+    def esc($v): ($v | tojson | .[1:-1]);
+    $tpl
+    | split("${HOME}") | join(esc($home))
+    | split("${PROJEKTE}") | join(esc($projekte))
+    | split("${TRUSTED_WORKSPACE}") | join(esc($tw))
+  ' >"$h/.gemini/antigravity-cli/settings.json"
   chmod 600 "$h/.gemini/antigravity-cli/settings.json"
   # statusline.py existiert bewusst noch nicht.
 
@@ -681,7 +696,7 @@ t20_acl_erhalten() {
   local rc=$?
   local acl_nach; acl_nach=$(getfacl -c "$f" 2>/dev/null)
 
-  if [ "$rc" -eq 0 ] && [ "$acl_vor" = "$acl_nach" ] && printf '%s' "$acl_nach" | grep -q '^user:'; then
+  if [ "$rc" -eq 0 ] && [ "$acl_vor" = "$acl_nach" ] && printf '%s' "$acl_nach" | grep -Eq '^user:[^:]+:'; then
     report "T20 ACL bleibt nach claude erhalten (kopiere_rechte statt chmod --reference)" 0
   else
     report "T20 ACL bleibt nach claude erhalten (kopiere_rechte statt chmod --reference)" 1 \
@@ -693,6 +708,149 @@ t17_agy_injektion
 t18_agy_pfad_werte
 t19_agy_statusline_manipuliert
 t20_acl_erhalten
+
+# --- T21 (Befund 1, Runde 10): $HOME ist selbst ein Symlink (der Bluefin-
+# Fall /home -> var/home). TRUSTED_WORKSPACE=$HOME (roh, der Symlink-Pfad),
+# TRUSTED_WORKSPACE=das aufgelöste Ziel und TRUSTED_WORKSPACE=ein Vorfahre
+# des Ziels müssen alle drei abgelehnt werden. ---
+t21_home_symlink() {
+  local real_home; real_home=$(mktemp -d); aufraeumen_dirs+=("$real_home")
+  mkdir -p "$real_home/.gemini/antigravity-cli"
+  cat >"$real_home/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local linkdir; linkdir=$(mktemp -d); aufraeumen_dirs+=("$linkdir")
+  local home_link="$linkdir/homelink"
+  ln -s "$real_home" "$home_link"
+  local vorfahre; vorfahre=$(dirname "$real_home")
+
+  local alle_ok=0 tw vor nach rc
+  local -a faelle=("$home_link" "$real_home" "$vorfahre")
+  for tw in "${faelle[@]}"; do
+    vor=$(cat "$real_home/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$home_link" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$tw" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$real_home/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      alle_ok=1
+      report "T21 TRUSTED_WORKSPACE=[$tw] bei \$HOME als Symlink wird abgelehnt" 1 "rc=$rc"
+    fi
+  done
+  [ "$alle_ok" -eq 0 ] && report "T21 \$HOME als Symlink: \$HOME selbst/Ziel/Vorfahre werden trotzdem erkannt" 0
+}
+
+# --- T22 (Befund 2, Runde 10): TRUSTED_WORKSPACE mit je einem verbotenen
+# Zeichen (| + ( ) { } ^ $) oder U+202E wird abgelehnt — der Pfad existiert
+# jeweils wirklich (realpath -e muss durchkommen), damit die Positivliste
+# selbst geprüft wird, nicht nur "Pfad fehlt". ---
+t22_zeichensatz() {
+  local basis; basis=$(mktemp -d); aufraeumen_dirs+=("$basis")
+  local ok=0 zeichen dir h vor nach rc
+  local -a zeichen_liste=('|' '+' '(' ')' '{' '}' '^' '$')
+  for zeichen in "${zeichen_liste[@]}"; do
+    dir="$basis/x${zeichen}y"
+    mkdir -p "$dir" 2>/dev/null
+    [ -d "$dir" ] || continue
+    h=$(mktemp -d); aufraeumen_dirs+=("$h")
+    mkdir -p "$h/.gemini/antigravity-cli"
+    cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+    vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$dir" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      ok=1
+      report "T22 Zeichen [$zeichen] in TRUSTED_WORKSPACE wird abgelehnt" 1 "rc=$rc, Pfad=$dir"
+    fi
+  done
+  # U+202E (Right-to-Left Override) gesondert, kein normales Shell-Zeichen.
+  local rlo; rlo=$(printf '\xe2\x80\xae')
+  dir="$basis/x${rlo}y"
+  if mkdir -p "$dir" 2>/dev/null; then
+    h=$(mktemp -d); aufraeumen_dirs+=("$h")
+    mkdir -p "$h/.gemini/antigravity-cli"
+    cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+    vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$dir" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      ok=1
+      report "T22 U+202E in TRUSTED_WORKSPACE wird abgelehnt" 1 "rc=$rc"
+    fi
+  fi
+  [ "$ok" -eq 0 ] && report 'T22 verbotene Zeichen (| + ( ) { } ^ $, U+202E) in TRUSTED_WORKSPACE werden abgelehnt' 0
+}
+
+# --- T23 (Befund 3, Runde 10): eine ACL auf der Zieldatei, aber
+# getfacl/setfacl fehlen im PATH -> Abbruch VOR der Rückfrage/Sicherung,
+# keine überzählige .bak-Datei. Nur ausgeführt, wenn getfacl/setfacl real
+# vorhanden sind (um die ACL überhaupt setzen zu können). ---
+t23_acl_werkzeuge_fehlen_vorab() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (übersprungen, getfacl/setfacl fehlen hier ganz)" 0
+    return
+  fi
+  local h; neues_home h
+  local f="$h/.claude/settings.json"
+  if ! setfacl -m u:"$(id -u)":rwx "$f" 2>/dev/null; then
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (übersprungen, setfacl schlägt hier fehl)" 0
+    return
+  fi
+
+  local stub; neuer_stub_dir stub
+  local prog
+  for prog in bash jq mktemp readlink chmod diff cp mv grep install cmp sha256sum ls realpath env cat sleep date; do
+    command -v "$prog" >/dev/null 2>&1 && ln -s "$(command -v "$prog")" "$stub/$prog"
+  done
+
+  local vor; vor=$(cat "$f")
+  echo j | PATH="$stub" HOME="$h" "$stub/bash" "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$f")
+  local reste; reste=$(find "$h" -name '*.bak-*' 2>/dev/null)
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ] && [ -z "$reste" ]; then
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (keine überzählige .bak)" 0
+  else
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (keine überzählige .bak)" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein), Reste=[$reste]"
+  fi
+}
+
+# --- T24 (Befund 4, Runde 10): die Quelle hat keine ACL, aber das
+# Zielverzeichnis trägt ein Default-ACL — die neue Datei darf die geerbte
+# ACL nicht behalten. Nur ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t24_geerbte_acl_entfernt() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (übersprungen, getfacl/setfacl fehlen)" 0
+    return
+  fi
+  local h; neues_home h
+  if ! setfacl -d -m u:"$(id -u)":rwx "$h/.claude" 2>/dev/null; then
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (übersprungen, Default-ACL hier nicht setzbar)" 0
+    return
+  fi
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local acl_nach; acl_nach=$(getfacl -c "$h/.claude/settings.json" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && ! printf '%s' "$acl_nach" | grep -Eq '^user:[^:]+:'; then
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (setfacl -b)" 0
+  else
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (setfacl -b)" 1 "rc=$rc, ACL=[$acl_nach]"
+  fi
+}
+
+t21_home_symlink
+t22_zeichensatz
+t23_acl_werkzeuge_fehlen_vorab
+t24_geerbte_acl_entfernt
 
 echo "---"
 echo "$pass PASS, $fail FAIL"

@@ -44,8 +44,9 @@
 # gleichzeitiges "immer erlauben"), bricht das Skript ohne jede Änderung ab,
 # statt eine Sicherung des schon veralteten Standes anzulegen.
 #
-# agy mergt setup/vorlagen/agy-settings.json (envsubst für ${PROJEKTE} und
-# ${TRUSTED_WORKSPACE}) in ${HOME}/.gemini/antigravity-cli/settings.json —
+# agy mergt setup/vorlagen/agy-settings.json (PROJEKTE/TRUSTED_WORKSPACE
+# vorab validiert und per jq eingesetzt, nicht envsubst — siehe unten und
+# Befund 1, Runde 9/10) in ${HOME}/.gemini/antigravity-cli/settings.json —
 # seit Runde 8 genau wie claude: permissions.allow/permissions.deny als
 # Vereinigung aus Bestand und Vorlage, alles andere aus der Vorlage
 # (statusLine, trustedWorkspaces) ersetzt den Bestand wie bisher, jeder
@@ -370,49 +371,51 @@ pruefe_vorlage_schluessel() {
   fi
 }
 
-# pruefe_agy_pfad <Name> <Wert>: validiert PROJEKTE/TRUSTED_WORKSPACE, bevor
-# sie in die JSON-Vorlage eingesetzt werden, und gibt den aufgelösten,
-# kanonischen Pfad aus. Ein Wert mit Anführungszeichen könnte sonst aus dem
-# JSON-String ausbrechen (siehe render_agy_vorlage), ein Glob-/Regex-
-# Metazeichen könnte ein write_file(...)/trustedWorkspaces-Muster unbeab-
-# sichtigt weiten, und ein Wert, der $HOME selbst oder ein Vorfahre von
-# $HOME ist, würde $HOME ganz oder teilweise vertrauenswürdig machen bzw.
-# abdecken (Befund 1, Runde 9).
-pruefe_agy_pfad() {
+# pruefe_pfad_zeichensatz <Name> <Wert>: erlaubt NUR A-Z a-z 0-9 . _ / -
+# (Positivliste statt Verbotsliste) — der Wert landet unverändert in
+# write_file(...)/read_file(...)/trustedWorkspaces-Mustern; eine
+# Verbotsliste (nur *, ?, [ wie bis Runde 9) übersieht z. B. | + ( ) { }
+# ^ $ (könnten ein Muster erweitern/verändern) und unsichtbare Zeichen wie
+# U+202E (Right-to-Left Override, könnte die Anzeige eines Diffs oder
+# einer Fehlermeldung verfälschen) — keines davon ist in der Positivliste
+# enthalten, die Prüfung muss sie also nicht einzeln kennen (Befund 2,
+# Runde 10).
+pruefe_pfad_zeichensatz() {
   local name="$1" wert="$2"
+  case "$wert" in
+    ''|*[!A-Za-z0-9._/-]*)
+      die "$name enthält ein Zeichen außerhalb von A-Z a-z 0-9 . _ / - (z. B. Anführungszeichen, Klammern, Pipe, ^, \$, ein Steuerzeichen oder ein unsichtbares Unicode-Zeichen wie U+202E): $wert"
+      ;;
+  esac
+}
+
+# pruefe_agy_pfad <Name> <Wert> <home_kanon>: validiert PROJEKTE/
+# TRUSTED_WORKSPACE, bevor sie in die JSON-Vorlage eingesetzt werden, und
+# gibt den aufgelösten, kanonischen Pfad aus. <home_kanon> ist das per
+# "realpath -e" aufgelöste $HOME — ein Vergleich gegen das rohe $HOME würde
+# auf Systemen mit einem symlinked Home-Verzeichnis (z. B. Bluefin/ostree:
+# /home -> var/home) danebengehen: $HOME selbst oder ein Vorfahre von
+# $HOME, als TRUSTED_WORKSPACE eingetragen, würde dann trotzdem akzeptiert,
+# weil der aufgelöste Wert nie byte-gleich mit dem rohen $HOME ist (Befund
+# 1, Runde 10).
+pruefe_agy_pfad() {
+  local name="$1" wert="$2" home_kanon="$3"
   case "$wert" in
     /*) ;;
     *) die "$name muss ein absoluter Pfad sein: $wert" ;;
   esac
-  case "$wert" in
-    *'"'*) die "$name enthält ein Anführungszeichen: $wert" ;;
-  esac
-  case "$wert" in
-    *'\'*) die "$name enthält einen Backslash: $wert" ;;
-  esac
-  case "$wert" in
-    *[![:print:]]*) die "$name enthält ein Steuerzeichen: $wert" ;;
-  esac
-  case "$wert" in
-    *'*'*) die "$name enthält ein Glob-/Regex-Metazeichen (*): $wert" ;;
-  esac
-  case "$wert" in
-    *'?'*) die "$name enthält ein Glob-/Regex-Metazeichen (?): $wert" ;;
-  esac
-  case "$wert" in
-    *'['*) die "$name enthält ein Glob-/Regex-Metazeichen ([): $wert" ;;
-  esac
   local aufgeloest
   aufgeloest=$(realpath -e "$wert" 2>/dev/null) || die "$name ist kein vorhandener Pfad (realpath -e): $wert"
+  pruefe_pfad_zeichensatz "$name" "$aufgeloest"
   if [ "$aufgeloest" = "/" ]; then
     die "$name darf nicht / sein: $wert"
   fi
-  if [ "$aufgeloest" = "$HOME" ]; then
-    die "$name darf nicht \$HOME selbst sein: $wert"
+  if [ "$aufgeloest" = "$home_kanon" ]; then
+    die "$name darf nicht \$HOME selbst sein (aufgelöst: $home_kanon): $wert"
   fi
-  case "$HOME" in
+  case "$home_kanon" in
     "$aufgeloest"/*)
-      die "$name ist ein Vorfahre von \$HOME und würde \$HOME mit abdecken: $wert"
+      die "$name ist ein Vorfahre von \$HOME (aufgelöst: $home_kanon) und würde \$HOME mit abdecken: $wert"
       ;;
   esac
   printf '%s\n' "$aufgeloest"
@@ -457,14 +460,40 @@ hat_acl() {
   esac
 }
 
-# kopiere_rechte <von> <nach>: wie "chmod --reference", übernimmt aber
-# zusätzlich eine erweiterte ACL der Quelle (chmod --reference kopiert nur
-# die klassischen rwx-Bits, keine ACL-Einträge). Fehlen getfacl/setfacl,
-# obwohl die Quelle eine ACL trägt, bricht die Funktion ab, statt die ACL
-# stillschweigend zu verlieren (Befund 3, Runde 9).
-kopiere_rechte() {
+# pruefe_acl_werkzeuge <quelle> <zwischendatei>: prüft FRÜH — vor jeder
+# Rückfrage und vor jeder Sicherung —, ob kopiere_acl/kopiere_rechte später
+# an fehlenden getfacl/setfacl scheitern würde. <zwischendatei> ist die per
+# mktemp im selben Verzeichnis wie das Ziel schon angelegte Datei: existiert
+# sie schon (Regelfall), zeigt ihre ACL bereits jetzt, ob das Verzeichnis
+# eine Default-ACL an neue Dateien vererbt (Befund 4, Runde 10) — ohne
+# diese Vorab-Prüfung bräche das Skript erst nach "j" und nach einer schon
+# angelegten Sicherung ab, mit einer überzähligen .bak-Datei als Rest
+# (Befund 3, Runde 10).
+pruefe_acl_werkzeuge() {
+  local quelle="$1" zwischendatei="$2"
+  if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
+    return 0
+  fi
+  if hat_acl "$quelle"; then
+    die "$quelle trägt eine erweiterte ACL, aber getfacl/setfacl fehlen — abgebrochen, bevor irgendetwas geschrieben wird: $quelle"
+  fi
+  if [ -e "$zwischendatei" ] && hat_acl "$zwischendatei"; then
+    die "$zwischendatei hat schon jetzt eine (vermutlich vom Zielverzeichnis per Default-ACL geerbte) ACL, aber setfacl fehlt, um sie zu entfernen: $zwischendatei"
+  fi
+}
+
+# kopiere_acl <von> <nach>: überträgt eine erweiterte ACL der Quelle auf
+# das Ziel (chmod --reference kopiert nur die klassischen rwx-Bits, keine
+# ACL-Einträge) — oder entfernt am Ziel eine ACL, die es nicht von der
+# Quelle hat, sondern nur per Default-ACL vom Zielverzeichnis geerbt haben
+# kann (mktemp legt die Zwischendatei dort an; ohne dieses "setfacl -b"
+# würde eine Datei, deren Quelle keine ACL trägt, nach dem Anwenden
+# trotzdem eine tragen, Befund 4, Runde 10). Fehlen getfacl/setfacl in
+# einem Fall, den pruefe_acl_werkzeuge (vor der ersten Änderung) nicht
+# schon abgefangen hat, bricht die Funktion ebenfalls ab (Befund 3, Runde
+# 9).
+kopiere_acl() {
   local von="$1" nach="$2"
-  chmod --reference="$von" "$nach" || die "chmod fehlgeschlagen: $nach"
   if hat_acl "$von"; then
     if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
       getfacl -c "$von" 2>/dev/null | setfacl --set-file=- "$nach" \
@@ -472,7 +501,24 @@ kopiere_rechte() {
     else
       die "$von trägt eine erweiterte ACL, aber getfacl/setfacl fehlen — abgebrochen, um sie nicht stillschweigend zu verlieren: $nach"
     fi
+  elif hat_acl "$nach"; then
+    if command -v setfacl >/dev/null 2>&1; then
+      setfacl -b "$nach" || die "vom Zielverzeichnis geerbte ACL auf $nach konnte nicht entfernt werden"
+    else
+      die "$nach hat eine vermutlich vom Zielverzeichnis geerbte ACL, aber setfacl fehlt, um sie zu entfernen (Quelle $von hat keine ACL): $nach"
+    fi
   fi
+}
+
+# kopiere_rechte <von> <nach>: chmod --reference plus kopiere_acl (siehe
+# dort) — für Ziele, deren Rechte (nicht nur die ACL) von der Quelle
+# übernommen werden (settings.json bei claude/agy/rueckbau). statusline.py
+# bekommt ihre Rechte stattdessen fest über "install -m 0755" (siehe
+# statusline_schreiben) und ruft nur kopiere_acl auf.
+kopiere_rechte() {
+  local von="$1" nach="$2"
+  chmod --reference="$von" "$nach" || die "chmod fehlgeschlagen: $nach"
+  kopiere_acl "$von" "$nach"
 }
 
 bestaetigen_oder_abbrechen() {
@@ -588,10 +634,20 @@ statusline_schreiben() {
   local ts="$1"
   if [ "$STATUSLINE_EXISTIERTE" -eq 1 ]; then
     local sbak
+    # mktemp (und damit die ACL-Werkzeug-Prüfung) VOR sichern: sonst bräche
+    # ein fehlendes setfacl erst NACH einer schon angelegten Sicherung ab,
+    # mit einer überzähligen .bak-Datei als Rest (Befund 3, Runde 10).
+    statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+    pruefe_acl_werkzeuge "$STATUSLINE_QUELLE" "$statusline_tmp"
     sichern "$STATUSLINE_RESOLVED" "$ts"
     sbak="$SICHERN_BAK"
-    statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
     install -m 0755 "$STATUSLINE_QUELLE" "$statusline_tmp" || die "install fehlgeschlagen: $statusline_tmp"
+    # statusline.py bekommt ihre Rechte fest über "install -m 0755", nicht
+    # von einer Quelle übernommen — nur die ACL wird abgeglichen (Befund 4,
+    # Runde 10: die Quelle im Repository trägt normalerweise keine ACL, ein
+    # vom Zielverzeichnis per Default-ACL geerbtes ACL auf der Zwischen-
+    # datei darf trotzdem nicht überleben).
+    kopiere_acl "$STATUSLINE_QUELLE" "$statusline_tmp"
     mv "$statusline_tmp" "$STATUSLINE_RESOLVED" || die "mv fehlgeschlagen: $STATUSLINE_RESOLVED"
     statusline_tmp=""
     echo "Angewendet. Sicherung: $sbak"
@@ -600,7 +656,9 @@ statusline_schreiben() {
       die "Marker existiert schon: ${STATUSLINE_RESOLVED}.installed-${ts}"
     fi
     statusline_tmp=$(mktemp "${STATUSLINE_RESOLVED%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+    pruefe_acl_werkzeuge "$STATUSLINE_QUELLE" "$statusline_tmp"
     install -m 0755 "$STATUSLINE_QUELLE" "$statusline_tmp" || die "install fehlgeschlagen: $statusline_tmp"
+    kopiere_acl "$STATUSLINE_QUELLE" "$statusline_tmp"
     mv "$statusline_tmp" "$STATUSLINE_RESOLVED" || die "mv fehlgeschlagen: $STATUSLINE_RESOLVED"
     statusline_tmp=""
     : > "${STATUSLINE_RESOLVED}.installed-${ts}" || die "Marker fehlgeschlagen: ${STATUSLINE_RESOLVED}.installed-${ts}"
@@ -654,6 +712,7 @@ cmd_claude() {
   pruefe_vorlage_schluessel "$vorlage" '["permissions"]' '["allow","deny"]'
 
   tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+  pruefe_acl_werkzeuge "$resolved" "$tmp"
 
   # sha256sum direkt beim Merge (vor jeder Rückfrage) festgehalten, damit
   # eine Änderung an $ziel während der Rückfrage — auch eine, die genau
@@ -663,13 +722,17 @@ cmd_claude() {
 
   # permissions.allow/permissions.deny werden als VEREINIGUNG aus Bestand
   # und Vorlage gebildet (Bestand zuerst, dann neue Einträge aus der
-  # Vorlage, doppelte entfernt, Reihenfolge stabil) — "jq -s '.[0] * .[1]'"
-  # allein würde beide Listen vollständig durch die Vorlage ERSETZEN, weil
-  # der "*"-Operator Arrays nie zusammenführt, nur Objekte rekursiv merged
-  # (Befund 1, Runde 7; Leitungsentscheid CL-131). Alles andere — auch
-  # permissions.defaultMode und alle anderen Top-Level-Schlüssel — bleibt
-  # über denselben "*"-Merge wie bisher unverändert. JQ_MERGE_UNION (oben,
-  # gemeinsam mit agy) schützt mit "(.permissions // {})" überall gegen eine
+  # Vorlage, doppelte entfernt, Reihenfolge stabil) — ein einfacher
+  # "jq -s '.[0] * .[1]'" würde beide Listen vollständig durch die Vorlage
+  # ERSETZEN, weil der "*"-Operator Arrays nie zusammenführt, nur Objekte
+  # rekursiv merged (Befund 1, Runde 7; Leitungsentscheid CL-131).
+  # JQ_MERGE_UNION (oben, gemeinsam mit agy) baut das Ergebnis seit Runde 9
+  # per "reduce" über die Vorlagen-Schlüssel, nicht mehr über "*": jeder
+  # Schlüssel außer permissions wird GANZ aus der Vorlage gesetzt (bei
+  # claude ist das nur permissions selbst, dessen allow/deny hier gezielt
+  # durch die Vereinigung ersetzt werden — permissions.defaultMode und alle
+  # anderen Top-Level-Schlüssel bleiben unverändert, weil sie nicht in der
+  # Vorlage stehen). "(.permissions // {})" schützt überall gegen eine
   # Zieldatei ohne permissions-Block (Befund 2, Runde 8).
   jq -s "$JQ_MERGE_UNION" "$resolved" "$vorlage" > "$tmp" || die "jq-Merge fehlgeschlagen"
 
@@ -738,11 +801,22 @@ cmd_agy() {
   : "${PROJEKTE:?PROJEKTE muss gesetzt sein}"
   : "${TRUSTED_WORKSPACE:?TRUSTED_WORKSPACE muss gesetzt sein}"
 
+  # $HOME kanonisch aufgelöst — ein Vergleich gegen das rohe $HOME würde auf
+  # einem symlinked Home-Verzeichnis danebengehen (Befund 1, Runde 10, siehe
+  # pruefe_agy_pfad). Der kanonische Wert wird auch in die Vorlage
+  # eingesetzt (nicht das rohe $HOME), damit die entstehenden write_file(...)/
+  # read_file(...)-Muster den tatsächlichen, kanonischen Pfad tragen, und
+  # selbst gegen die Positivliste geprüft (Befund 2, Runde 10) — er landet
+  # genau wie PROJEKTE/TRUSTED_WORKSPACE in diesen Mustern.
+  local home_kanon
+  home_kanon=$(realpath -e "$HOME" 2>/dev/null) || die "\$HOME ist kein vorhandener Pfad (realpath -e): $HOME"
+  pruefe_pfad_zeichensatz '$HOME' "$home_kanon"
+
   # Validiert und löst PROJEKTE/TRUSTED_WORKSPACE auf, BEVOR sie in die
   # Vorlage eingesetzt werden (Befund 1, Runde 9) — siehe pruefe_agy_pfad.
   local projekte_aufgeloest tw_aufgeloest
-  projekte_aufgeloest=$(pruefe_agy_pfad PROJEKTE "$PROJEKTE")
-  tw_aufgeloest=$(pruefe_agy_pfad TRUSTED_WORKSPACE "$TRUSTED_WORKSPACE")
+  projekte_aufgeloest=$(pruefe_agy_pfad PROJEKTE "$PROJEKTE" "$home_kanon")
+  tw_aufgeloest=$(pruefe_agy_pfad TRUSTED_WORKSPACE "$TRUSTED_WORKSPACE" "$home_kanon")
 
   local resolved
   resolved=$(resolve_ziel "$ziel")
@@ -768,7 +842,7 @@ cmd_agy() {
   # löschte alle 28 deny-Einträge der Vorlage). render_agy_vorlage schließt
   # das strukturell aus (Befund 1, Runde 9).
   agy_rendered_tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
-  render_agy_vorlage "$vorlage" "$HOME" "$projekte_aufgeloest" "$tw_aufgeloest" > "$agy_rendered_tmp"
+  render_agy_vorlage "$vorlage" "$home_kanon" "$projekte_aufgeloest" "$tw_aufgeloest" > "$agy_rendered_tmp"
 
   if ! jq -e -s 'length==1' "$agy_rendered_tmp" >/dev/null 2>&1; then
     die "gerenderte Vorlage ist kein gültiges JSON mit genau einem Dokument — PROJEKTE/TRUSTED_WORKSPACE prüfen"
@@ -786,10 +860,15 @@ cmd_agy() {
   # manipulierte Vorlage könnte hier beliebigen Code unterbringen
   # (z. B. statusLine.command = "/bin/sh -c …"). Trägt die Vorlage
   # statusLine, muss es exakt der erwartete, fest einprogrammierte Wert
-  # sein (Befund 2, Runde 9); "set -s" hier: nur der Bestand.
+  # sein (Befund 2, Runde 9); fehlt der Schlüssel ganz, wird nur der
+  # Bestand übernommen (siehe JQ_MERGE_UNION), hier also nichts geprüft.
+  # type:"" (nicht "command") entspricht der real angewendeten, getesteten
+  # ~/.gemini/antigravity-cli/settings.json (gemessen 2026-09-30, siehe
+  # PR-Text „Runde 10") — nicht auf "command" geändert, weil das gegen die
+  # echte, funktionierende Konfiguration nicht verifiziert ist.
   local statusline_erwartet
-  statusline_erwartet=$(jq -nc --arg cmd "${HOME}/.gemini/antigravity-cli/statusline.py" \
-    '{"type":"command","command":$cmd}')
+  statusline_erwartet=$(jq -nc --arg cmd "${home_kanon}/.gemini/antigravity-cli/statusline.py" \
+    '{"type":"","command":$cmd}')
   if ! jq -e --argjson erw "$statusline_erwartet" \
         'if has("statusLine") then (.statusLine == $erw) else true end' "$agy_rendered_tmp" >/dev/null 2>&1; then
     die "statusLine der Vorlage weicht vom erwarteten, fest einprogrammierten Wert ab (Manipulation?): $vorlage"
@@ -812,6 +891,7 @@ cmd_agy() {
   # Rechte für agy, nicht weniger). Top-Level-Schlüssel, die nur im Bestand
   # stehen (z. B. ein von Hand ergänztes "model"), bleiben unverändert.
   tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+  pruefe_acl_werkzeuge "$resolved" "$tmp"
   jq -s "$JQ_MERGE_UNION" "$resolved" "$agy_rendered_tmp" > "$tmp" || die "jq-Merge fehlgeschlagen"
   rm -f "$agy_rendered_tmp"
   agy_rendered_tmp=""
@@ -974,6 +1054,16 @@ cmd_rueckbau() {
   [ "$restore_agy" -eq 1 ] && pruefe_ziel_ok "$agy_resolved"
   { [ "$restore_statusline" -eq 1 ] || [ "$remove_statusline" -eq 1 ]; } && pruefe_ziel_ok "$statusline_resolved"
 
+  # Dieselbe ACL-Werkzeug-Prüfung wie bei claude/agy, hier schon vor der
+  # Diff-Anzeige und der Rückfrage — nicht erst nach einer schon angelegten
+  # Sicherung (Befund 3, Runde 10). Die genauere Prüfung (inkl. einer vom
+  # Zielverzeichnis per Default-ACL geerbten ACL auf der jeweiligen
+  # Zwischendatei) folgt unten noch einmal, sobald diese Zwischendatei
+  # existiert.
+  [ "$restore_claude" -eq 1 ] && pruefe_acl_werkzeuge "$claude_resolved" "$claude_resolved"
+  [ "$restore_agy" -eq 1 ] && pruefe_acl_werkzeuge "$agy_resolved" "$agy_resolved"
+  [ "$restore_statusline" -eq 1 ] && [ -e "$statusline_resolved" ] && pruefe_acl_werkzeuge "$statusline_resolved" "$statusline_resolved"
+
   echo "Rückbau zu Zeitstempel $ts:"
   local claude_vor_sha="" agy_vor_sha="" statusline_vor_sha=""
   if [ "$restore_claude" -eq 1 ]; then
@@ -1051,8 +1141,12 @@ cmd_rueckbau() {
   done
 
   if [ "$restore_claude" -eq 1 ]; then
-    sichern "$claude_resolved" "$rueck_ts"
+    # mktemp (und damit die ACL-Werkzeug-Prüfung) VOR sichern — sonst
+    # bräche ein fehlendes setfacl erst NACH der Sicherung ab, mit einer
+    # überzähligen .bak-Datei als Rest (Befund 3, Runde 10).
     rueckbau_tmp=$(mktemp "${claude_resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+    pruefe_acl_werkzeuge "$claude_resolved" "$rueckbau_tmp"
+    sichern "$claude_resolved" "$rueck_ts"
     cp -p "$claude_bak" "$rueckbau_tmp" || die "cp fehlgeschlagen: $claude_bak"
     kopiere_rechte "$claude_resolved" "$rueckbau_tmp"
     mv "$rueckbau_tmp" "$claude_resolved" || die "mv fehlgeschlagen: $claude_resolved"
@@ -1061,8 +1155,9 @@ cmd_rueckbau() {
   fi
 
   if [ "$restore_agy" -eq 1 ]; then
-    sichern "$agy_resolved" "$rueck_ts"
     rueckbau_tmp=$(mktemp "${agy_resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+    pruefe_acl_werkzeuge "$agy_resolved" "$rueckbau_tmp"
+    sichern "$agy_resolved" "$rueck_ts"
     cp -p "$agy_bak" "$rueckbau_tmp" || die "cp fehlgeschlagen: $agy_bak"
     kopiere_rechte "$agy_resolved" "$rueckbau_tmp"
     mv "$rueckbau_tmp" "$agy_resolved" || die "mv fehlgeschlagen: $agy_resolved"
@@ -1072,6 +1167,9 @@ cmd_rueckbau() {
 
   if [ "$restore_statusline" -eq 1 ]; then
     rueckbau_tmp=$(mktemp "${statusline_resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+    if [ -e "$statusline_resolved" ]; then
+      pruefe_acl_werkzeuge "$statusline_resolved" "$rueckbau_tmp"
+    fi
     cp -p "$statusline_bak" "$rueckbau_tmp" || die "cp fehlgeschlagen: $statusline_bak"
     if [ -e "$statusline_resolved" ]; then
       sichern "$statusline_resolved" "$rueck_ts"
