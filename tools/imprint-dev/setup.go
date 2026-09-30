@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,9 +14,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"text/tabwriter"
+	"time"
+	"unicode"
 )
 
 // Security boundary (imprint-core-CL-011): what setup may read, show and write is
@@ -22,10 +28,19 @@ import (
 //
 //   - id must match setupIDPattern; quelle and ziel must use a small, shell-inert
 //     character set, so no id or path can traverse or inject.
+//   - --apply needs an explicit --root that carries .claude-plugin/plugin.json
+//     with name "imprint" and is not the --repo directory (checkPluginRoot).
 //   - --apply writes only the plugin's own inventory (--root), only to the
-//     per-typ allowlist in zielAllowed, never to a path on the denylist in
+//     per-typ allowlist in zielAllowed (shim imprint-*, systemd
+//     imprint-<id>.service|.timer), never to a path on the denylist in
 //     zielDenied, and never through a symlink (target, target directory, .bak
-//     or quelle; checked after filepath.EvalSymlinks and again at open time).
+//     or quelle; checked after filepath.EvalSymlinks and again at open time
+//     through directory file descriptors, see setup_fs_linux.go).
+//   - a target or .bak with more than one hard link is never read, shown or
+//     replaced; files are replaced through a temp file and renameat.
+//   - a shim never replaces a file without the shim marker line, nor a name
+//     that is another command in PATH; a systemd unit whose name exists in
+//     another unit directory is only printed, like rechte=true.
 //   - entries from --repo are never written and never diffed; they get a status
 //     only, and a target outside the allowlist is not even read for it.
 //   - --plan shows a diff only for allowlisted, rechte=false plugin entries.
@@ -36,8 +51,19 @@ type setupEntry struct {
 	Quelle       string `json:"quelle"`
 	Ziel         string `json:"ziel"`
 	Rechte       *bool  `json:"rechte"`
+	Anwenden     string `json:"anwenden"`
 	Beschreibung string `json:"beschreibung"`
 }
+
+// Values of the optional "anwenden" field. ersetzen (the default) replaces the
+// whole target; fragment-merge (rechte=true JSON targets only) deep-merges the
+// template into the target (jq's "*") and keeps every other key. For a
+// rechte=true entry with either value --apply prints only the call of
+// rechteAnwendenSkript; --plan/--check show the status only.
+const (
+	anwendenErsetzen      = "ersetzen"
+	anwendenFragmentMerge = "fragment-merge"
+)
 
 var validTyps = map[string]bool{
 	"shim":           true,
@@ -64,9 +90,11 @@ var (
 	safeArgPattern = regexp.MustCompile(`^[A-Za-z0-9._/:@+=-]+$`)
 	// safeShellWord is what shellQuote leaves unquoted.
 	safeShellWord = regexp.MustCompile(`^[A-Za-z0-9._/:@%+=,-]+$`)
-	// systemdUnitPattern is the file name a systemd entry may write.
-	systemdUnitPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*\.(service|timer)$`)
 )
+
+// setupNamePrefix is the prefix every shim and systemd unit setup writes must
+// carry, so no entry can take the name of an existing command or unit.
+const setupNamePrefix = "imprint-"
 
 // zielPlaceholders are the only variables a ziel may use, longest first so
 // "$XDG_..." is never mistaken for "$HOME" plus a suffix.
@@ -112,6 +140,15 @@ func parseInventory(data []byte) ([]setupEntry, error) {
 		if e.Typ == "rechte-vorlage" && !*e.Rechte {
 			return nil, fmt.Errorf("entry %d (%s): typ rechte-vorlage requires rechte=true", i+1, e.ID)
 		}
+		switch e.Anwenden {
+		case "", anwendenErsetzen:
+		case anwendenFragmentMerge:
+			if !*e.Rechte || !hasFileTarget(e.Typ) || e.Typ == "shim" || e.Typ == "systemd" || !strings.HasSuffix(e.Ziel, ".json") {
+				return nil, fmt.Errorf("entry %d (%s): anwenden=fragment-merge requires rechte=true and a .json ziel of typ rechte-vorlage or copy", i+1, e.ID)
+			}
+		default:
+			return nil, fmt.Errorf("entry %d (%s): invalid 'anwenden' %q (allowed: ersetzen, fragment-merge)", i+1, e.ID, e.Anwenden)
+		}
 		if e.Typ == "marketplace" || e.Typ == "mcp" {
 			if !safeArgPattern.MatchString(e.Quelle) {
 				return nil, fmt.Errorf("entry %d (%s): 'quelle' contains characters outside %s", i+1, e.ID, safeArgPattern.String())
@@ -152,19 +189,22 @@ func quelleEscapesRoot(quelle string) bool {
 }
 
 // setupEnv holds the base directories setup works with. A value that is empty
-// or not absolute counts as unset (XDG base directory spec); without an
-// absolute HOME nothing is allowed at all.
+// or not absolute counts as unset (XDG base directory spec), and so does an
+// XDG value above $HOME or a HOME of "/"; without a usable HOME nothing is
+// allowed at all.
 type setupEnv struct {
 	home, config, cache, data string
 }
 
 func currentSetupEnv() setupEnv {
 	var env setupEnv
-	if h := os.Getenv("HOME"); filepath.IsAbs(h) {
+	if h := os.Getenv("HOME"); filepath.IsAbs(h) && filepath.Clean(h) != string(filepath.Separator) {
 		env.home = filepath.Clean(h)
 	}
 	pick := func(key, fallback string) string {
-		if v := os.Getenv(key); filepath.IsAbs(v) {
+		// A value above $HOME ("/", say) would make every path below it an
+		// allowed root; it counts as unset.
+		if v := os.Getenv(key); filepath.IsAbs(v) && (env.home == "" || !isStrictlyWithin(filepath.Clean(v), env.home)) {
 			return filepath.Clean(v)
 		}
 		if env.home == "" {
@@ -382,10 +422,12 @@ func zielAllowed(e setupEntry, p string, env setupEnv, resolve bool) bool {
 	switch e.Typ {
 	case "shim":
 		bin := dir(env.home, ".local", "bin")
-		return bin != "" && filepath.Dir(p) == bin && filepath.Base(p) == e.ID
+		return bin != "" && filepath.Dir(p) == bin && filepath.Base(p) == e.ID && strings.HasPrefix(e.ID, setupNamePrefix)
 	case "systemd":
 		unitDir := dir(env.config, "systemd", "user")
-		return unitDir != "" && filepath.Dir(p) == unitDir && systemdUnitPattern.MatchString(filepath.Base(p))
+		base := filepath.Base(p)
+		return unitDir != "" && filepath.Dir(p) == unitDir &&
+			(base == setupNamePrefix+e.ID+".service" || base == setupNamePrefix+e.ID+".timer")
 	case "copy":
 		for _, d := range []string{dir(env.config, "imprint"), dir(env.data, "imprint")} {
 			if d != "" && isStrictlyWithin(d, p) {
@@ -473,54 +515,194 @@ func resolveQuelle(invRoot, quelle string) (string, error) {
 	return qRes, nil
 }
 
-// readRegularFile reads path without following a symlink at path and only
-// if it is a regular file (no directory, FIFO or device).
+// readRegularFile reads path, a file of an inventory root or of --repo, after
+// resolving its directory. The file itself must not be a symlink and must be a
+// regular file with a single link (see openRegularAt).
 func readRegularFile(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	if fi.Mode()&fs.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%s ist ein Symlink", path)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s ist keine reguläre Datei", path)
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0)
+	dir, err := filepath.EvalSymlinks(filepath.Dir(abs))
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	return io.ReadAll(f)
+	d, err := openDirBeneath(dir, dir, false, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	data, _, err := readAt(d, filepath.Base(abs))
+	return data, err
 }
 
-// writeRegularFile writes data to path with mode perm, refusing a symlink or
-// a non-regular file at path (checked with Lstat and again by O_NOFOLLOW).
-func writeRegularFile(path string, data []byte, perm fs.FileMode) error {
-	if fi, err := os.Lstat(path); err == nil {
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("%s ist ein Symlink", path)
+// openTargetDir opens the resolved target directory dir through directory file
+// descriptors, starting at the longest existing resolved allowed root that
+// contains it. A component swapped for a symlink after checkZiel is then not
+// followed (Linux; see setup_fs_linux.go).
+func openTargetDir(dir string, create bool, perm fs.FileMode) (*os.File, error) {
+	base := ""
+	for _, r := range resolveAll(currentSetupEnv().roots()) {
+		if len(r) <= len(base) || !isWithin(r, dir) {
+			continue
 		}
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("%s ist keine reguläre Datei", path)
+		if fi, err := os.Lstat(r); err == nil && fi.IsDir() {
+			base = r
 		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	}
+	if base == "" {
+		return nil, fmt.Errorf("%s liegt unter keiner vorhandenen erlaubten Wurzel", dir)
+	}
+	return openDirBeneath(base, dir, create, perm)
+}
+
+// openRegularAt opens name in d for reading, never through a symlink, and only
+// if it is a regular file with one link: a hard link planted at a target or a
+// .bak would otherwise let setup show, copy or replace another file's content
+// (a key under ~/.ssh, say).
+func openRegularAt(d *os.File, name string) (*os.File, fs.FileInfo, error) {
+	f, err := openAt(d, name, os.O_RDONLY|oNonBlock, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s ist keine reguläre Datei", f.Name())
+	}
+	if n := nlinkOf(fi); n > 1 {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s hat %d Hardlinks; setup liest und ersetzt nur Dateien mit einem Link", f.Name(), n)
+	}
+	return f, fi, nil
+}
+
+func readAt(d *os.File, name string) ([]byte, fs.FileInfo, error) {
+	f, fi, err := openRegularAt(d, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	return data, fi, err
+}
+
+// readTarget reads the checked, resolved target zr through openTargetDir.
+func readTarget(zr string) ([]byte, error) {
+	d, err := openTargetDir(filepath.Dir(zr), false, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	data, _, err := readAt(d, filepath.Base(zr))
+	return data, err
+}
+
+// checkReplaceable reports whether name in d may be replaced: absent, or a
+// regular file with one link (no symlink, directory, FIFO or hard link).
+func checkReplaceable(d *os.File, name string) error {
+	f, _, err := openRegularAt(d, name)
+	if err == nil {
+		return f.Close()
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// replaceAt writes data to name in d through a new temp file in the same
+// directory and renameat, so setup never writes into an existing file, nor
+// into whatever a link at name points to.
+func replaceAt(d *os.File, name string, data []byte, perm fs.FileMode) error {
+	if err := checkReplaceable(d, name); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, perm)
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return err
+	}
+	tmp := "." + name + ".imprint-tmp-" + hex.EncodeToString(rnd[:])
+	f, err := openAt(d, tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
+	err = f.Chmod(perm)
+	if err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = renameAt(d, tmp, name)
+	}
+	if err != nil {
+		_ = unlinkAt(d, tmp)
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return nil
 }
+
+// installFile installs data at the checked, resolved target zr: unchanged if
+// equal; otherwise, once before (if set) has accepted the old content, a .bak
+// of the old content with the old mode and then the new content. Directories
+// are created only for a target that does not exist yet, after every refusal;
+// a .bak that cannot be replaced (replaceAt) leaves the target as it was.
+func installFile(zr string, data []byte, perm, dirPerm fs.FileMode, backup bool, before func(old []byte, exists bool) error) (string, error) {
+	dir, name := filepath.Dir(zr), filepath.Base(zr)
+	d, err := openTargetDir(dir, false, 0)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	var old []byte
+	var oldFi fs.FileInfo
+	exists := false
+	if d != nil {
+		defer d.Close()
+		old, oldFi, err = readAt(d, name)
+		switch {
+		case err == nil:
+			exists = true
+		case !errors.Is(err, fs.ErrNotExist):
+			return "", err
+		}
+	}
+	if exists && bytes.Equal(old, data) {
+		return "unverändert", nil
+	}
+	if before != nil {
+		if err := before(old, exists); err != nil {
+			return "", err
+		}
+	}
+	if d == nil {
+		if d, err = openTargetDir(dir, true, dirPerm); err != nil {
+			return "", fmt.Errorf("Ordner konnte nicht erstellt werden: %v", err)
+		}
+		defer d.Close()
+	}
+	if exists && backup {
+		if err := replaceAt(d, name+".bak", old, oldFi.Mode().Perm()); err != nil {
+			return "", fmt.Errorf(".bak konnte nicht geschrieben werden, ziel bleibt unverändert: %v", err)
+		}
+	}
+	if err := replaceAt(d, name, data, perm); err != nil {
+		return "", err
+	}
+	return "geschrieben", nil
+}
+
+// shimMarker is the second line of every shim setup writes. --apply replaces
+// only a file that starts with it; anything else in ~/.local/bin is foreign.
+const shimMarker = "# imprint-shim: erzeugt von imprint-dev setup --apply; setup ersetzt nur Dateien mit dieser Zeile"
 
 // shimContent is the shim a shim entry installs. quelle is placed in single
 // quotes, so nothing in it is expanded; parseInventory already limits it to
@@ -529,7 +711,155 @@ func shimContent(quelle string) (string, error) {
 	if !safePathPattern.MatchString(quelle) || quelleEscapesRoot(quelle) {
 		return "", fmt.Errorf("quelle %q ist für einen Shim nicht erlaubt", quelle)
 	}
-	return fmt.Sprintf("#!/bin/sh\nexec \"$IMPRINT_CORE_ROOT\"/'%s' \"$@\"\n", filepath.ToSlash(filepath.Clean(quelle))), nil
+	return fmt.Sprintf("#!/bin/sh\n%s\nexec \"$IMPRINT_CORE_ROOT\"/'%s' \"$@\"\n", shimMarker, filepath.ToSlash(filepath.Clean(quelle))), nil
+}
+
+// isSetupShim reports whether content is a shim setup wrote (marker line).
+func isSetupShim(content []byte) bool {
+	return bytes.HasPrefix(content, []byte("#!/bin/sh\n"+shimMarker+"\n"))
+}
+
+// shimPathConflict returns another executable of the given name in an
+// absolute PATH directory other than the shim directory, or "". A shim of
+// that name would shadow it or be shadowed by it.
+func shimPathConflict(name string) string {
+	env := currentSetupEnv()
+	own := map[string]bool{}
+	if env.home != "" {
+		shimDir := filepath.Join(env.home, ".local", "bin")
+		own[shimDir] = true
+		if r, err := resolvePath(shimDir); err == nil {
+			own[r] = true
+		}
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		dir = filepath.Clean(dir)
+		if own[dir] {
+			continue
+		}
+		if r, err := filepath.EvalSymlinks(dir); err == nil && own[r] {
+			continue
+		}
+		cand := filepath.Join(dir, name)
+		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && fi.Mode().Perm()&0o111 != 0 {
+			return cand
+		}
+	}
+	return ""
+}
+
+// systemdUnitPathsFromTool lists the user unit directories systemd itself
+// reports; nil when systemd-analyze is missing, slow or fails.
+var systemdUnitPathsFromTool = func() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemd-analyze", "--user", "unit-paths").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Split(strings.TrimSpace(string(out)), "\n")
+}
+
+// systemdUserUnitDirs is the user unit search path: what systemd-analyze
+// reports plus the documented defaults (systemd.unit(5)), so a missing tool
+// never narrows the check.
+func systemdUserUnitDirs() []string {
+	env := currentSetupEnv()
+	var out []string
+	add := func(p string) {
+		if filepath.IsAbs(p) {
+			out = append(out, filepath.Clean(p))
+		}
+	}
+	for _, p := range systemdUnitPathsFromTool() {
+		add(strings.TrimSpace(p))
+	}
+	if env.config != "" {
+		add(filepath.Join(env.config, "systemd", "user.control"))
+	}
+	if env.data != "" {
+		add(filepath.Join(env.data, "systemd", "user"))
+	}
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(rt) {
+		for _, s := range []string{"user.control", "transient", "generator.early", "user", "generator", "generator.late"} {
+			add(filepath.Join(rt, "systemd", s))
+		}
+	}
+	list := func(key, fallback string) []string {
+		if v := os.Getenv(key); v != "" {
+			return filepath.SplitList(v)
+		}
+		return filepath.SplitList(fallback)
+	}
+	for _, d := range list("XDG_CONFIG_DIRS", "/etc/xdg") {
+		add(filepath.Join(d, "systemd", "user"))
+	}
+	for _, d := range list("XDG_DATA_DIRS", "/usr/local/share:/usr/share") {
+		add(filepath.Join(d, "systemd", "user"))
+	}
+	for _, p := range []string{"/etc/systemd/user", "/run/systemd/user", "/usr/local/lib/systemd/user", "/usr/lib/systemd/user", "/lib/systemd/user"} {
+		add(p)
+	}
+	return out
+}
+
+// systemdUnitElsewhere returns a unit of the given name in another systemd
+// user unit directory, or "". A unit of the same name there is overridden by
+// (or overrides) the one setup would write, and may already be enabled; such
+// an entry is only printed, like rechte=true.
+func systemdUnitElsewhere(name string) string {
+	env := currentSetupEnv()
+	own := map[string]bool{}
+	if env.config != "" {
+		ownDir := filepath.Join(env.config, "systemd", "user")
+		own[ownDir] = true
+		if r, err := resolvePath(ownDir); err == nil {
+			own[r] = true
+		}
+	}
+	for _, dir := range systemdUserUnitDirs() {
+		if own[dir] {
+			continue
+		}
+		if r, err := resolvePath(dir); err == nil && own[r] {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		if _, err := os.Lstat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// displaySafe escapes control and bidi characters (except newline and tab),
+// so a unit shown before it is written cannot hide lines from the reader.
+func displaySafe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r):
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// systemdDisplay is what --apply prints before it writes a unit: units run
+// code once enabled, so the human sees every unit setup copies.
+func systemdDisplay(zr string, data []byte) string {
+	text := displaySafe(string(data))
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return fmt.Sprintf("--- systemd-Unit %s (setup führt kein systemctl aus) ---\n%s--- Ende %s ---\n", zr, text, filepath.Base(zr))
 }
 
 // shellQuote quotes s for a POSIX shell, so a printed command is safe to paste.
@@ -556,6 +886,34 @@ func checkEnvGuard() bool {
 	return false
 }
 
+// pluginName is the name .claude-plugin/plugin.json must carry for --apply.
+const pluginName = "imprint"
+
+// checkPluginRoot is the identity check --apply runs on --root: the plugin
+// manifest must be a regular file (no symlink) naming this plugin, and --root
+// must not be the --repo directory, so a foreign checkout is never applied.
+func checkPluginRoot(root, repo string) error {
+	manifest := filepath.Join(root, ".claude-plugin", "plugin.json")
+	data, err := readRegularFile(manifest)
+	if err != nil {
+		return fmt.Errorf("--root %s ist kein imprint-Plugin: %s nicht lesbar (%v)", root, manifest, err)
+	}
+	var m struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil || m.Name != pluginName {
+		return fmt.Errorf("--root %s ist kein imprint-Plugin: %s trägt nicht name %q", root, manifest, pluginName)
+	}
+	if repo != "" {
+		rootFi, err1 := os.Stat(root)
+		repoFi, err2 := os.Stat(repo)
+		if err1 == nil && err2 == nil && os.SameFile(rootFi, repoFi) {
+			return fmt.Errorf("--root und --repo sind dasselbe Verzeichnis; --apply verweigert")
+		}
+	}
+	return nil
+}
+
 type processedItem struct {
 	invRoot  string
 	repo     string
@@ -563,33 +921,35 @@ type processedItem struct {
 	fromRepo bool
 }
 
-func loadSetupInventory(root, repo string) ([]processedItem, string, error) {
+// loadSetupInventory reads the plugin inventory and, with repo set, the repo
+// inventory. repoUnchecked reports a repo inventory that could not be read
+// (missing, symlink, unreadable); an invalid one is an error.
+func loadSetupInventory(root, repo string) (items []processedItem, repoNote string, repoUnchecked bool, err error) {
 	rootInvPath := filepath.Join(root, "setup", "inventar.json")
 	rootData, err := os.ReadFile(rootInvPath)
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot read %s: %w", rootInvPath, err)
+		return nil, "", false, fmt.Errorf("cannot read %s: %w", rootInvPath, err)
 	}
 
 	rootEntries, err := parseInventory(rootData)
 	if err != nil {
-		return nil, "", fmt.Errorf("invalid inventory %s: %w", rootInvPath, err)
+		return nil, "", false, fmt.Errorf("invalid inventory %s: %w", rootInvPath, err)
 	}
 
-	var items []processedItem
 	for _, e := range rootEntries {
 		items = append(items, processedItem{invRoot: root, repo: root, entry: e})
 	}
 
-	var repoNote string
 	if repo != "" {
 		repoInvPath := filepath.Join(repo, ".imprint", "setup.json")
 		repoData, rErr := readRegularFile(repoInvPath)
 		if rErr != nil {
 			repoNote = fmt.Sprintf("note: repo setup inventory at %s is missing or unreadable (%v)", repoInvPath, rErr)
+			repoUnchecked = true
 		} else {
 			repoEntries, pErr := parseInventory(repoData)
 			if pErr != nil {
-				return nil, "", fmt.Errorf("invalid repo inventory %s: %w", repoInvPath, pErr)
+				return nil, "", false, fmt.Errorf("invalid repo inventory %s: %w", repoInvPath, pErr)
 			}
 			for _, e := range repoEntries {
 				items = append(items, processedItem{invRoot: repo, repo: repo, entry: e, fromRepo: true})
@@ -597,7 +957,7 @@ func loadSetupInventory(root, repo string) ([]processedItem, string, error) {
 		}
 	}
 
-	return items, repoNote, nil
+	return items, repoNote, repoUnchecked, nil
 }
 
 func generateDiff(qContent, zContent string) string {
@@ -661,7 +1021,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	plan := fs.Bool("plan", false, "compare setup inventory entries against target files without writing")
 	apply := fs.Bool("apply", false, "apply setup inventory entries to target files")
 	check := fs.Bool("check", false, "check setup inventory entries for drift without writing")
-	root := fs.String("root", ".", "plugin root directory")
+	root := fs.String("root", ".", "plugin root directory (required with --apply)")
 	repo := fs.String("repo", "", "optional repository path (status only, never applied)")
 
 	if done, code := parseFlags(fs, args, stderr); done {
@@ -693,7 +1053,24 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
-	items, repoNote, err := loadSetupInventory(*root, *repo)
+	if *apply {
+		rootSet := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "root" {
+				rootSet = true
+			}
+		})
+		if !rootSet {
+			fmt.Fprintln(stderr, "imprint-dev setup: --apply verlangt --root <Plugin-Root>; ohne --root wird nichts angewendet")
+			return exitError
+		}
+		if err := checkPluginRoot(*root, *repo); err != nil {
+			fmt.Fprintf(stderr, "imprint-dev setup: %v\n", err)
+			return exitError
+		}
+	}
+
+	items, repoNote, repoUnchecked, err := loadSetupInventory(*root, *repo)
 	if err != nil {
 		fmt.Fprintf(stderr, "imprint-dev setup: %v\n%s", err, usageText)
 		return exitError
@@ -704,7 +1081,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	} else if *apply {
 		return runSetupApply(items, repoNote, stdout, stderr)
 	}
-	return runSetupCheck(items, repoNote, stdout)
+	return runSetupCheck(items, repoNote, repoUnchecked, stdout)
 }
 
 // entryIsRechteGated reports whether an entry's target is rights-gated
@@ -721,15 +1098,27 @@ func hasFileTarget(typ string) bool {
 }
 
 // inspectResult is the read-only status of one entry, shared by --plan,
-// --check and the status-only report of --repo entries under --apply.
+// --check and the status-only report of --repo entries under --apply. mensch
+// marks a plugin entry only a human applies (rechte=true, or a systemd unit
+// whose name exists in another unit directory) whose path checks passed: its
+// comparison is shown, but --check does not count it as drift.
 type inspectResult struct {
 	status   string
 	reason   string
 	diffText string
+	mensch   bool
 }
 
 func isDriftStatus(status string) bool {
 	return status != "gleich" && status != "hinweis"
+}
+
+// displayStatus is the status column; a mensch entry carries "(Mensch)".
+func (r inspectResult) displayStatus() string {
+	if r.mensch {
+		return r.status + " (Mensch)"
+	}
+	return r.status
 }
 
 // inspectGithook reads core.hooksPath from the repository's own config only
@@ -749,10 +1138,52 @@ func inspectGithook(repo string) inspectResult {
 	return inspectResult{status: "nicht-prüfbar", reason: fmt.Sprintf("git config core.hooksPath nicht lesbar: %v", err)}
 }
 
+// deepMerge is jq's "a * b": objects merge recursively, anything else in b
+// replaces a.
+func deepMerge(a, b any) any {
+	am, aok := a.(map[string]any)
+	bm, bok := b.(map[string]any)
+	if !aok || !bok {
+		return b
+	}
+	out := make(map[string]any, len(am)+len(bm))
+	for k, v := range am {
+		out[k] = v
+	}
+	for k, v := range bm {
+		out[k] = deepMerge(am[k], v)
+	}
+	return out
+}
+
+// fragmentStatus compares a fragment-merge template with its target: gleich
+// when deep-merging the template into the target changes nothing. Neither
+// content is ever returned, only the status.
+func fragmentStatus(soll, ist []byte) (status, reason string) {
+	var tmpl, cur any
+	if err := json.Unmarshal(soll, &tmpl); err != nil {
+		return "nicht-prüfbar", "Vorlage ist kein gültiges JSON"
+	}
+	if _, ok := tmpl.(map[string]any); !ok {
+		return "nicht-prüfbar", "Vorlage ist kein JSON-Objekt"
+	}
+	if err := json.Unmarshal(ist, &cur); err != nil {
+		return "nicht-prüfbar", "ziel ist kein gültiges JSON"
+	}
+	if _, ok := cur.(map[string]any); !ok {
+		return "nicht-prüfbar", "ziel ist kein JSON-Objekt"
+	}
+	if reflect.DeepEqual(deepMerge(cur, tmpl), cur) {
+		return "gleich", ""
+	}
+	return "abweichend", ""
+}
+
 // inspectItem computes an entry's status without writing. A diff is produced
 // only when withDiff is set and the entry is a rechte=false entry of the
-// plugin's own inventory whose target passed the allowlist; a --repo entry
-// that is rights-gated or outside the allowlist is not even read.
+// plugin's own inventory whose target passed the allowlist and is not only
+// printed; a --repo entry that is rights-gated or outside the allowlist is
+// not even read.
 func inspectItem(item processedItem, withDiff bool) inspectResult {
 	e := item.entry
 	switch e.Typ {
@@ -771,6 +1202,19 @@ func inspectItem(item processedItem, withDiff bool) inspectResult {
 	zc := checkZiel(e)
 	if zc.status != "" {
 		return inspectResult{status: zc.status, reason: zc.reason}
+	}
+
+	res := inspectResult{mensch: gated && !item.fromRepo}
+	if e.Typ == "shim" && !gated {
+		if other := shimPathConflict(filepath.Base(zc.lexical)); other != "" {
+			return inspectResult{status: "verweigert", reason: fmt.Sprintf("Shim-Name ist schon ein anderes Kommando in PATH (%s)", other)}
+		}
+	}
+	if e.Typ == "systemd" && !gated && !item.fromRepo {
+		if other := systemdUnitElsewhere(filepath.Base(zc.lexical)); other != "" {
+			res.mensch = true
+			res.reason = fmt.Sprintf("Unit-Name existiert auch in %s; --apply druckt nur, wie bei rechte=true", other)
+		}
 	}
 
 	var soll []byte
@@ -795,18 +1239,31 @@ func inspectItem(item processedItem, withDiff bool) inspectResult {
 		}
 	}
 
-	ist, err := readRegularFile(zc.resolved)
+	ist, err := readTarget(zc.resolved)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return inspectResult{status: "fehlt"}
+			res.status = "fehlt"
+			return res
 		}
 		return inspectResult{status: "nicht-prüfbar", reason: fmt.Sprintf("ziel nicht lesbar: %v", err)}
 	}
-	if bytes.Equal(soll, ist) {
-		return inspectResult{status: "gleich"}
+	if e.Typ == "shim" && !gated && !isSetupShim(ist) {
+		return inspectResult{status: "verweigert", reason: "ziel ist eine fremde Datei (keine imprint-Shim-Zeile); setup ersetzt sie nie"}
 	}
-	res := inspectResult{status: "abweichend"}
-	if withDiff && !gated && !item.fromRepo {
+	if gated && e.Anwenden == anwendenFragmentMerge {
+		status, reason := fragmentStatus(soll, ist)
+		if status == "nicht-prüfbar" {
+			return inspectResult{status: status, reason: reason}
+		}
+		res.status = status
+		return res
+	}
+	if bytes.Equal(soll, ist) {
+		res.status = "gleich"
+		return res
+	}
+	res.status = "abweichend"
+	if withDiff && !gated && !res.mensch && !item.fromRepo {
 		res.diffText = generateDiff(string(soll), string(ist))
 	}
 	return res
@@ -823,16 +1280,19 @@ func printStatusTable(stdout io.Writer, ids []setupEntry, statuses []string) {
 
 const repoStatusOnlyNote = "note: entries from --repo are never applied and never diffed; only their status is shown"
 
+const menschNote = "note: (Mensch) = only a human applies this target (rechte=true, or a systemd unit whose name exists elsewhere); setup shows the status only and --check does not count it as drift"
+
 func runSetupPlan(items []processedItem, repoNote string, stdout io.Writer) int {
 	var entries []setupEntry
 	var statuses []string
 	var results []inspectResult
-	hasRepo := false
+	hasRepo, hasMensch := false, false
 	for _, item := range items {
 		r := inspectItem(item, true)
 		hasRepo = hasRepo || item.fromRepo
+		hasMensch = hasMensch || r.mensch
 		entries = append(entries, item.entry)
-		statuses = append(statuses, r.status)
+		statuses = append(statuses, r.displayStatus())
 		results = append(results, r)
 	}
 
@@ -841,6 +1301,9 @@ func runSetupPlan(items []processedItem, repoNote string, stdout io.Writer) int 
 	}
 	if hasRepo {
 		fmt.Fprintln(stdout, repoStatusOnlyNote)
+	}
+	if hasMensch {
+		fmt.Fprintln(stdout, menschNote)
 	}
 	printStatusTable(stdout, entries, statuses)
 
@@ -854,19 +1317,25 @@ func runSetupPlan(items []processedItem, repoNote string, stdout io.Writer) int 
 	return exitOK
 }
 
-func runSetupCheck(items []processedItem, repoNote string, stdout io.Writer) int {
+// runSetupCheck exits 1 on drift of an entry setup applies itself, and when a
+// given --repo inventory cannot be checked at all. A mensch entry shows its
+// status but is no drift: only the human applies it, may fill placeholders
+// such as ${PROJEKTE} by hand and merges fragments, so a difference is not a
+// fault setup can judge.
+func runSetupCheck(items []processedItem, repoNote string, repoUnchecked bool, stdout io.Writer) int {
 	var entries []setupEntry
 	var statuses []string
 	var results []inspectResult
 	hasDrift := false
-	hasRepo := false
+	hasRepo, hasMensch := false, false
 	for _, item := range items {
 		r := inspectItem(item, false)
 		hasRepo = hasRepo || item.fromRepo
+		hasMensch = hasMensch || r.mensch
 		entries = append(entries, item.entry)
-		statuses = append(statuses, r.status)
+		statuses = append(statuses, r.displayStatus())
 		results = append(results, r)
-		if isDriftStatus(r.status) {
+		if isDriftStatus(r.status) && !r.mensch {
 			hasDrift = true
 		}
 	}
@@ -877,11 +1346,18 @@ func runSetupCheck(items []processedItem, repoNote string, stdout io.Writer) int
 	if hasRepo {
 		fmt.Fprintln(stdout, repoStatusOnlyNote)
 	}
+	if hasMensch {
+		fmt.Fprintln(stdout, menschNote)
+	}
 	printStatusTable(stdout, entries, statuses)
 	for i, r := range results {
 		if r.reason != "" {
 			fmt.Fprintf(stdout, "\n[%s] %s: %s\n", entries[i].ID, r.status, r.reason)
 		}
+	}
+	if repoUnchecked {
+		fmt.Fprintln(stdout, "\n[--repo] nicht-prüfbar: das Inventar des Repos ist nicht lesbar (fehlt, Symlink oder keine Rechte)")
+		hasDrift = true
 	}
 
 	if hasDrift {
@@ -890,72 +1366,96 @@ func runSetupCheck(items []processedItem, repoNote string, stdout io.Writer) int
 	return exitOK
 }
 
-// writeTarget installs data at the checked, resolved target zr: unchanged if
-// equal, else a .bak of the old content (with the old file's mode) and then
-// the new content. A failed backup aborts before the target is touched.
-func writeTarget(zr string, data []byte, perm fs.FileMode) (string, error) {
-	fi, lerr := os.Lstat(zr)
-	exists := lerr == nil
-	if lerr != nil && !errors.Is(lerr, fs.ErrNotExist) {
-		return "", lerr
-	}
-	var old []byte
-	if exists {
-		var err error
-		old, err = readRegularFile(zr)
-		if err != nil {
-			return "", err
-		}
-		if bytes.Equal(old, data) {
-			return "unverändert", nil
-		}
-	}
-	dir := filepath.Dir(zr)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("Ordner konnte nicht erstellt werden: %v", err)
-	}
-	if again, err := filepath.EvalSymlinks(dir); err != nil || again != dir {
-		return "", fmt.Errorf("ziel-Verzeichnis %s hat sich während der Prüfung verändert", dir)
-	}
-	if exists {
-		if err := writeRegularFile(zr+".bak", old, fi.Mode().Perm()); err != nil {
-			return "", fmt.Errorf(".bak konnte nicht geschrieben werden, ziel bleibt unverändert: %v", err)
-		}
-	}
-	if err := writeRegularFile(zr, data, perm); err != nil {
-		return "", err
-	}
-	return "geschrieben", nil
-}
-
-// writeRechteCache renders a rights template into $XDG_CACHE_HOME/imprint and
-// returns the file's path. The id-derived file name runs through the same
-// root and symlink checks as every other target.
+// writeRechteCache renders a template into $XDG_CACHE_HOME/imprint and returns
+// the file's path. The id-derived file name runs through the same root,
+// symlink and hard link checks as every other target.
 func writeRechteCache(e setupEntry, zLexical string, rendered []byte) (string, error) {
 	env := currentSetupEnv()
 	if env.cache == "" {
 		return "", errors.New("XDG_CACHE_HOME/HOME nicht gesetzt")
 	}
-	cacheDir := filepath.Join(env.cache, "imprint")
-	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-		return "", fmt.Errorf("cache dir konnte nicht erstellt werden: %v", err)
-	}
-	cacheRes, err := filepath.EvalSymlinks(cacheDir)
-	if err != nil {
-		return "", err
-	}
 	cacheRoot, err := resolvePath(env.cache)
-	if err != nil || !isStrictlyWithin(cacheRoot, cacheRes) {
-		return "", fmt.Errorf("cache dir %s verlässt $XDG_CACHE_HOME", cacheDir)
+	if err != nil {
+		return "", fmt.Errorf("$XDG_CACHE_HOME nicht auflösbar: %v", err)
 	}
-	cachePath := filepath.Join(cacheRes, e.ID+"-"+filepath.Base(zLexical))
-	if filepath.Dir(cachePath) != cacheRes {
+	cacheDir := filepath.Join(cacheRoot, "imprint")
+	cachePath := filepath.Join(cacheDir, e.ID+"-"+filepath.Base(zLexical))
+	if filepath.Dir(cachePath) != cacheDir {
 		return "", fmt.Errorf("cache-Datei für %s verlässt den cache dir", e.ID)
 	}
-	if err := writeRegularFile(cachePath, rendered, 0o600); err != nil {
+	if _, err := installFile(cachePath, rendered, 0o600, 0o700, false, nil); err != nil {
 		return "", fmt.Errorf("cache-Datei konnte nicht geschrieben werden: %v", err)
 	}
 	return cachePath, nil
+}
+
+// rechteAnwendenSkript is the human script in the plugin root that applies a
+// rights target with an "anwenden" field (checks, diff, confirmation, deep
+// merge for fragment-merge). --apply prints only its call for such an entry.
+const rechteAnwendenSkript = "setup/vorlagen/rechte-anwenden.sh"
+
+// rechteSkriptCall is the printed call of rechteAnwendenSkript for e. The
+// argument is the id without the suffix "-rechte-vorlage" (claude-rechte-vorlage
+// → claude). The script must be an executable regular file inside the root.
+func rechteSkriptCall(invRoot string, e setupEntry) (string, error) {
+	p, err := resolveQuelle(invRoot, rechteAnwendenSkript)
+	if err != nil {
+		return "", fmt.Errorf("anwenden=%s braucht %s im Plugin-Root: %v", e.Anwenden, rechteAnwendenSkript, err)
+	}
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o100 == 0 {
+		return "", fmt.Errorf("%s ist keine ausführbare reguläre Datei", rechteAnwendenSkript)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	arg := strings.TrimSuffix(e.ID, "-rechte-vorlage")
+	return shellQuote(abs) + " " + shellQuote(arg), nil
+}
+
+// printGatedCommands renders content into the cache and prints the commands a
+// human runs: a backup of an existing target, then the new content, both with
+// install and an explicit mode. install removes a destination before it
+// writes, so neither command writes through a link planted at the target or
+// its .bak; both are also checked here (no symlink, no second hard link). The
+// mode is the existing target's or 0644, plus execute bits where read bits
+// are set if the quelle is executable, so a copied script stays executable
+// and a 0600 settings file is not widened.
+func printGatedCommands(stdout io.Writer, e setupEntry, zc zielCheck, content []byte, quelleMode fs.FileMode) error {
+	mode := fs.FileMode(0o644)
+	exists := false
+	d, err := openTargetDir(filepath.Dir(zc.resolved), false, 0)
+	switch {
+	case err == nil:
+		defer d.Close()
+		name := filepath.Base(zc.resolved)
+		f, fi, err := openRegularAt(d, name)
+		switch {
+		case err == nil:
+			f.Close()
+			exists, mode = true, fi.Mode().Perm()
+			if err := checkReplaceable(d, name+".bak"); err != nil {
+				return fmt.Errorf(".bak nicht ersetzbar: %v", err)
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			return err
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+	cachePath, err := writeRechteCache(e, zc.lexical, content)
+	if err != nil {
+		return err
+	}
+	if exists {
+		fmt.Fprintf(stdout, "install -m %04o %s %s\n", mode, shellQuote(zc.resolved), shellQuote(zc.resolved+".bak"))
+	}
+	if quelleMode&0o111 != 0 {
+		mode |= (mode & 0o444) >> 2
+	}
+	fmt.Fprintf(stdout, "install -m %04o %s %s\n", mode, shellQuote(cachePath), shellQuote(zc.resolved))
+	return nil
 }
 
 func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Writer) int {
@@ -993,34 +1493,29 @@ func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Wri
 				fail(e, zc.status+": "+zc.reason)
 				continue
 			}
+			gated := entryIsRechteGated(e)
 
-			if entryIsRechteGated(e) {
-				qPath, err := resolveQuelle(item.invRoot, e.Quelle)
+			// A rights target with an "anwenden" field: only the human script
+			// applies it; no cache file, no cp, no jq pipe.
+			if gated && e.Anwenden != "" {
+				call, err := rechteSkriptCall(item.invRoot, e)
 				if err != nil {
 					fail(e, err.Error())
 					continue
 				}
-				qData, err := readRegularFile(qPath)
-				if err != nil {
-					fail(e, fmt.Sprintf("quelle unlesbar: %v", err))
-					continue
-				}
-				cachePath, err := writeRechteCache(e, zc.lexical, []byte(renderTemplate(string(qData))))
-				if err != nil {
-					fail(e, err.Error())
-					continue
-				}
-				if fi, err := os.Lstat(zc.resolved); err == nil && fi.Mode().IsRegular() {
-					fmt.Fprintf(stdout, "cp %s %s\n", shellQuote(zc.resolved), shellQuote(zc.resolved+".bak"))
-				}
-				fmt.Fprintf(stdout, "cp %s %s\n", shellQuote(cachePath), shellQuote(zc.resolved))
+				fmt.Fprintln(stdout, call)
 				add(e, "gedruckt")
 				continue
 			}
 
 			var data []byte
+			var quelleMode fs.FileMode
 			perm := fs.FileMode(0o644)
-			if e.Typ == "shim" {
+			if e.Typ == "shim" && !gated {
+				if other := shimPathConflict(filepath.Base(zc.lexical)); other != "" {
+					fail(e, fmt.Sprintf("verweigert: Shim-Name ist schon ein anderes Kommando in PATH (%s)", other))
+					continue
+				}
 				content, err := shimContent(e.Quelle)
 				if err != nil {
 					fail(e, err.Error())
@@ -1038,8 +1533,47 @@ func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Wri
 					fail(e, fmt.Sprintf("quelle unlesbar: %v", err))
 					continue
 				}
+				if fi, err := os.Stat(qPath); err == nil {
+					quelleMode = fi.Mode()
+				}
 			}
-			status, err := writeTarget(zc.resolved, data, perm)
+
+			if e.Typ == "systemd" && !gated {
+				if other := systemdUnitElsewhere(filepath.Base(zc.lexical)); other != "" {
+					fmt.Fprintf(stdout, "# %s: Unit-Name existiert auch in %s; nur gedruckt, wie bei rechte=true\n", e.ID, other)
+					gated = true
+				}
+			}
+
+			if gated {
+				content := data
+				if entryIsRechteGated(e) {
+					content = []byte(renderTemplate(string(data)))
+				}
+				if err := printGatedCommands(stdout, e, zc, content, quelleMode); err != nil {
+					fail(e, err.Error())
+					continue
+				}
+				add(e, "gedruckt")
+				continue
+			}
+
+			var before func(old []byte, exists bool) error
+			switch e.Typ {
+			case "shim":
+				before = func(old []byte, exists bool) error {
+					if exists && !isSetupShim(old) {
+						return errors.New("verweigert: ziel ist eine fremde Datei (keine imprint-Shim-Zeile); setup ersetzt sie nie")
+					}
+					return nil
+				}
+			case "systemd":
+				before = func([]byte, bool) error {
+					fmt.Fprint(stdout, systemdDisplay(zc.resolved, data))
+					return nil
+				}
+			}
+			status, err := installFile(zc.resolved, data, perm, 0o755, true, before)
 			if err != nil {
 				fail(e, err.Error())
 				continue

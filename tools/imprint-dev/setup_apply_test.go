@@ -68,6 +68,7 @@ func TestSetupApplyEnvGuard(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
 	root := t.TempDir()
+	writePluginManifest(t, root)
 	setupDir := filepath.Join(root, "setup")
 	_ = os.MkdirAll(setupDir, 0755)
 	_ = os.WriteFile(filepath.Join(root, "src.txt"), []byte("data\n"), 0644)
@@ -118,10 +119,12 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
-	// Ensure env guard is not triggered
+	// Ensure env guard is not triggered, and keep the real ~/.local/bin out of PATH
 	clearApplyGuardEnv(t)
+	setHermeticPath(t)
 
 	root := t.TempDir()
+	writePluginManifest(t, root)
 	setupDir := filepath.Join(root, "setup")
 	_ = os.MkdirAll(setupDir, 0755)
 
@@ -178,7 +181,7 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 
 	// Verify shim file
 	shimDstData, err := os.ReadFile(filepath.Join(tempHome, ".local", "bin", "imprint-dev"))
-	expectedShim := "#!/bin/sh\nexec \"$IMPRINT_CORE_ROOT\"/'bin/imprint-dev' \"$@\"\n"
+	expectedShim := "#!/bin/sh\n" + shimMarker + "\nexec \"$IMPRINT_CORE_ROOT\"/'bin/imprint-dev' \"$@\"\n"
 	if err != nil || string(shimDstData) != expectedShim {
 		t.Fatalf("shim dst file missing or incorrect: %v, content: %q", err, string(shimDstData))
 	}
@@ -218,6 +221,7 @@ func TestSetupApplyRechteTor(t *testing.T) {
 	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
+	writePluginManifest(t, root)
 	setupDir := filepath.Join(root, "setup")
 	_ = os.MkdirAll(setupDir, 0755)
 
@@ -265,9 +269,9 @@ func TestSetupApplyRechteTor(t *testing.T) {
 		t.Fatalf("rendered cache file content mismatch: got %q, want %q", string(cacheData), expectedRendered)
 	}
 
-	// 3. Stdout must contain cp command
-	if !bytes.Contains(stdout.Bytes(), []byte("cp ")) || !bytes.Contains(stdout.Bytes(), []byte(expectedCachePath)) {
-		t.Fatalf("stdout missing printed cp command with cache path, got:\n%s", stdout.String())
+	// 3. Stdout must contain the install command with an explicit mode
+	if !bytes.Contains(stdout.Bytes(), []byte("install -m 0644 "+expectedCachePath)) {
+		t.Fatalf("stdout missing printed install command with cache path, got:\n%s", stdout.String())
 	}
 }
 
@@ -285,6 +289,7 @@ func TestSetupApplySystemd(t *testing.T) {
 	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
+	writePluginManifest(t, root)
 	setupDir := filepath.Join(root, "setup")
 	_ = os.MkdirAll(setupDir, 0755)
 
@@ -295,7 +300,7 @@ func TestSetupApplySystemd(t *testing.T) {
 			"id": "systemd-service",
 			"typ": "systemd",
 			"quelle": "service.service",
-			"ziel": "${XDG_CONFIG_HOME}/systemd/user/test.service",
+			"ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-systemd-service.service",
 			"rechte": false,
 			"beschreibung": "Systemd unit"
 		}
@@ -308,10 +313,14 @@ func TestSetupApplySystemd(t *testing.T) {
 		t.Fatalf("apply failed with exit code %d. stderr: %s", code, stderr.String())
 	}
 
-	dstPath := filepath.Join(tempHome, ".config", "systemd", "user", "test.service")
+	dstPath := filepath.Join(tempHome, ".config", "systemd", "user", "imprint-systemd-service.service")
 	data, err := os.ReadFile(dstPath)
 	if err != nil || string(data) != "[Unit]\nDescription=Test\n" {
 		t.Fatalf("systemd unit file missing or content incorrect: %v, content: %q", err, string(data))
+	}
+	// Units run code once enabled: every copy is shown before it is written.
+	if !strings.Contains(stdout.String(), "--- systemd-Unit "+dstPath) || !strings.Contains(stdout.String(), "Description=Test") {
+		t.Fatalf("unit content not shown before the copy:\n%s", stdout.String())
 	}
 }
 
@@ -323,6 +332,7 @@ func TestSetupApplyGithook(t *testing.T) {
 	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
+	writePluginManifest(t, root)
 	cmdInit := exec.Command("git", "init", root)
 	if err := cmdInit.Run(); err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
@@ -382,6 +392,7 @@ func TestSetupApplyIdempotency(t *testing.T) {
 	clearApplyGuardEnv(t)
 
 	root := t.TempDir()
+	writePluginManifest(t, root)
 	setupDir := filepath.Join(root, "setup")
 	_ = os.MkdirAll(setupDir, 0755)
 
@@ -443,6 +454,7 @@ func TestSetupPlanRechteGatedNeverLeaksContent(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempHome, ".cache"))
 
 	root := t.TempDir()
+	writePluginManifest(t, root)
 	setupDir := filepath.Join(root, "setup")
 	_ = os.MkdirAll(setupDir, 0755)
 
@@ -474,12 +486,13 @@ func TestSetupPlanRechteGatedNeverLeaksContent(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"setup", mode, "--root", root}, &stdout, &stderr)
-			// --check is expected to report drift (exit 1); --plan always exits 0.
-			if mode == "--plan" && code != exitOK {
-				t.Fatalf("%s failed with exit code %d. stderr: %s", mode, code, stderr.String())
+			// A rights target is applied by the human only: both modes show its
+			// status, marked (Mensch), and --check does not count it as drift.
+			if code != exitOK {
+				t.Fatalf("%s expected exit code %d, got %d. stderr: %s", mode, exitOK, code, stderr.String())
 			}
-			if mode == "--check" && code != exitViolation {
-				t.Fatalf("%s expected drift exit code %d, got %d. stderr: %s", mode, exitViolation, code, stderr.String())
+			if !bytes.Contains(stdout.Bytes(), []byte("abweichend (Mensch)")) {
+				t.Fatalf("%s must mark the rights entry (Mensch), got:\n%s", mode, stdout.String())
 			}
 
 			if bytes.Contains(stdout.Bytes(), []byte(canary)) {

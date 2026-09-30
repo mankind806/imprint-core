@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,7 +14,8 @@ import (
 // at a temp dir first.
 
 // setupTestHome points HOME and every XDG base directory setup uses at a fresh
-// temp dir, so no test reads or writes the real home.
+// temp dir, so no test reads or writes the real home, and PATH at git's
+// directory only, so the shim PATH check never sees the real ~/.local/bin.
 func setupTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -21,7 +23,25 @@ func setupTestHome(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	setHermeticPath(t)
 	return home
+}
+
+// setHermeticPath sets PATH to the directory that holds git and nothing else.
+func setHermeticPath(t *testing.T) {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git not found: %v", err)
+	}
+	t.Setenv("PATH", filepath.Dir(git))
+}
+
+// writePluginManifest marks root as the imprint plugin (.claude-plugin/plugin.json),
+// which --apply requires of --root.
+func writePluginManifest(t *testing.T, root string) {
+	t.Helper()
+	writeFiles(t, root, map[string]string{".claude-plugin/plugin.json": `{"name": "imprint"}`})
 }
 
 // clearApplyGuardEnv removes every variable the --apply env guard reacts to.
@@ -40,11 +60,12 @@ func clearApplyGuardEnv(t *testing.T) {
 	}
 }
 
-// newSetupRoot creates a plugin root with setup/inventar.json and files.
+// newSetupRoot creates a plugin root with the imprint manifest,
+// setup/inventar.json and files.
 func newSetupRoot(t *testing.T, inventory string, files map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
-	all := map[string]string{"setup/inventar.json": inventory}
+	all := map[string]string{"setup/inventar.json": inventory, ".claude-plugin/plugin.json": `{"name": "imprint"}`}
 	for k, v := range files {
 		all[k] = v
 	}
@@ -220,7 +241,10 @@ func TestSetupPluginInventoryDenyAndAllowList(t *testing.T) {
 		{"id": "d-wants", "typ": "systemd", "quelle": "s", "ziel": "${XDG_CONFIG_HOME}/systemd/user/default.target.wants/x.service", "rechte": false, "beschreibung": "b"},
 		{"id": "v-random", "typ": "copy", "quelle": "s", "ziel": "${HOME}/random.txt", "rechte": false, "beschreibung": "b"},
 		{"id": "v-shimname", "typ": "shim", "quelle": "bin/x", "ziel": "${HOME}/.local/bin/other-name", "rechte": false, "beschreibung": "b"},
+		{"id": "v-shimnoprefix", "typ": "shim", "quelle": "bin/x", "ziel": "${HOME}/.local/bin/v-shimnoprefix", "rechte": false, "beschreibung": "b"},
 		{"id": "v-unitext", "typ": "systemd", "quelle": "s", "ziel": "${XDG_CONFIG_HOME}/systemd/user/x.conf", "rechte": false, "beschreibung": "b"},
+		{"id": "v-unitname", "typ": "systemd", "quelle": "s", "ziel": "${XDG_CONFIG_HOME}/systemd/user/xdg-user-dirs.service", "rechte": false, "beschreibung": "b"},
+		{"id": "v-unitother", "typ": "systemd", "quelle": "s", "ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-other.service", "rechte": false, "beschreibung": "b"},
 		{"id": "v-cache", "typ": "copy", "quelle": "s", "ziel": "${XDG_CACHE_HOME}/imprint/x", "rechte": false, "beschreibung": "b"}
 	]`
 	root := newSetupRoot(t, inv, map[string]string{"s": "new\n"})
@@ -251,14 +275,14 @@ func TestSetupPluginInventoryDenyAndAllowList(t *testing.T) {
 
 	okInv := `[
 		{"id": "ok-copy", "typ": "copy", "quelle": "s", "ziel": "${XDG_DATA_HOME}/imprint/sub/ok.txt", "rechte": false, "beschreibung": "b"},
-		{"id": "ok-unit", "typ": "systemd", "quelle": "s", "ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-x.timer", "rechte": false, "beschreibung": "b"},
-		{"id": "ok-shim", "typ": "shim", "quelle": "bin/ok-shim", "ziel": "${HOME}/.local/bin/ok-shim", "rechte": false, "beschreibung": "b"}
+		{"id": "ok-unit", "typ": "systemd", "quelle": "s", "ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-ok-unit.timer", "rechte": false, "beschreibung": "b"},
+		{"id": "imprint-ok-shim", "typ": "shim", "quelle": "bin/ok-shim", "ziel": "${HOME}/.local/bin/imprint-ok-shim", "rechte": false, "beschreibung": "b"}
 	]`
 	okRoot := newSetupRoot(t, okInv, map[string]string{"s": "new\n"})
 	if code, stdout, stderr := runCLI(t, "setup", "--apply", "--root", okRoot); code != exitOK {
 		t.Fatalf("allowlisted targets must apply, got %d\n%s\n%s", code, stdout, stderr)
 	}
-	for _, p := range []string{".local/share/imprint/sub/ok.txt", ".config/systemd/user/imprint-x.timer", ".local/bin/ok-shim"} {
+	for _, p := range []string{".local/share/imprint/sub/ok.txt", ".config/systemd/user/imprint-ok-unit.timer", ".local/bin/imprint-ok-shim"} {
 		if _, err := os.Stat(filepath.Join(home, p)); err != nil {
 			t.Errorf("allowlisted target %s not written: %v", p, err)
 		}
@@ -396,7 +420,7 @@ func TestSetupRechteCacheSymlink(t *testing.T) {
 	if got := mustRead(t, filepath.Join(home, ".ssh", "id_x")); got != canary {
 		t.Fatalf("rendered template was written through the cache symlink: %q", got)
 	}
-	if strings.Contains(stdout, "\ncp ") || strings.HasPrefix(stdout, "cp ") {
+	if strings.Contains(stdout, "\ncp ") || strings.HasPrefix(stdout, "cp ") || strings.Contains(stdout, "install ") {
 		t.Fatalf("no command may be printed when the cache file could not be written:\n%s", stdout)
 	}
 }
@@ -499,7 +523,7 @@ func TestShellQuoteAndShimContent(t *testing.T) {
 		}
 	}
 	got, err := shimContent("bin/imprint-dev")
-	if err != nil || got != "#!/bin/sh\nexec \"$IMPRINT_CORE_ROOT\"/'bin/imprint-dev' \"$@\"\n" {
+	if err != nil || got != "#!/bin/sh\n"+shimMarker+"\nexec \"$IMPRINT_CORE_ROOT\"/'bin/imprint-dev' \"$@\"\n" || !isSetupShim([]byte(got)) {
 		t.Fatalf("shimContent = %q, %v", got, err)
 	}
 	for _, q := range []string{"bin/$(id)", "bin/`id`", `bin/"x`, "../x", "/abs"} {

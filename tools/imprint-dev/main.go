@@ -3,7 +3,8 @@
 //	imprint-dev gen   [--root dir]
 //	imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
 //	imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
-//	imprint-dev setup (--plan | --apply | --check) [--root dir] [--repo path]
+//	imprint-dev setup (--plan | --check) [--root dir] [--repo path]
+//	imprint-dev setup --apply --root dir [--repo path]
 //	imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
 //	    [--pr-body-file file] [--same-repo] [--sarif file]
 //	imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
@@ -56,7 +57,8 @@ const usageText = `usage:
   imprint-dev gen   [--root dir]
   imprint-dev check [--root dir] [--sarif file] [--release] [--today YYYY-MM-DD]
   imprint-dev measure [--log file] [--projects dir] [--target 5m] [--format table|json]
-  imprint-dev setup (--plan | --apply | --check) [--root dir] [--repo path]
+  imprint-dev setup (--plan | --check) [--root dir] [--repo path]
+  imprint-dev setup --apply --root dir [--repo path]
   imprint-dev commit-check --range spec [--root dir] [--pr-author login] [--pr-title text]
       [--pr-body-file file] [--same-repo] [--sarif file]
   imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
@@ -68,8 +70,10 @@ check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could
 measure  reports subagent runs from the hook's log (default $CLAUDE_PLUGIN_DATA/subagent-log.jsonl);
          an overrun is reported, not a failure: exit 0, or 2 if the log cannot be read
 setup    --plan/--check compare setup inventory entries against their targets without writing,
-         --apply writes only allowlisted targets of the plugin's own inventory (--repo: status only);
-         exit 0 all good, 1 drift or a refused/failed entry, 2 on usage, invalid inventory or env guard
+         --apply (explicit --root that is the imprint plugin) writes only allowlisted targets of
+         the plugin's own inventory (--repo: status only); rights targets are only printed;
+         exit 0 all good, 1 drift, a refused/failed entry or an unreadable --repo inventory
+         (--check), 2 on usage, invalid inventory, plugin identity or env guard
 commit-check   checks a range of new commits (and, with --pr-body-file, a pull request's
          body) against .imprint/commit.conf and CONTRIBUTING.md's commit-message rules;
          exit 0 no findings, 1 a finding, 2 the check could not run
