@@ -94,7 +94,7 @@
     ]
   },
   "statusLine": {
-    "type": "",
+    "type": "command",
     "command": "${HOME}/.gemini/antigravity-cli/statusline.py"
   },
   "trustedWorkspaces": [

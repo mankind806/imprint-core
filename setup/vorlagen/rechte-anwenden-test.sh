@@ -66,6 +66,16 @@ neuer_stub_dir() {
   printf -v "$__var" '%s' "$__neuer_stub_dir"
 }
 
+# agy_projekte_dir/agy_tw_dir: EIN gemeinsames Paar echter, vorhandener
+# Verzeichnisse (nicht $HOME, kein Vorfahre von $HOME) für PROJEKTE/
+# TRUSTED_WORKSPACE in allen agy-Testfällen — seit Runde 9 validiert das
+# Skript beide vorab (absoluter, per "realpath -e" auflösbarer Pfad, siehe
+# pruefe_agy_pfad); ein Platzhalter wie "/nicht-verwendet" oder $HOME selbst
+# (wie in früheren Runden verwendet) würde jetzt schon dort abgelehnt.
+agy_projekte_dir=$(mktemp -d)
+agy_tw_dir=$(mktemp -d)
+aufraeumen_dirs+=("$agy_projekte_dir" "$agy_tw_dir")
+
 # --- T1 (Befund 1): ein cp, das beim Schreiben der Sicherung scheitert,
 # muss ohne jede Änderung an der Zieldatei abbrechen und darf keine (leere)
 # Sicherung zurücklassen, auf die rueckbau hereinfallen könnte. ---
@@ -161,14 +171,14 @@ EOF
 t4_statusline_unabhaengig() {
   local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
   mkdir -p "$h/.gemini/antigravity-cli"
-  HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" \
+  HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" \
     envsubst '${HOME} ${PROJEKTE} ${TRUSTED_WORKSPACE}' \
     <"$vorlagen_dir/agy-settings.json" >"$h/.gemini/antigravity-cli/settings.json"
   chmod 600 "$h/.gemini/antigravity-cli/settings.json"
   # statusline.py existiert bewusst noch nicht.
 
   local out
-  out=$(echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy 2>&1)
+  out=$(echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy 2>&1)
   local rc=$?
 
   if [ "$rc" -eq 0 ] && [ -x "$h/.gemini/antigravity-cli/statusline.py" ] \
@@ -197,7 +207,7 @@ t5_symlink_in_checkout() {
   vor_statusline=$(cat "$kopie_statusline")
   vor_settings=$(cat "$h/.gemini/antigravity-cli/settings.json")
 
-  echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$kopie_skript" agy >/dev/null 2>&1
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$kopie_skript" agy >/dev/null 2>&1
   local rc=$?
 
   local nach_statusline nach_settings
@@ -235,7 +245,7 @@ t6_rueckbau_rundlauf() {
 
   local claude_out agy_out
   claude_out=$(echo j | HOME="$h" bash "$skript" claude 2>&1) || { report "T6 Rückbau-Rundlauf" 1 "claude-Anwenden fehlgeschlagen: $claude_out"; return; }
-  agy_out=$(echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy 2>&1) || { report "T6 Rückbau-Rundlauf" 1 "agy-Anwenden fehlgeschlagen: $agy_out"; return; }
+  agy_out=$(echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy 2>&1) || { report "T6 Rückbau-Rundlauf" 1 "agy-Anwenden fehlgeschlagen: $agy_out"; return; }
 
   local ts_claude ts_agy
   ts_claude=$(printf '%s\n' "$claude_out" | sed -n 's/^Zeitstempel für rueckbau: //p' | tail -1)
@@ -351,7 +361,7 @@ t10_agy_ziel_kein_teilschreiben() {
   mkdir -p "$h/.gemini/antigravity-cli/statusline.py"
   local vor; vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
 
-  echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy >/dev/null 2>&1
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy >/dev/null 2>&1
   local rc=$?
   local nach; nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
 
@@ -444,7 +454,7 @@ t13_agy_merge_vereinigung() {
 EOF
   chmod 600 "$h/.gemini/antigravity-cli/settings.json"
 
-  echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy >/dev/null 2>&1
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy >/dev/null 2>&1
   local rc=$?
   local f="$h/.gemini/antigravity-cli/settings.json"
 
@@ -454,7 +464,7 @@ EOF
   local model_ok=1
   jq -e '.model=="custom-model"' "$f" >/dev/null 2>&1 && model_ok=0
   local trustedws_ok=1
-  jq -e --arg h "$h" '.trustedWorkspaces[0]==$h' "$f" >/dev/null 2>&1 && trustedws_ok=0
+  jq -e --arg tw "$agy_tw_dir" '.trustedWorkspaces[0]==$tw' "$f" >/dev/null 2>&1 && trustedws_ok=0
 
   if [ "$rc" -eq 0 ] && [ -z "$fehlt" ] && [ "$model_ok" -eq 0 ] && [ "$trustedws_ok" -eq 0 ]; then
     report "T13 agy-Merge verliert keine bestehenden Regeln/Schlüssel (Vereinigung)" 0
@@ -559,6 +569,130 @@ t13_agy_merge_vereinigung
 t14_claude_manipulierte_vorlage
 t15_claude_ziel_nicht_beschreibbar
 t16_claude_ohne_permissions_block
+
+# --- T17 (Befund 1, Runde 9): das Injektions-Probe — ein TRUSTED_WORKSPACE
+# mit einem passend platzierten Anführungszeichen darf die Vorlage nicht
+# mehr per Textersetzung aufbrechen können (envsubst-Befund). Bricht vorab
+# an der Wertprüfung ab (enthält ein "), nichts wird geschrieben. ---
+t17_agy_injektion() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local vor; vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+  local boese='/x"], "permissions": {"allow": ["x"], "deny": []}, "trustedWorkspaces": ["/'
+
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$boese" bash "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T17 Anführungszeichen in TRUSTED_WORKSPACE bricht ohne Änderung ab (Injektions-Probe)" 0
+  else
+    report "T17 Anführungszeichen in TRUSTED_WORKSPACE bricht ohne Änderung ab (Injektions-Probe)" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T18 (Befund 1, Runde 9): eine Reihe ungültiger PROJEKTE-Werte wird
+# jeweils ohne jede Änderung abgelehnt: /, ., .., relativ, $HOME selbst,
+# ein Symlink auf $HOME, ein nicht vorhandener Pfad, ein Glob-Muster. ---
+t18_agy_pfad_werte() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local link; link=$(mktemp -d); aufraeumen_dirs+=("$link")
+  ln -s "$h" "$link/homelink"
+
+  local name wert vor nach rc alle_ok=0
+  local -a faelle=(
+    "/"
+    "."
+    ".."
+    "relative-pfad"
+    "$h"
+    "$link/homelink"
+    "/nicht-vorhanden-$$-xyz"
+    ".*"
+  )
+  for wert in "${faelle[@]}"; do
+    vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$h" PROJEKTE="$wert" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      alle_ok=1
+      report "T18 PROJEKTE=[$wert] wird abgelehnt" 1 "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+    fi
+  done
+  [ "$alle_ok" -eq 0 ] && report "T18 alle ungültigen PROJEKTE-Werte werden abgelehnt (/, ., .., relativ, \$HOME, Symlink auf \$HOME, fehlend, Glob)" 0
+}
+
+# --- T19 (Befund 2, Runde 9): eine manipulierte agy-settings.json mit
+# einem fremden statusLine.command wird VOR jeder Änderung abgelehnt —
+# läuft gegen eine Kopie von vorlagen/, nie gegen den echten Checkout. ---
+t19_agy_statusline_manipuliert() {
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  jq '.statusLine.command = "/bin/sh -c whoami"' "$vorlagen_dir/agy-settings.json" \
+    > "$repo/setup/vorlagen/agy-settings.json"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local vor; vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$kopie_skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T19 manipulierte agy-settings.json (fremdes statusLine.command) wird abgelehnt" 0
+  else
+    report "T19 manipulierte agy-settings.json (fremdes statusLine.command) wird abgelehnt" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T20 (Befund 3, Runde 9): eine erweiterte ACL auf der Zieldatei
+# überlebt claude (kopiere_rechte statt chmod --reference allein). Nur
+# ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t20_acl_erhalten() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T20 ACL bleibt nach claude erhalten (übersprungen, getfacl/setfacl fehlen)" 0
+    return
+  fi
+  local h; neues_home h
+  local f="$h/.claude/settings.json"
+  if ! setfacl -m u:"$(id -u)":rwx "$f" 2>/dev/null; then
+    report "T20 ACL bleibt nach claude erhalten (übersprungen, setfacl schlägt hier fehl, z. B. Dateisystem ohne ACL-Unterstützung)" 0
+    return
+  fi
+  local acl_vor; acl_vor=$(getfacl -c "$f" 2>/dev/null)
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local acl_nach; acl_nach=$(getfacl -c "$f" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && [ "$acl_vor" = "$acl_nach" ] && printf '%s' "$acl_nach" | grep -q '^user:'; then
+    report "T20 ACL bleibt nach claude erhalten (kopiere_rechte statt chmod --reference)" 0
+  else
+    report "T20 ACL bleibt nach claude erhalten (kopiere_rechte statt chmod --reference)" 1 \
+      "rc=$rc, ACL gleich=$([ "$acl_vor" = "$acl_nach" ] && echo ja || echo nein)"
+  fi
+}
+
+t17_agy_injektion
+t18_agy_pfad_werte
+t19_agy_statusline_manipuliert
+t20_acl_erhalten
 
 echo "---"
 echo "$pass PASS, $fail FAIL"

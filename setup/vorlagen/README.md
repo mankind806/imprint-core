@@ -52,9 +52,10 @@ Abweichung, keine Auslassung durch Versehen.
 `${XDG_CACHE_HOME}`/`${XDG_DATA_HOME}`) auf** (siehe `tools/imprint-dev/setup.go`, `expandZiel`
 für `ziel`, `renderTemplate` für den Vorlagen-Inhalt; `--apply` nutzt denselben `replacer` wie
 `--plan`). `${PROJEKTE}` und `${TRUSTED_WORKSPACE}` sind reine Textplatzhalter in den
-Vorlagen-Inhalten; sie werden von keinem der beiden Unterbefehle ersetzt, sondern müssen als
-Umgebungsvariablen gesetzt sein, bevor `setup/vorlagen/rechte-anwenden.sh agy` (bzw.
-`agy-statusline`) sie per `envsubst` einsetzt (siehe „Anwenden" unten). Deshalb zeigt
+Vorlagen-Inhalten; `imprint-dev setup --plan`/`--apply` ersetzen sie nicht, sondern müssen als
+Umgebungsvariablen gesetzt sein, bevor `setup/vorlagen/rechte-anwenden.sh agy` sie validiert und
+per `jq` einsetzt (nicht `envsubst`, siehe „Anwenden" unten) — `agy-statusline` installiert nur
+`statusline.py` und braucht beide Variablen nicht. Deshalb zeigt
 `setup --plan` (und damit auch der `--apply`-Aufruf für `agy-rechte-vorlage`, siehe oben) diesen
 einen Eintrag immer als `abweichend` — das ist erwartet, nicht ein Fehler der Vorlage (siehe
 Abweichungen unten). Seit der Vereinigung aus Bestand und Vorlage (Runde 8) gilt das praktisch
@@ -95,7 +96,7 @@ setup/vorlagen/rechte-anwenden.sh agy-statusline
 Alle drei Unterbefehle:
 
 * prüfen zuerst, dass die benötigten Werkzeuge (u. a. `mktemp`, `readlink`, `chmod`, `diff`,
-  `cp`, `mv`, `install`, `cmp`, `sha256sum`; `claude`/`agy` zusätzlich `jq`/`envsubst`) vorhanden
+  `cp`, `mv`, `install`, `cmp`, `sha256sum`, `ls`, `realpath`; alle drei zusätzlich `jq`) vorhanden
   sind, lösen die Vorlagendatei relativ zum eigenen Skriptpfad auf (nicht zum Arbeitsverzeichnis)
   und verlangen bei `claude`/`agy` eine existierende, gültige JSON-Zieldatei mit genau einem
   Dokument (`jq -e -s 'length==1'` — eine Zieldatei mit mehr als einem aneinandergehängten
@@ -124,8 +125,10 @@ Alle drei Unterbefehle:
 * legen bei Zustimmung zuerst eine Sicherung mit sekundengenauem Zeitstempel neben der
   Zieldatei an (`cp -p -n`, bei einem fehlschlagenden `cp` wird eine dabei schon unvollständig
   angelegte Sicherung wieder entfernt), bestätigen sie per `cmp -s` gegen das Original, erhalten
-  die Rechte der Zieldatei (`chmod --reference`) und übernehmen die neue Datei erst danach per
-  atomarem `mv`;
+  die Rechte der Zieldatei (`chmod --reference`, plus eine erweiterte ACL der Zieldatei, falls
+  vorhanden — `chmod --reference` kopiert keine ACL-Einträge; fehlen dafür `getfacl`/`setfacl`,
+  bricht das Skript ab, statt die ACL stillschweigend zu verlieren) und übernehmen die neue Datei
+  erst danach per atomarem `mv`;
 * schreiben, wenn die Zieldatei (oder ein Verzeichnis auf ihrem Weg) ein Symlink ist, auf die
   Datei, auf die er zeigt (`readlink -f`) — der Symlink selbst bleibt erhalten.
 
@@ -142,7 +145,8 @@ Objekte rekursiv merged; das war bis Runde 6 ein Befund, siehe unten). Die Vorla
 wird (Befund 3, Runde 8: eine manipulierte Vorlage könnte sonst z. B. `defaultMode` auf einen
 unsicheren Wert setzen). Vor dem Übernehmen prüft das Skript, dass jeder bestehende
 allow-/deny-Eintrag noch vorhanden ist und dass jeder Wert außerhalb von
-`permissions.allow`/`permissions.deny` byte-identisch zum Stand davor ist — ein reiner
+`permissions.allow`/`permissions.deny` dieselben Werte hat wie davor (`jq "=="`, JSON-normalisiert,
+nicht Byte für Byte — Schlüsselreihenfolge/Formatierung zählen nicht) — ein reiner
 Schlüsselvergleich hätte eine Vorlage, die einen bestehenden Wert überschreibt statt ihn
 wegzulassen, nicht erkannt (Befund 1, Runde 7; Befund 2 und 3, Runde 8: die Prüfung verträgt jetzt
 auch eine Zieldatei ganz ohne `permissions`-Block). Ist die bestehende `settings.json`
@@ -155,11 +159,23 @@ schon vorhandener, von der Vorlage nicht getragener Schlüssel (z. B. ein von Ha
 `model`) bleibt unverändert — ein voller Ersatz hätte eigene `deny`-Regeln wie `command(make)`
 stillschweigend gelöscht.
 
-`agy` rendert `agy-settings.json` zuerst mit `envsubst` für `${PROJEKTE}`/`${TRUSTED_WORKSPACE}`
-(validiert danach per `jq -e -s 'length==1'`, dass das Ergebnis gültiges JSON mit genau einem
-Dokument ist und kein unersetztes `${` mehr enthält) und mergt das Ergebnis dann wie oben
-beschrieben in `~/.gemini/antigravity-cli/settings.json`. `statusline.py` wird davon unabhängig
-behandelt, nicht nur dann,
+`agy` validiert `PROJEKTE`/`TRUSTED_WORKSPACE` zuerst (absoluter, mit `realpath -e` auflösbarer
+Pfad; weder `/` noch `$HOME` selbst noch ein Vorfahre von `$HOME`; kein `"`, `\`, Steuerzeichen
+oder Glob-/Regex-Metazeichen wie `*`/`?`/`[` — Runde 9, siehe unten) und rendert
+`agy-settings.json` dann über `jq` (Platzhalter literal per `split`/`join` ersetzt, der
+eingesetzte Wert vorher mit `tojson` JSON-escaped), NICHT mit `envsubst`: `envsubst` fügt reinen
+Text ein, ohne JSON zu escapen, ein Wert mit einem eingebetteten `"` könnte so aus dem
+umgebenden JSON-String ausbrechen und beliebige Teile der Vorlage überschreiben (gemessen: ein
+passend platziertes `"` in `TRUSTED_WORKSPACE` löschte alle 28 `deny`-Einträge der Vorlage und
+ersetzte `trustedWorkspaces`). Validiert danach per `jq -e -s 'length==1'`, dass das Ergebnis
+gültiges JSON mit genau einem Dokument ist, kein unersetztes `${` mehr enthält, `statusLine`
+(falls vorhanden) exakt `{"type":"command","command":"$HOME/.gemini/antigravity-cli/statusline.py"}`
+ist (eine manipulierte Vorlage könnte hier sonst beliebigen Code als agy-Statuszeilenbefehl
+unterbringen), und mergt das Ergebnis dann wie oben beschrieben in
+`~/.gemini/antigravity-cli/settings.json` — nach dem Merge zusätzlich geprüft: die `deny`-Liste
+umfasst vollständig die der (validierten) Vorlage, `allow` enthält nur Einträge aus Bestand und
+Vorlage, und `trustedWorkspaces` entspricht genau dem aufgelösten `TRUSTED_WORKSPACE`.
+`statusline.py` wird davon unabhängig behandelt, nicht nur dann,
 wenn `settings.json` sich ändert, über denselben Codepfad wie der eigenständige Unterbefehl
 `agy-statusline`: Fehlt `~/.gemini/antigravity-cli/statusline.py`, zeigt das Skript den ganzen
 neuen Inhalt als Diff gegen `/dev/null` und fragt trotzdem nach — eine neu zu installierende

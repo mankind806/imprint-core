@@ -30,11 +30,13 @@
 # sonst z. B. defaultMode auf einen unsicheren Wert setzen könnte). Nach dem
 # Merge prüft das Skript, dass jeder bestehende allow-/deny-Eintrag noch
 # vorhanden ist und dass jeder Wert außerhalb von permissions.allow/deny
-# byte-identisch zum Stand vor dem Merge ist (nicht nur, dass der Schlüssel
-# noch existiert — ein reiner Schlüsselvergleich hätte eine Vorlage, die
-# einen bestehenden Wert überschreibt, statt ihn wegzulassen, nicht erkannt,
-# Befund 3 aus Runde 8) — sonst bricht es ohne jede Änderung ab (Befund 1,
-# Runde 7; Befund 3, Runde 8).
+# denselben Wert hat wie vor dem Merge (jq "==", also gleiche Werte
+# JSON-normalisiert, nicht Byte für Byte — Schlüsselreihenfolge oder
+# Formatierung zählen nicht) — nicht nur, dass der Schlüssel noch existiert:
+# ein reiner Schlüsselvergleich hätte eine Vorlage, die einen bestehenden
+# Wert überschreibt, statt ihn wegzulassen, nicht erkannt (Befund 3 aus
+# Runde 8) — sonst bricht es ohne jede Änderung ab (Befund 1, Runde 7;
+# Befund 3, Runde 8).
 # Direkt beim Merge hält das Skript den sha256sum von
 # ${HOME}/.claude/settings.json fest und prüft ihn nach der Rückfrage
 # erneut, bevor irgendetwas geschrieben wird — ändert sich die Zieldatei
@@ -98,7 +100,9 @@
 # neuen, eigenen Zeitstempel (den es am Ende ausgibt, damit auch der
 # Rückbau selbst rückgängig gemacht werden kann), bevor es per
 # Zwischendatei und atomarem mv zurückspielt; die Rechte der Zieldatei
-# bleiben erhalten (chmod --reference). Für "existierte vor dem Anwenden
+# bleiben erhalten (kopiere_rechte: chmod --reference plus eine erweiterte
+# ACL, falls vorhanden — reines chmod --reference kopiert keine ACL-
+# Einträge, Befund 3, Runde 9). Für "existierte vor dem Anwenden
 # nicht" verschiebt es die Datei auf ihren eigenen Sicherungsnamen, statt
 # sie zu löschen. rueckbau bricht ohne jede Änderung ab, wenn zu
 # <Zeitstempel> gar keine Sicherung existiert oder eine vorhandene
@@ -189,8 +193,8 @@ need() {
 }
 
 need_apply_tools() {
-  need jq envsubst
-  need mktemp readlink chmod diff cp mv grep install cmp sha256sum
+  need jq
+  need mktemp readlink chmod diff cp mv grep install cmp sha256sum ls realpath
 }
 
 # Löst den GANZEN Zielpfad kanonisch auf (readlink -f), nicht nur den Fall,
@@ -329,11 +333,16 @@ zeige_diff_json() {
 # JQ_MERGE_UNION: von "jq -s" gegen zwei Dateien (Ziel, Vorlage) verwendetes
 # Programm für claude UND agy — permissions.allow/permissions.deny werden
 # als Vereinigung gebildet (Bestand zuerst, doppelte entfernt, Reihenfolge
-# stabil), alles andere per "*"-Merge wie gewohnt (Vorlage überschreibt
-# gleichnamige Top-Level-Schlüssel, z. B. statusLine/trustedWorkspaces bei
-# agy; Schlüssel, die nur im Bestand stehen, bleiben unverändert). "(...//
-# {})" überall, damit eine Zieldatei ohne permissions-Block keinen jq-Fehler
-# statt einer klaren Meldung auslöst (Befund 2, Runde 8).
+# stabil; permissions.defaultMode & Co. bleiben dabei erhalten, weil nur
+# allow/deny gezielt gesetzt werden, nicht der ganze permissions-Block).
+# JEDER ANDERE Top-Level-Schlüssel aus der Vorlage (z. B. statusLine,
+# trustedWorkspaces bei agy) ERSETZT den Bestand GANZ — bewusst kein
+# rekursiver "*"-Merge mehr für diese Schlüssel: der hätte einzelne
+# Unter-Schlüssel eines bestehenden statusLine-Objekts überleben lassen,
+# obwohl "ersetzen" dokumentiert ist (Befund 2, Runde 9). Ein Schlüssel, der
+# nur im Bestand steht, bleibt unverändert. "(... // {})" überall, damit
+# eine Zieldatei ohne permissions-Block keinen jq-Fehler statt einer klaren
+# Meldung auslöst (Befund 2, Runde 8).
 JQ_MERGE_UNION='
   def uniq_stable: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
   .[0] as $alt | .[1] as $vorlage |
@@ -341,7 +350,14 @@ JQ_MERGE_UNION='
   (($alt.permissions // {}).deny // []) as $altdeny |
   (($altallow + (($vorlage.permissions // {}).allow // [])) | uniq_stable) as $allow |
   (($altdeny + (($vorlage.permissions // {}).deny // [])) | uniq_stable) as $deny |
-  $alt * ($vorlage * {permissions: {allow: $allow, deny: $deny}})
+  reduce ($vorlage | to_entries[]) as {key: $k, value: $v} (
+    $alt;
+    if $k == "permissions" then
+      .permissions = (($alt.permissions // {}) + {allow: $allow, deny: $deny})
+    else
+      .[$k] = $v
+    end
+  )
 '
 
 pruefe_vorlage_schluessel() {
@@ -351,6 +367,111 @@ pruefe_vorlage_schluessel() {
         ((((.permissions // {}) | keys) - $perm) | length == 0)
       ' "$datei" >/dev/null 2>&1; then
     die "Vorlage trägt einen unerwarteten Schlüssel (erlaubt: $top_erlaubt, permissions nur $perm_erlaubt): $datei"
+  fi
+}
+
+# pruefe_agy_pfad <Name> <Wert>: validiert PROJEKTE/TRUSTED_WORKSPACE, bevor
+# sie in die JSON-Vorlage eingesetzt werden, und gibt den aufgelösten,
+# kanonischen Pfad aus. Ein Wert mit Anführungszeichen könnte sonst aus dem
+# JSON-String ausbrechen (siehe render_agy_vorlage), ein Glob-/Regex-
+# Metazeichen könnte ein write_file(...)/trustedWorkspaces-Muster unbeab-
+# sichtigt weiten, und ein Wert, der $HOME selbst oder ein Vorfahre von
+# $HOME ist, würde $HOME ganz oder teilweise vertrauenswürdig machen bzw.
+# abdecken (Befund 1, Runde 9).
+pruefe_agy_pfad() {
+  local name="$1" wert="$2"
+  case "$wert" in
+    /*) ;;
+    *) die "$name muss ein absoluter Pfad sein: $wert" ;;
+  esac
+  case "$wert" in
+    *'"'*) die "$name enthält ein Anführungszeichen: $wert" ;;
+  esac
+  case "$wert" in
+    *'\'*) die "$name enthält einen Backslash: $wert" ;;
+  esac
+  case "$wert" in
+    *[![:print:]]*) die "$name enthält ein Steuerzeichen: $wert" ;;
+  esac
+  case "$wert" in
+    *'*'*) die "$name enthält ein Glob-/Regex-Metazeichen (*): $wert" ;;
+  esac
+  case "$wert" in
+    *'?'*) die "$name enthält ein Glob-/Regex-Metazeichen (?): $wert" ;;
+  esac
+  case "$wert" in
+    *'['*) die "$name enthält ein Glob-/Regex-Metazeichen ([): $wert" ;;
+  esac
+  local aufgeloest
+  aufgeloest=$(realpath -e "$wert" 2>/dev/null) || die "$name ist kein vorhandener Pfad (realpath -e): $wert"
+  if [ "$aufgeloest" = "/" ]; then
+    die "$name darf nicht / sein: $wert"
+  fi
+  if [ "$aufgeloest" = "$HOME" ]; then
+    die "$name darf nicht \$HOME selbst sein: $wert"
+  fi
+  case "$HOME" in
+    "$aufgeloest"/*)
+      die "$name ist ein Vorfahre von \$HOME und würde \$HOME mit abdecken: $wert"
+      ;;
+  esac
+  printf '%s\n' "$aufgeloest"
+}
+
+# render_agy_vorlage <Vorlage> <HOME> <PROJEKTE> <TRUSTED_WORKSPACE>: ersetzt
+# ${HOME}/${PROJEKTE}/${TRUSTED_WORKSPACE} in der rohen Vorlage NICHT mit
+# envsubst (reine Textersetzung, ohne JSON-Escaping), sondern in jq: split
+# auf den wörtlichen Platzhalter, join mit der per "tojson" escapten,
+# anführungszeichenlosen Form des Werts. Ein Wert mit einem eingebetteten
+# \"...\", der aus dem umgebenden JSON-String ausbrechen und z. B. die
+# ganze deny-Liste ersetzen würde, kann so nicht mehr wirken — er landet
+# escaped als harmloser Textbestandteil (Befund 1, Runde 9).
+render_agy_vorlage() {
+  local vorlage="$1" home="$2" projekte="$3" tw="$4"
+  jq -nr --rawfile tpl "$vorlage" --arg home "$home" --arg projekte "$projekte" --arg tw "$tw" '
+    def esc($v): ($v | tojson | .[1:-1]);
+    $tpl
+    | split("${HOME}") | join(esc($home))
+    | split("${PROJEKTE}") | join(esc($projekte))
+    | split("${TRUSTED_WORKSPACE}") | join(esc($tw))
+  ' || die "Vorlage konnte nicht gerendert werden: $vorlage"
+}
+
+# hat_acl <Datei>: true (rc=0), wenn die Datei eine erweiterte ACL trägt.
+# Ist getfacl da, direkt darüber geprüft (benannte user:/group:-Einträge
+# jenseits der drei Basis-Einträge) — zuverlässiger als das "+" nach den
+# Rechten, das nicht jede "stat"-Implementierung anhängt (gemessen: uutils
+# "stat -c %A" lässt es weg, "ls -ld" zeigt es korrekt an). Ohne getfacl
+# wird ersatzweise "ls -ld" geprüft (POSIX/Linux-Konvention).
+hat_acl() {
+  local datei="$1"
+  if command -v getfacl >/dev/null 2>&1; then
+    getfacl -c "$datei" 2>/dev/null | grep -Eq '^(user|group):[^:]+:|^mask::'
+    return $?
+  fi
+  local eintrag
+  eintrag=$(ls -ld -- "$datei" 2>/dev/null)
+  case "${eintrag%% *}" in
+    *+) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# kopiere_rechte <von> <nach>: wie "chmod --reference", übernimmt aber
+# zusätzlich eine erweiterte ACL der Quelle (chmod --reference kopiert nur
+# die klassischen rwx-Bits, keine ACL-Einträge). Fehlen getfacl/setfacl,
+# obwohl die Quelle eine ACL trägt, bricht die Funktion ab, statt die ACL
+# stillschweigend zu verlieren (Befund 3, Runde 9).
+kopiere_rechte() {
+  local von="$1" nach="$2"
+  chmod --reference="$von" "$nach" || die "chmod fehlgeschlagen: $nach"
+  if hat_acl "$von"; then
+    if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
+      getfacl -c "$von" 2>/dev/null | setfacl --set-file=- "$nach" \
+        || die "ACL von $von konnte nicht auf $nach übertragen werden"
+    else
+      die "$von trägt eine erweiterte ACL, aber getfacl/setfacl fehlen — abgebrochen, um sie nicht stillschweigend zu verlieren: $nach"
+    fi
   fi
 }
 
@@ -555,7 +676,8 @@ cmd_claude() {
   # Sicherheitsprüfung NACH dem Merge, VOR jeder Anzeige/Rückfrage: jeder
   # bestehende allow-/deny-Eintrag muss im Ergebnis noch vorhanden sein, UND
   # jeder Wert außerhalb von permissions.allow/permissions.deny muss
-  # byte-identisch zum Stand vor dem Merge sein — ein reiner
+  # denselben Wert (jq "==", JSON-normalisiert, nicht Byte für Byte) wie vor
+  # dem Merge haben — ein reiner
   # Schlüsselvergleich hätte eine Vorlage, die einen bestehenden Wert
   # (z. B. defaultMode) überschreibt statt ihn wegzulassen, nicht erkannt
   # (Befund 3, Runde 8). "(.permissions // {})" schützt wieder gegen eine
@@ -590,7 +712,7 @@ cmd_claude() {
   ts="$(date +%Y%m%d-%H%M%S)"
   sichern "$resolved" "$ts"
   bak="$SICHERN_BAK"
-  chmod --reference="$resolved" "$tmp" || die "chmod fehlgeschlagen: $tmp"
+  kopiere_rechte "$resolved" "$tmp"
   mv "$tmp" "$resolved" || die "mv fehlgeschlagen: $resolved"
   tmp=""
   echo "Angewendet. Sicherung: $bak"
@@ -616,6 +738,12 @@ cmd_agy() {
   : "${PROJEKTE:?PROJEKTE muss gesetzt sein}"
   : "${TRUSTED_WORKSPACE:?TRUSTED_WORKSPACE muss gesetzt sein}"
 
+  # Validiert und löst PROJEKTE/TRUSTED_WORKSPACE auf, BEVOR sie in die
+  # Vorlage eingesetzt werden (Befund 1, Runde 9) — siehe pruefe_agy_pfad.
+  local projekte_aufgeloest tw_aufgeloest
+  projekte_aufgeloest=$(pruefe_agy_pfad PROJEKTE "$PROJEKTE")
+  tw_aufgeloest=$(pruefe_agy_pfad TRUSTED_WORKSPACE "$TRUSTED_WORKSPACE")
+
   local resolved
   resolved=$(resolve_ziel "$ziel")
   pruefe_nicht_checkout "$resolved"
@@ -632,24 +760,47 @@ cmd_agy() {
   local vor_sha
   vor_sha=$(sha256sum "$resolved") || die "sha256sum fehlgeschlagen: $resolved"
 
+  # Rendern über jq (split/join + tojson-Escaping), nicht envsubst — envsubst
+  # fügt PROJEKTE/TRUSTED_WORKSPACE als reinen Text ein, ohne JSON zu
+  # escapen; ein Wert mit einem eingebetteten Anführungszeichen könnte so
+  # aus dem umgebenden JSON-String ausbrechen und z. B. die ganze deny-Liste
+  # ersetzen (gemessen: TRUSTED_WORKSPACE mit einem passend platzierten '"'
+  # löschte alle 28 deny-Einträge der Vorlage). render_agy_vorlage schließt
+  # das strukturell aus (Befund 1, Runde 9).
   agy_rendered_tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
-
-  # shellcheck disable=SC2016
-  HOME="$HOME" PROJEKTE="$PROJEKTE" TRUSTED_WORKSPACE="$TRUSTED_WORKSPACE" \
-    envsubst '${HOME} ${PROJEKTE} ${TRUSTED_WORKSPACE}' \
-    < "$vorlage" > "$agy_rendered_tmp" || die "envsubst fehlgeschlagen"
+  render_agy_vorlage "$vorlage" "$HOME" "$projekte_aufgeloest" "$tw_aufgeloest" > "$agy_rendered_tmp"
 
   if ! jq -e -s 'length==1' "$agy_rendered_tmp" >/dev/null 2>&1; then
-    die "envsubst-Ergebnis ist kein gültiges JSON mit genau einem Dokument — PROJEKTE/TRUSTED_WORKSPACE prüfen"
+    die "gerenderte Vorlage ist kein gültiges JSON mit genau einem Dokument — PROJEKTE/TRUSTED_WORKSPACE prüfen"
   fi
   if grep -qF '${' "$agy_rendered_tmp"; then
-    die "unersetztes \${ im Ergebnis — PROJEKTE/TRUSTED_WORKSPACE prüfen"
+    die "unersetztes \${ im Ergebnis — ein vierter, unbekannter Platzhalter in der Vorlage?"
   fi
 
   # Die Vorlage darf nur permissions/statusLine/trustedWorkspaces tragen —
   # eine manipulierte agy-settings.json könnte sonst einen fremden
   # Top-Level-Schlüssel einschmuggeln (Befund 3, Runde 8, analog zu claude).
   pruefe_vorlage_schluessel "$agy_rendered_tmp" '["permissions","statusLine","trustedWorkspaces"]' '["allow","deny"]'
+
+  # statusLine ist eine Anweisung an agy, welchen Befehl es ausführt — eine
+  # manipulierte Vorlage könnte hier beliebigen Code unterbringen
+  # (z. B. statusLine.command = "/bin/sh -c …"). Trägt die Vorlage
+  # statusLine, muss es exakt der erwartete, fest einprogrammierte Wert
+  # sein (Befund 2, Runde 9); "set -s" hier: nur der Bestand.
+  local statusline_erwartet
+  statusline_erwartet=$(jq -nc --arg cmd "${HOME}/.gemini/antigravity-cli/statusline.py" \
+    '{"type":"command","command":$cmd}')
+  if ! jq -e --argjson erw "$statusline_erwartet" \
+        'if has("statusLine") then (.statusLine == $erw) else true end' "$agy_rendered_tmp" >/dev/null 2>&1; then
+    die "statusLine der Vorlage weicht vom erwarteten, fest einprogrammierten Wert ab (Manipulation?): $vorlage"
+  fi
+
+  # Vorlagen-Regeln für die Superset-/Subset-Prüfung nach dem Merge
+  # festgehalten (Befund 1, Runde 9), bevor die gerenderte Vorlage entfernt
+  # wird.
+  local vorlage_allow vorlage_deny
+  vorlage_allow=$(jq -c '(.permissions // {}).allow // []' "$agy_rendered_tmp")
+  vorlage_deny=$(jq -c '(.permissions // {}).deny // []' "$agy_rendered_tmp")
 
   # permissions.allow/permissions.deny als Vereinigung aus Bestand und
   # gerenderter Vorlage (wie bei claude, JQ_MERGE_UNION); statusLine und
@@ -667,25 +818,35 @@ cmd_agy() {
 
   # Sicherheitsprüfung wie bei claude, aber ohne Werte außerhalb von
   # permissions als unveränderlich zu behandeln — statusLine/
-  # trustedWorkspaces SOLLEN sich ändern ("ersetzen"); geprüft wird nur,
-  # dass kein bestehender allow-/deny-Eintrag und kein bestehender
-  # Top-Level- oder permissions-Schlüssel verloren geht.
-  if ! jq -n -e --slurpfile alt "$resolved" --slurpfile neu "$tmp" '
+  # trustedWorkspaces SOLLEN sich ändern ("ersetzen"); geprüft wird, dass
+  # kein bestehender allow-/deny-Eintrag und kein bestehender Top-Level-
+  # oder permissions-Schlüssel verloren geht, dass deny die Vorlage
+  # vollständig umfasst, dass allow nur aus Bestand und Vorlage stammt, und
+  # dass trustedWorkspaces exakt der aufgelöste TRUSTED_WORKSPACE ist
+  # (Befund 1, Runde 9).
+  if ! jq -n -e --slurpfile alt "$resolved" --slurpfile neu "$tmp" \
+        --argjson vallow "$vorlage_allow" --argjson vdeny "$vorlage_deny" \
+        --arg tw "$tw_aufgeloest" '
         ($alt[0].permissions // {}) as $altperm |
         ($neu[0].permissions // {}) as $neuperm |
+        (($altperm.allow // []) + $vallow) as $allow_erlaubt |
         ((($altperm.allow // []) - ($neuperm.allow // [])) | length == 0) and
         ((($altperm.deny // []) - ($neuperm.deny // [])) | length == 0) and
+        (($vdeny - ($neuperm.deny // [])) | length == 0) and
+        ((($neuperm.allow // []) - $allow_erlaubt) | length == 0) and
         ((($alt[0] | keys) - ($neu[0] | keys)) | length == 0) and
-        ((($altperm | keys) - ($neuperm | keys)) | length == 0)
+        ((($altperm | keys) - ($neuperm | keys)) | length == 0) and
+        ($neu[0].trustedWorkspaces == [$tw])
       ' >/dev/null 2>&1; then
-    die "Plausibilitätsprüfung fehlgeschlagen: der Merge hat bestehende allow-/deny-Einträge oder Schlüssel verloren"
+    die "Plausibilitätsprüfung fehlgeschlagen: der Merge hat bestehende Einträge/Schlüssel verloren, die Vorlagen-deny-Liste nicht vollständig übernommen, einen fremden allow-Eintrag eingeführt, oder trustedWorkspaces weicht vom aufgelösten TRUSTED_WORKSPACE ab"
   fi
 
   local settings_frage=0 statusline_frage=0
 
-  echo "Merge von $vorlage in $ziel (envsubst PROJEKTE/TRUSTED_WORKSPACE;" \
-       "permissions.allow/permissions.deny als Vereinigung aus Bestand und" \
-       "Vorlage, alles andere aus der Vorlage ersetzt den Bestand):"
+  echo "Merge von $vorlage in $ziel (PROJEKTE/TRUSTED_WORKSPACE per jq" \
+       "eingesetzt, nicht envsubst; permissions.allow/permissions.deny als" \
+       "Vereinigung aus Bestand und Vorlage, alles andere aus der Vorlage" \
+       "ersetzt den Bestand):"
   if zeige_diff_json "$resolved" "$tmp" "$ziel"; then
     settings_frage=1
   fi
@@ -735,7 +896,7 @@ cmd_agy() {
     local bak
     sichern "$resolved" "$ts"
     bak="$SICHERN_BAK"
-    chmod --reference="$resolved" "$tmp" || die "chmod fehlgeschlagen: $tmp"
+    kopiere_rechte "$resolved" "$tmp"
     mv "$tmp" "$resolved" || die "mv fehlgeschlagen: $resolved"
     tmp=""
     echo "Angewendet. Sicherung: $bak"
@@ -893,7 +1054,7 @@ cmd_rueckbau() {
     sichern "$claude_resolved" "$rueck_ts"
     rueckbau_tmp=$(mktemp "${claude_resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
     cp -p "$claude_bak" "$rueckbau_tmp" || die "cp fehlgeschlagen: $claude_bak"
-    chmod --reference="$claude_resolved" "$rueckbau_tmp" || die "chmod fehlgeschlagen: $rueckbau_tmp"
+    kopiere_rechte "$claude_resolved" "$rueckbau_tmp"
     mv "$rueckbau_tmp" "$claude_resolved" || die "mv fehlgeschlagen: $claude_resolved"
     rueckbau_tmp=""
     echo "Zurückgespielt: $claude_resolved"
@@ -903,7 +1064,7 @@ cmd_rueckbau() {
     sichern "$agy_resolved" "$rueck_ts"
     rueckbau_tmp=$(mktemp "${agy_resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
     cp -p "$agy_bak" "$rueckbau_tmp" || die "cp fehlgeschlagen: $agy_bak"
-    chmod --reference="$agy_resolved" "$rueckbau_tmp" || die "chmod fehlgeschlagen: $rueckbau_tmp"
+    kopiere_rechte "$agy_resolved" "$rueckbau_tmp"
     mv "$rueckbau_tmp" "$agy_resolved" || die "mv fehlgeschlagen: $agy_resolved"
     rueckbau_tmp=""
     echo "Zurückgespielt: $agy_resolved"
@@ -914,7 +1075,7 @@ cmd_rueckbau() {
     cp -p "$statusline_bak" "$rueckbau_tmp" || die "cp fehlgeschlagen: $statusline_bak"
     if [ -e "$statusline_resolved" ]; then
       sichern "$statusline_resolved" "$rueck_ts"
-      chmod --reference="$statusline_resolved" "$rueckbau_tmp" || die "chmod fehlgeschlagen: $rueckbau_tmp"
+      kopiere_rechte "$statusline_resolved" "$rueckbau_tmp"
     else
       chmod 0755 "$rueckbau_tmp" || die "chmod fehlgeschlagen: $rueckbau_tmp"
     fi
