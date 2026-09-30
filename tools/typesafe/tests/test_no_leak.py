@@ -210,8 +210,20 @@ class TestMaskThenCut(_NamesFileMixin, unittest.TestCase):
                 self.assertNotIn(frag, rec.calls[0])
 
 
+# Built from parts so this test file's own diff carries no real-looking secret.
+REAL_KEY_LINE = "api" + '_key = "sk-live-' + '4f9a8b7c6d5e4f3a2b1c"'
+REAL_BEARER_LINE = "Authorization: " + "Bearer " + "eyJhbGciOiJIUzI1NiJ9" + "abcdef123456"
+GO_CODE_LINES = [
+    '// Laufs (seitenToken == "").',
+    'if err != nil && seitenToken == "" {',
+    'token = s.Weiter',
+    'req.Header.Set("Authorization", "Bearer " + token)',
+    'bearer := "Bearer " + tok',
+]
+
+
 class TestCommitCheckLocalLeak(unittest.TestCase):
-    """A keyword secret in the diff is a finding even without a key (fail-open mode)."""
+    """A real-looking secret in the diff is a finding even without a key (fail-open mode)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="typesafe-commitcheck-")
@@ -243,7 +255,7 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
 
     def test_removing_a_secret_does_not_block(self):
         # Built from parts so this very test file adds no keyword secret in its diff.
-        self.run_check("api" + "_key=wachWertEpsilon\n")
+        self.run_check(REAL_KEY_LINE + "\n")
         ident = ["-c", "user.name=t", "-c", "user.email=t" + "@" + "t.invalid"]
         subprocess.run(["git", "-C", self.repo, *ident, "commit", "-q", "-m", "seed"], check=True)
         r = self.run_check("retries = 3\n", msg="fix: drop the leaked value")
@@ -304,10 +316,37 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_api_key_without_key_blocks(self):
-        r = self.run_check("api_key=wachWertDelta\n")
+        r = self.run_check(REAL_KEY_LINE + "\n")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("ABBRUCH", r.stdout)
-        self.assertNotIn("wachWertDelta", r.stdout)
+        self.assertNotIn("4f9a8b7c6d5e4f3a2b1c", r.stdout)
+
+    def test_bearer_literal_without_key_blocks(self):
+        r = self.run_check(REAL_BEARER_LINE + "\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_go_code_with_token_names_passes(self):
+        r = self.run_check("\n".join(GO_CODE_LINES) + "\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_local_alarm_rules(self):
+        mod = load_tool("ts-commit-check")
+        quiet = GO_CODE_LINES + [
+            'api_key = ""', 'api_key = "<redacted>"', 'token = "xxxxxxxxxxxxxxxx"',
+            'password = "${DB_PASSWORD_VALUE}"', 'secret = "REPLACE_ME_BEFORE_USE"',
+            'token := os.Getenv("SERVICE_TOKEN")', 'token: see the setup guide',
+            'token = "Bitte Token eingeben"', 'pageToken = nextPageTokenFromResponse2',
+            "Basic authentication", 'password = "hunter2"']
+        loud = [REAL_KEY_LINE, REAL_BEARER_LINE,
+                '"to' + 'ken": "abcd1234efgh5678"',
+                "API" + "_KEY=sk_live_4f9a8b7c6d5e4f3a2b",
+                "Basic " + "dXNlcjpwYXNzd29yZDEyMzQ="]
+        for line in quiet:
+            with self.subTest(quiet=line):
+                self.assertFalse(mod.local_alarm(mod.alarm_view(line)))
+        for line in loud:
+            with self.subTest(loud=line):
+                self.assertTrue(mod.local_alarm(mod.alarm_view(line)))
 
     def test_clean_diff_without_key_passes(self):
         r = self.run_check("retries = 3\n")
@@ -316,7 +355,7 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
     def test_json_carries_leak_prob(self):
         mod = load_tool("ts-commit-check")
         with mock.patch.object(tc, "post", Recorder()):
-            res = mod.check_commit("feat: config", "+api_key=wachWertDelta\n", "config.py | 1 +")
+            res = mod.check_commit("feat: config", "+" + REAL_KEY_LINE + "\n", "config.py | 1 +")
         self.assertEqual(res["status"], "fail_open")
         self.assertEqual(res["leak_prob"], 1.0)
 
