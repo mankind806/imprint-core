@@ -219,6 +219,11 @@ GO_CODE_LINES = [
     'token = s.Weiter',
     'req.Header.Set("Authorization", "Bearer " + token)',
     'bearer := "Bearer " + tok',
+    # synthetic fixtures from an OAuth adapter test (_test.go)
+    '[]byte(`{"client_id": "synth-client-id", "client_secret": "synth-secret"}`)',
+    '"access_token": "gueltiger-access-token",',
+    '"refresh_token": "synth-refresh",',
+    'req.Header.Set("Authorization", "Bearer gueltiger-access-token")',
 ]
 
 
@@ -336,11 +341,21 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
             'password = "${DB_PASSWORD_VALUE}"', 'secret = "REPLACE_ME_BEFORE_USE"',
             'token := os.Getenv("SERVICE_TOKEN")', 'token: see the setup guide',
             'token = "Bitte Token eingeben"', 'pageToken = nextPageTokenFromResponse2',
-            "Basic authentication", 'password = "hunter2"']
+            "Basic authentication", 'password = "hunter2"',
+            'token = "aaaa1111aaaa1111"',  # 12+ chars with digits, entropy 1.0
+            'token = "risk-level-medium"', 'token = "task-list-overview"',  # "sk-" mid-word 'token = "fake-4f9a8b7c6d5e4f3a2b1c"',
+            'api_key = "beispiel-Schluessel-2024"']
+        # Built from parts so this test file's own diff carries none of them whole.
         loud = [REAL_KEY_LINE, REAL_BEARER_LINE,
                 '"to' + 'ken": "abcd1234efgh5678"',
                 "API" + "_KEY=sk_live_4f9a8b7c6d5e4f3a2b",
-                "Basic " + "dXNlcjpwYXNzd29yZDEyMzQ="]
+                "Basic " + "dXNlcjpwYXNzd29yZDEyMzQ=",
+                '"client_' + 'secret": "GOCSPX-' + '4f9a8b7c6d5e4f3a2b1c"',
+                '"refresh_' + 'token": "1//' + '0gAbCdEf123456"',
+                '"api_' + 'key": "k9Xq2mV7' + 'pL4rT8wZ3nB6"',
+                '"to' + 'ken": "synth-ghp_' + '4f9a8b7c6d5e4f3a2b1c0d9e"',
+                '"to' + 'ken": "ghp_' + 'test"',  # known prefix at the start: always
+                'token = "fake-' + 'glpat-4f9a8b7c6d5e"']
         for line in quiet:
             with self.subTest(quiet=line):
                 self.assertFalse(mod.local_alarm(mod.alarm_view(line)))
