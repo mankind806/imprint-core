@@ -19,6 +19,8 @@ import importlib.util
 import io
 import json
 import os
+import random
+import string
 import subprocess
 import sys
 import tempfile
@@ -44,6 +46,12 @@ CLASSES = {
     "street": ("Wachtelweg 17", ["Wachtelweg"]),
     "plz_ort": ("54321 Wachtstadt", ["54321", "Wachtstadt"]),
     "token": ("Zq7xK9pL2mN4vB8cR1tY6wE3", ["Zq7xK9pL2mN4vB8cR1tY6wE3", "Zq7xK9pL2mN4"]),
+    # built from parts so this file's own diff carries none of them whole
+    "pw_quoted": ("pass" + 'word = "mein geheimes Passwort 2024"', ["geheimes", "Passwort 2024"]),
+    "db_pass": ("DB_PA" + "SS=Hunter" + "2024Secret!", ["Hunter2024"]),
+    "aws_key_id": ("Schlüssel-ID AKIA" + "Q7X2M4P9R3T6W8Y1 im Log", ["Q7X2M4P9R3T6W8Y1"]),
+    "iban": ("DE89 3704 0044 0532 0130 00", ["3704 0044", "0532 0130"]),
+    "phone": ("+49 221 12345678", ["12345678", "221 1234"]),
 }
 NAMES = ("Wanda Wachtmeister", "Max Mustermann", "Erika Musterfrau")
 
@@ -225,6 +233,20 @@ GO_CODE_LINES = [
     '"refresh_token": "synth-refresh",',
     'req.Header.Set("Authorization", "Bearer gueltiger-access-token")',
 ]
+AT = "@"
+RESERVED_LINES = [f'owner = "nutzer{AT}example.com"', f'fallback = "a{AT}b.test"',
+                  f'relay = "x{AT}mail.example.com"']
+NOREPLY_TRAILERS = (f"Co-Authored-By: Claude <noreply{AT}anthropic.com>\n"
+                    f"Co-Authored-By: Gemini <noreply{AT}google.com>\n"
+                    "Assisted-by: Claude Code")
+GHP = "ghp_" + "4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e"
+FREE_PREFIX_LINES = [  # known token prefixes without a secret keyword in front
+    'auth: "' + GHP + '"',
+    'client = OpenAI("sk-' + 'proj-4f9a8b7c6d5e4f3a2b1c")',
+    'slack = WebClient("xoxb-' + '1234567890-abcdefghij")',
+    "Authorization: token " + GHP,
+    'stripe.api = "sk_' + 'test_51Hx4f9a8b7c6d5e"',
+]
 
 
 class TestCommitCheckLocalLeak(unittest.TestCase):
@@ -244,13 +266,105 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         self.repo = os.path.join(self.tmp.name, "repo")
         subprocess.run(["git", "init", "-q", self.repo], check=True)
 
-    def run_check(self, content, msg="feat: add config"):
+    def run_check(self, content, msg="feat: add config", path="config.py"):
+        full = os.path.join(self.repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as f:
+            f.write(content)
+        subprocess.run(["git", "-C", self.repo, "add", path], check=True)
+        return self.run_tool("ts-commit-check", "--cached", "--msg", msg)
+
+    def run_tool(self, tool, *args):
+        return subprocess.run([os.path.join(BIN, tool), *args, "--cwd", self.repo],
+                              capture_output=True, text=True, timeout=60, env=self.env)
+
+    def commit(self, content, msg):
         with open(os.path.join(self.repo, "config.py"), "w") as f:
             f.write(content)
+        ident = ["-c", "user.name=t", "-c", "user.email=t" + AT + "t.invalid"]
         subprocess.run(["git", "-C", self.repo, "add", "config.py"], check=True)
-        return subprocess.run([os.path.join(BIN, "ts-commit-check"), "--cached", "--msg",
-                               msg, "--cwd", self.repo],
-                              capture_output=True, text=True, timeout=30, env=self.env)
+        subprocess.run(["git", "-C", self.repo, *ident, "commit", "-q", "-m", msg], check=True)
+
+    # --- regression suite: these must stay exit 0 ---
+    def test_regression_suite_passes(self):
+        r = self.run_check("\n".join(GO_CODE_LINES + RESERVED_LINES) + "\n",
+                           msg="feat: adapter\n\nBody.\n\n" + NOREPLY_TRAILERS)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_regression_empty_commit_with_trailer_passes(self):
+        r = self.run_tool("ts-commit-check", "--cached", "--msg", "docs: x\n\n" + NOREPLY_TRAILERS)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # --- blind round 2 ---
+    def test_real_address_in_trailer_blocks(self):
+        r = self.run_check("retries = 3\n", msg=f"docs: x\n\nCo-Authored-By: Max <max.privat{AT}gmail.com>")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_address_in_file_name_blocks(self):
+        r = self.run_check("hallo\n", path=f"max.mustermann{AT}gmx.de/notizen/liste.txt")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_range_mode_checks_every_commit(self):
+        self.commit("retries = 3\n", "chore: base")
+        self.commit(REAL_KEY_LINE + "\n", "feat: key")
+        self.commit("retries = 3\n", "fix: drop key")
+        r = self.run_tool("ts-commit-check", "HEAD~2..HEAD")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        r = self.run_tool("ts-commit-check", "HEAD~1..HEAD")  # only the removal
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_added_line_starting_with_plus_plus_counts(self):
+        diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n++" + REAL_KEY_LINE + "\n"
+        self.assertTrue(tc.leak_found("feat: x", diff, "x"))
+        header_only = "diff --git a/x b/x\n--- a/x\n+++ b/" + REAL_KEY_LINE + "\n@@ -0,0 +1 @@\n+ok\n"
+        self.assertFalse(tc.leak_found("feat: x", header_only, "x"))
+
+    def test_known_prefix_without_keyword_blocks(self):
+        for line in FREE_PREFIX_LINES:
+            with self.subTest(line=line):
+                self.assertTrue(tc.local_alarm(tc.alarm_view(line)))
+        r = self.run_check(FREE_PREFIX_LINES[1] + "\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_random_keys_alarm(self):
+        rng = random.Random(20260930)
+        alphabets = {"hex": "0123456789abcdef", "base62": string.ascii_letters + string.digits}
+        for name, alphabet in alphabets.items():
+            for label, lengths in (("len12", [12]), ("len12-64", list(range(12, 65)))):
+                hits = 0
+                for _ in range(2000):
+                    v = "".join(rng.choice(alphabet) for _ in range(rng.choice(lengths)))
+                    hits += tc.local_alarm('api_key = "' + v + '"')
+                with self.subTest(alphabet=name, lengths=label):
+                    self.assertGreaterEqual(hits / 2000, 0.99, f"{name} {label}: {hits}/2000")
+
+    def test_password_rules(self):
+        loud = ["pass" + 'word = "Contest-Winner-2024"', "pass" + 'word = "CorrectHorseBatteryStaple"',
+                "db_pa" + 'ss = "mein geheimes Passwort 2024"', "pw" + 'd = "Sommer2024!"',
+                "DB_PA" + "SSWORD=Hunter2024Secret"]
+        quiet = ['password = "synth-password"', 'password_label = "Passwort eingeben"',
+                 'passwordPlaceholder = "Mindestens 8 Zeichen"', 'bypass = "compassionate-mode"',
+                 'pwd := os.Getwd()', 'password := cfg.Password', 'password = ""']
+        for line in loud:
+            with self.subTest(loud=line):
+                self.assertTrue(tc.local_alarm(tc.alarm_view(line)))
+        for line in quiet:
+            with self.subTest(quiet=line):
+                self.assertFalse(tc.local_alarm(tc.alarm_view(line)))
+
+    def test_pr_triage_without_key_reports_local_leak(self):
+        self.commit("retries = 3\n", "chore: base")
+        self.commit(REAL_KEY_LINE + "\n", "feat: key")
+        r = self.run_tool("ts-pr-triage", "HEAD~1..HEAD", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        res = json.loads(r.stdout)
+        self.assertEqual((res["status"], res["leak_prob"]), ("fail_open", 1.0))
+        r = self.run_tool("ts-pr-triage", "HEAD~1..HEAD")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Leak-Verdacht", r.stdout)
+        self.commit("retries = 4\n", "fix: retries")
+        res = json.loads(self.run_tool("ts-pr-triage", "HEAD~1..HEAD", "--json").stdout)
+        self.assertEqual((res["status"], res["leak_prob"]), ("fail_open", None))
 
     def test_trailer_address_in_body_does_not_block(self):
         # Built from parts so this very test file carries no address in its diff.
@@ -335,7 +449,6 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_local_alarm_rules(self):
-        mod = load_tool("ts-commit-check")
         quiet = GO_CODE_LINES + [
             'api_key = ""', 'api_key = "<redacted>"', 'token = "xxxxxxxxxxxxxxxx"',
             'password = "${DB_PASSWORD_VALUE}"', 'secret = "REPLACE_ME_BEFORE_USE"',
@@ -343,8 +456,9 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
             'token = "Bitte Token eingeben"', 'pageToken = nextPageTokenFromResponse2',
             "Basic authentication", 'password = "hunter2"',
             'token = "aaaa1111aaaa1111"',  # 12+ chars with digits, entropy 1.0
-            'token = "risk-level-medium"', 'token = "task-list-overview"',  # "sk-" mid-word 'token = "fake-4f9a8b7c6d5e4f3a2b1c"',
-            'api_key = "beispiel-Schluessel-2024"']
+            'token = "risk-level-medium"', 'token = "task-list-overview"',  # "sk-" mid-word
+            'token = "fake-4f9a8b7c6d5e4f3a2b1c"', 'api_key = "beispiel-Schluessel-2024"',
+            'token_type = "access_token_type"', 'npm_config_cache = "/tmp/npm-cache"']
         # Built from parts so this test file's own diff carries none of them whole.
         loud = [REAL_KEY_LINE, REAL_BEARER_LINE,
                 '"to' + 'ken": "abcd1234efgh5678"',
@@ -355,13 +469,21 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
                 '"api_' + 'key": "k9Xq2mV7' + 'pL4rT8wZ3nB6"',
                 '"to' + 'ken": "synth-ghp_' + '4f9a8b7c6d5e4f3a2b1c0d9e"',
                 '"to' + 'ken": "ghp_' + 'test"',  # known prefix at the start: always
-                'token = "fake-' + 'glpat-4f9a8b7c6d5e"']
+                'token = "fake-' + 'glp' + 'at-4f9a8b7c6d5e"',
+                'to' + 'ken = "sk_' + 'test_51Hx4f9a8b7c6d5e"',
+                "aws_id = AKIA" + "Q7X2M4P9R3T6W8Y1"]
         for line in quiet:
             with self.subTest(quiet=line):
-                self.assertFalse(mod.local_alarm(mod.alarm_view(line)))
+                self.assertFalse(tc.local_alarm(tc.alarm_view(line)))
         for line in loud:
             with self.subTest(loud=line):
-                self.assertTrue(mod.local_alarm(mod.alarm_view(line)))
+                self.assertTrue(tc.local_alarm(tc.alarm_view(line)))
+
+    def test_mask_phone_iban_no_false_hits(self):
+        text = "Datum 01.01.2024, 04:06 Uhr, Version 0.12.3, PR #124, Port 8080"
+        masked, counts = tc.mask_detail(text)
+        self.assertEqual(masked, text)
+        self.assertEqual((counts["phone"], counts["iban"]), (0, 0))
 
     def test_clean_diff_without_key_passes(self):
         r = self.run_check("retries = 3\n")

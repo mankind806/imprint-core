@@ -5,6 +5,9 @@ Determines:
  1. risk_level (Score 0..2): 0=reversibel (kein Review), 1=mittel (1 Runde), 2=hoch/Krypto/Auth/Netz (blind bis sauber)
  2. scope_leak (Noul): Änderungen außerhalb des deklarierten Auftrags?
  3. leak (Noul + lokal): Reale Tokens, Keys oder PII in Code oder Testdaten?
+    Lokal (ts_common.leak_found, jeder Commit des Bereichs einzeln) auch ohne Key:
+    ein Treffer setzt leak_prob auf 1.0. Ohne Key oder bei API-Fehler fail-open:
+    status "fail_open", exit 0, der lokale Befund wird trotzdem gemeldet.
  4. tests_present (Noul): Ausreichende Tests für neue Logik vorhanden?
 """
 import argparse
@@ -73,6 +76,8 @@ def evaluate_diff(commit_range, cwd=None):
         diff_text = diff_text[:12000] + "\n... [diff truncated for triage]"
     hits = tc.add_counts(h1, h2, h3)
     local_hits = sum(hits.values())
+    # Local leak alarm per commit (rules in ts_common), independent of TypeSafe.
+    local_leak = any(tc.leak_found(*u) for u in tc.commit_units(commit_range, cwd=cwd))
     paths = run_cmd(["git", "diff", "--name-only", commit_range], cwd=cwd).splitlines()
 
     state = {
@@ -82,18 +87,19 @@ def evaluate_diff(commit_range, cwd=None):
     }
 
     answers = tc.post(state, QUESTIONS)
-    if not answers:
-        return {"status": "error", "message": "TypeSafe API unreachable or key missing"}
-
-    risk = tc.score_level(answers, "risk")
+    risk = tc.score_level(answers, "risk") if answers else None
     if risk is None:
-        return {"status": "error", "message": "TypeSafe answer without risk score"}
+        return {"status": "fail_open",
+                "message": "TypeSafe API nicht erreichbar, Key fehlt oder Antwort ohne Risiko (fail-open)",
+                "leak_prob": 1.0 if local_leak else None,
+                "masked_locally": local_hits,
+                "masked_detail": hits}
     risk_lvl, risk_conf = risk
     scope_leak = tc.noul(answers, "scope_leak")
     leak_prob = tc.noul(answers, "leak") or 0.0
-    # only keyword secrets and emails raise the alarm; opaque strings (hashes, long
-    # identifiers) are masked but not reported (retro test: 24/35 false alarms)
-    if hits["secret_kw"] or hits["email"]:
+    # Local alarm only for addresses and real-looking secrets; opaque strings (hashes,
+    # long identifiers) are masked but not reported (retro test: 24/35 false alarms).
+    if local_leak:
         leak_prob = 1.0
 
     # risk floor: only tightens
@@ -144,9 +150,12 @@ def main():
         print(json.dumps(res, indent=2))
         return
 
-    if res["status"] != "ok":
-        print(f"Fehler: {res.get('message')}")
-        sys.exit(1)
+    if res["status"] == "fail_open":
+        print(f"Hinweis: {res['message']}")
+        if res["leak_prob"] is not None:
+            print("⚠️ Lokaler Leak-Verdacht: Secret oder E-Mail-Adresse in Nachricht, neuen "
+                  "Diff-Zeilen oder Dateinamen eines Commits. Bitte manuell prüfen.")
+        sys.exit(0)
 
     print("═══════════════════════════════════════════════════════════════")
     print(f" TypeSafe PR Triage für Commit-Range: {args.range}")
@@ -158,7 +167,7 @@ def main():
     print(f" • Scope-Verletzung  : Wahrscheinlichkeit {fmt(res['scope_leak_prob'])}")
     print(f" • Secret/PII Leak   : Wahrscheinlichkeit {res['leak_prob']:.2f}"
           f" (lokal maskiert: {res['masked_locally']}; {tc.format_counts(res['masked_detail'])};"
-          f" Alarm nur bei Schlüsselwort/E-Mail)")
+          f" lokaler Alarm nur bei Adresse oder echt wirkendem Secret)")
     print(f" • Tests vorhanden   : Wahrscheinlichkeit {fmt(res['tests_present_prob'])}")
     print("═══════════════════════════════════════════════════════════════")
 

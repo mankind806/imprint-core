@@ -2,7 +2,9 @@
 
 The API key is never printed, logged or written anywhere.
 """
+import collections
 import json
+import math
 import os
 import re
 import subprocess
@@ -80,7 +82,7 @@ def post(state, questions, timeout=TIMEOUT):
 
 # Masking before anything leaves the machine (user decision 2026-09-29: only masked
 # data goes to TypeSafe). Pattern filter, not a proof: unusual secrets and names slip through.
-DEFAULT_CATEGORIES = ("secret_kw", "email", "address", "name", "opaque")
+DEFAULT_CATEGORIES = ("secret_kw", "email", "address", "name", "opaque", "iban", "phone")
 
 _STREET_SUFFIXES = r"(?:stra[ßs]e|str\b\.?|weg|gasse|platz|allee|ring|damm|ufer|chaussee|zeile|stieg|gässchen|pfad|markt)"
 _PAT_STREET = (
@@ -97,10 +99,31 @@ _PAT_PLZ = (
 )
 RX_ADDRESS = re.compile(rf"{_PAT_STREET}|{_PAT_PLZ}")
 RX_BEARER = re.compile(r"(?i)(\b(?:bearer|basic)\s+)\S+")
+_MASK_KW = (r"(?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential"
+            r"|private[_-]?key|access[_-]?key|auth(?:orization)?)")
+# A quoted value is masked as a whole, whitespace included; an unquoted one up to the
+# next whitespace/quote/comma/semicolon.
 RX_KEY_VAL = re.compile(
-    r"(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|authorization)[\w.-]*[\"']?\s*[=:]\s*[\"']?)(?!<redacted>)[^\s\"',;]+"
+    r"(?i)(" + _MASK_KW + r"[\w.-]*[\"']?\s*[=:]\s*)"
+    r"(?:(?P<q>[\"'])(?!<redacted>(?P=q))[^\"'\n]+(?P=q)|[\"']?(?!<redacted>)[^\s\"',;]+)"
 )
+
+
+def _key_val_repl(m):
+    q = m.group("q") or ""
+    return m.group(1) + q + "<redacted>" + q
+
+
 RX_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+RX_IBAN = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Za-z0-9])")
+# German numbers: +49 or a leading 0, then at least 8 more digits, separators allowed.
+RX_PHONE = re.compile(r"(?<![\w+.])(?:\+49|0)(?:[ \t./()-]*\d){8,}(?!\d)")
+# Known token prefixes (GitHub, OpenAI/Stripe, Slack, AWS, Google, GitLab, npm).
+KNOWN_PREFIX = (r"(?:ghp_|gho_|ghs_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|pk_live_"
+                r"|xox[abprs]-|AKIA|ASIA|AIza|GOCSPX-|ya29\.|1//|eyJ|glpat-|npm_)")
+_TOKEN_CHARS = r"[A-Za-z0-9_\-./+=]"
+RX_KNOWN_TOKEN = re.compile(r"(?<![A-Za-z0-9])" + KNOWN_PREFIX + _TOKEN_CHARS + r"{8,}")
+RX_AWS_KEY_ID = re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])")
 RX_OPAQUE = re.compile(r"(?=[A-Za-z0-9_\-+/]*\d)(?=[A-Za-z0-9_\-+/]*[A-Za-z])[A-Za-z0-9_\-+/]{24,}={0,2}")
 
 NAMES_FILE = os.environ.get("TYPESAFE_NAMES_FILE", os.path.expanduser("~/.config/typesafe/names.txt"))
@@ -133,12 +156,16 @@ def _update_mask_res(name_rx=None):
     global MASK_RES
     base = [
         ("secret_kw", RX_BEARER, r"\1<redacted>"),
-        ("secret_kw", RX_KEY_VAL, r"\1<redacted>"),
+        ("secret_kw", RX_KEY_VAL, _key_val_repl),
         ("email", RX_EMAIL, "<email>"),
+        ("iban", RX_IBAN, "<iban>"),
+        ("phone", RX_PHONE, "<phone>"),
         ("address", RX_ADDRESS, "<address>"),
     ]
     if name_rx is not None:
         base.append(("name", name_rx, "<name>"))
+    base.append(("opaque", RX_AWS_KEY_ID, "<redacted>"))
+    base.append(("opaque", RX_KNOWN_TOKEN, "<redacted>"))
     base.append(("opaque", RX_OPAQUE, "<redacted>"))
     MASK_RES = base
 
@@ -175,7 +202,7 @@ _update_mask_res(get_name_regex())
 
 
 def mask_detail(text):
-    """(masked text, {"secret_kw": n, "email": n, "address": n, "name": n, "opaque": n}); patterns run in this order."""
+    """(masked text, {category: n} for DEFAULT_CATEGORIES); patterns run in MASK_RES order."""
     get_name_regex()
     counts = {cat: 0 for cat in DEFAULT_CATEGORIES}
     for cat, rx, repl in MASK_RES:
@@ -190,7 +217,7 @@ def mask(text):
     return text, sum(counts.values())
 
 
-CATEGORY_LABELS = ("Schlüsselwort", "E-Mail", "Adresse", "Name", "Token")  # same order as DEFAULT_CATEGORIES
+CATEGORY_LABELS = ("Schlüsselwort", "E-Mail", "Adresse", "Name", "Token", "IBAN", "Telefon")  # same order as DEFAULT_CATEGORIES
 
 
 def format_counts(counts):
@@ -206,6 +233,159 @@ def add_counts(*dicts):
         for k, v in d.items():
             out[k] = out.get(k, 0) + v
     return out
+
+
+# --- Local leak alarm (ts-commit-check, ts-pr-triage) --------------------------------
+# Independent of the masking above: the masking toward TypeSafe stays generous, this
+# decides whether a change is BLOCKED locally, so it only fires on values that really
+# look like a secret or a personal address. Rules, in short:
+#  - an email address, unless no-reply (NOREPLY_RE) or on a reserved domain
+#    (RFC 2606/6761: example.com/.org/.net, *.example, *.test, *.invalid, *.localhost);
+#  - a known token prefix at a segment start with >= 8 token characters behind it
+#    (at least one digit among them), with or without a keyword; AWS key IDs;
+#  - after a keyword (api_key, token, secret, credential, private_key, access_key,
+#    authorization) and = := or :, a quoted literal that starts with a known prefix,
+#    or one of >= 12 characters without whitespace, with a digit or mixed case and a
+#    Shannon entropy >= min(3.0, 2.2 + 0.025 * (length - 12)) bits per character;
+#    an unquoted value of >= 20 characters with letters and >= 4 digits;
+#  - after a password keyword (pass, pwd, passwd, password, passwort, passphrase, as a
+#    word of the key name, not label/hint/placeholder keys): any quoted value of >= 8
+#    characters, any unquoted one of >= 8 with a digit and no dot;
+#  - Bearer/Basic with a literal of >= 16 token characters.
+# Never an alarm without a known prefix: placeholders (<...>, ${...}, os.Getenv,
+# REPLACE_ME, CHANGEME) and values with a fixture segment (a word that starts with
+# synth, fake, dummy, beispiel, example, test, platzhalter, changeme, gueltig,
+# ungueltig or xxx; "Contest" is no fixture segment). No hit for comparisons (== !=),
+# identifiers and expressions (s.Weiter, "Bearer " + tok) and empty strings.
+NOREPLY_RE = re.compile(
+    r"(?i)(?<![\w.+-])(?:noreply@anthropic\.com|noreply@google\.com|noreply@github\.com"
+    r"|[\w.+-]+@users\.noreply\.github\.com)(?!\.?[\w-])")
+RESERVED_DOMAIN_RE = re.compile(
+    r"(?i)^(?:[\w-]+\.)*(?:example\.(?:com|org|net)|[\w-]+\.(?:example|test|invalid|localhost))$")
+_PREFIX_AT_START_RE = re.compile(KNOWN_PREFIX)
+_PREFIX_AT_SEGMENT_RE = re.compile(r"(?<=[-_./:=+])" + KNOWN_PREFIX + _TOKEN_CHARS + r"{8,}")
+_FREE_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])" + KNOWN_PREFIX + r"(?P<body>" + _TOKEN_CHARS + r"{8,})")
+_PW_KW = r"(?<![A-Za-z])(?:pass(?:word|wort|wd|phrase)?|pwd)(?![a-z])"
+_OTHER_KW = r"(?:api[_-]?key|token|secret|credential|private[_-]?key|access[_-]?key|authorization)"
+LOCAL_KV_RE = re.compile(
+    r"(?i)(?P<key>(?:(?P<pw>" + _PW_KW + r")|" + _OTHER_KW + r")[\w.-]*)[\"']?[ \t]*(?::=|=(?!=)|:(?!=))[ \t]*"
+    r"(?:(?P<q>[\"'])(?P<qv>[^\"'\n]*)(?P=q)|(?P<uv>[A-Za-z0-9_\-./+=]+))")
+_LABEL_KEY_RE = re.compile(r"(?i)label|hint|placeholder|prompt|text|title|message|msg|field|error|input")
+LOCAL_BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)[ \t]+(?P<v>[A-Za-z0-9_\-./+=]{16,})")
+_PLACEHOLDER_RE = re.compile(r"(?i)^<[^>]*>$|\$\{|os\.getenv")
+_FIXTURE_MARKERS = ("synth", "fake", "dummy", "beispiel", "example", "test", "platzhalter",
+                    "changeme", "gueltig", "ungueltig", "xxx")
+_SEGMENT_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
+
+
+def _alarm_address(m):
+    """'' for an exempt address (no-reply or reserved domain), else the address."""
+    addr = m.group(0).rstrip(".-")  # RX_EMAIL may take a sentence-final dot along
+    if NOREPLY_RE.fullmatch(addr) or RESERVED_DOMAIN_RE.match(addr.rsplit("@", 1)[1]):
+        return ""
+    return m.group(0)
+
+
+def alarm_view(text):
+    """Text as the local alarm sees it: exempt addresses removed, all else unchanged."""
+    return RX_EMAIL.sub(_alarm_address, text)
+
+
+def _entropy(v):
+    """Shannon entropy in bits per character."""
+    n = len(v)
+    return -sum(c / n * math.log2(c / n) for c in collections.Counter(v).values()) if n else 0.0
+
+
+def _known_prefix(v):
+    return bool(_PREFIX_AT_START_RE.match(v) or _PREFIX_AT_SEGMENT_RE.search(v))
+
+
+def _fixture(v):
+    """Placeholder, or a value with a fixture segment (word starting with a marker)."""
+    if len(set(v)) <= 1 or _PLACEHOLDER_RE.search(v):
+        return True
+    squashed = re.sub(r"[^a-z]", "", v.lower())
+    if "changeme" in squashed or "replaceme" in squashed:
+        return True
+    return any(seg.lower().startswith(_FIXTURE_MARKERS) for seg in _SEGMENT_RE.findall(v))
+
+
+def _looks_random(v):
+    n = len(v)
+    varied = any(c.isdigit() for c in v) or (any(c.islower() for c in v) and any(c.isupper() for c in v))
+    return n >= 12 and varied and _entropy(v) >= min(3.0, 2.2 + 0.025 * (n - 12))
+
+
+def _kv_alarm(m):
+    pw = bool(m.group("pw")) and not _LABEL_KEY_RE.search(m.group("key"))
+    if m.group("q"):
+        v = m.group("qv")
+        if _known_prefix(v):
+            return True
+        if _fixture(v):
+            return False
+        if pw:
+            return len(v) >= 8
+        return not any(c.isspace() for c in v) and _looks_random(v)
+    v = m.group("uv")
+    if _fixture(v) and not _known_prefix(v):
+        return False
+    if pw:
+        return len(v) >= 8 and any(c.isdigit() for c in v) and "." not in v
+    return len(v) >= 20 and any(c.isalpha() for c in v) and sum(c.isdigit() for c in v) >= 4
+
+
+def local_alarm(text):
+    """True if text (already through alarm_view) holds an address or a real-looking secret."""
+    if RX_EMAIL.search(text) or RX_AWS_KEY_ID.search(text):
+        return True
+    if any(any(c.isdigit() for c in m.group("body")) for m in _FREE_PREFIX_RE.finditer(text)):
+        return True
+    if any(_known_prefix(m.group("v")) or not _fixture(m.group("v"))
+           for m in LOCAL_BEARER_RE.finditer(text)):
+        return True
+    return any(_kv_alarm(m) for m in LOCAL_KV_RE.finditer(text))
+
+
+def added_lines(diff_text):
+    """The added lines of a unified diff, without the leading '+'. '+++' is skipped only
+    in file headers (between 'diff ...' and the first '@@'), so an added line that itself
+    starts with '++' still counts. Text without any 'diff ' header counts as one hunk."""
+    out, in_hunk = [], True
+    for line in diff_text.splitlines():
+        if line.startswith("diff "):
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line.startswith("+"):
+            out.append(line[1:])
+    return "\n".join(out)
+
+
+def leak_found(message, diff_text, file_names):
+    """Local leak alarm for one change: message, added diff lines and file names."""
+    return any(local_alarm(alarm_view(t)) for t in (message or "", added_lines(diff_text or ""), file_names or ""))
+
+
+def _git(args, cwd=None):
+    try:
+        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=20)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def commit_units(rng, cwd=None):
+    """(message, diff, file names) per commit of a range, oldest first, each diff
+    against the first parent: a value added in one commit and removed in the next is
+    still in history, so the local alarm must see every commit, not the net diff."""
+    units = []
+    for sha in _git(["rev-list", "--reverse", rng], cwd).split():
+        units.append((_git(["log", "-1", "--format=%B", sha], cwd),
+                      _git(["show", "--format=", "--no-color", "--diff-merges=first-parent", "-p", sha], cwd),
+                      _git(["show", "--format=", "--name-only", "--diff-merges=first-parent", sha], cwd)))
+    return units
 
 
 def noul(answers, qid):

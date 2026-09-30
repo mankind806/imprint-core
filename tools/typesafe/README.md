@@ -85,13 +85,30 @@ Repository-Wurzelverzeichnis ([`LICENSE`](../../LICENSE)); dieses Verzeichnis ha
 
 ## Datenschutz & Maskierung
 
-Alle Daten werden **vor dem Verlassen des Rechners** lokal über `ts_common.mask_detail` gefiltert:
-- Passwörter, API-Keys, Bearer-Tokens und geheime Schlüsselwörter werden durch `<redacted>` ersetzt.
-- E-Mail-Adressen werden durch `<email>` ersetzt.
-- Namen (aus `TYPESAFE_NAMES_FILE`, Standard `~/.config/typesafe/names.txt`, nicht in Git) und
-  Adressen (Straße+Hausnummer, PLZ+Ort) werden durch `<name>`/`<address>` ersetzt.
-- Zeichenketten ab 24 Zeichen mit Ziffern und Buchstaben (Hashes, Tokens) werden maskiert.
-- API-Schlüssel verbleibt im lokalen GNOME-Schlüsselbund (`secret-tool lookup service typesafe key api`).
+Vor dem Senden an TypeSafe maskiert `ts_common.mask_detail` den Text lokal; `ts_common.post`
+maskiert zusätzlich jeden String-Wert von `state` und `questions` und folgt keinen Redirects.
+Das ist ein Musterfilter, keine Garantie. Die Tests in `tests/` belegen diese Fälle:
+
+| Ersetzt durch | Erkannt wird |
+|---|---|
+| `<redacted>` | Wert nach `api_key`, `token`, `secret`, `pass`/`password`/`passwd`/`passphrase`/`pwd`, `credential`, `private_key`, `access_key`, `auth`/`authorization` (mit `=` oder `:`; in Anführungszeichen komplett, auch mit Leerzeichen), Bearer-/Basic-Werte, bekannte Token-Präfixe (`ghp_`, `sk-`, `xoxb-`, `GOCSPX-`, …), AWS-Schlüssel-IDs (`AKIA`/`ASIA` + 16), Zeichenketten ab 24 Zeichen mit Ziffern und Buchstaben |
+| `<email>` | E-Mail-Adressen |
+| `<iban>`, `<phone>` | IBANs; deutsche Telefonnummern (`+49` oder führende `0`, mindestens 8 weitere Ziffern) |
+| `<address>`, `<name>` | Straße + Hausnummer, PLZ + Ort; Namen aus `TYPESAFE_NAMES_FILE` (Standard `~/.config/typesafe/names.txt`, nicht in Git) |
+
+Nicht erkannt werden zum Beispiel Namen außerhalb der Namensdatei, Adressen ohne Hausnummer
+oder PLZ, ausländische Telefonnummern und kurze Geheimnisse ohne Schlüsselwort. Der API-Schlüssel
+bleibt im lokalen Schlüsselbund (`secret-tool lookup service typesafe key api`).
+
+## Lokaler Leak-Block (auch ohne Key)
+
+`ts-commit-check` blockt (exit 1) auch ohne TypeSafe-Key, wenn Nachricht, neue Diff-Zeilen
+oder Dateinamen eine E-Mail-Adresse oder einen echt wirkenden Secret-Wert enthalten; die Regeln
+stehen in `ts_common.py` bei `local_alarm`. Ausgenommen sind No-Reply-Adressen, reservierte
+Domains (`example.com`, `*.example`, `*.test`, `*.invalid`, `*.localhost`), Platzhalter und
+Fixture-Werte (`synth-…`, `fake_…`, `…-test-…`). Im Bereichsmodus prüft der lokale Alarm jeden
+Commit einzeln; TypeSafe sieht den Netto-Diff und die letzte Nachricht.
+`ts-pr-triage` meldet einen lokalen Treffer ohne Key als Hinweis und bleibt fail-open (exit 0).
 
 ## Konfiguration (projektspezifisch, keine harten Pfade/IDs im Code)
 
