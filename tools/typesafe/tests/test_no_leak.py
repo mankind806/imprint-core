@@ -52,6 +52,7 @@ CLASSES = {
     "aws_key_id": ("Schlüssel-ID AKIA" + "Q7X2M4P9R3T6W8Y1 im Log", ["Q7X2M4P9R3T6W8Y1"]),
     "iban": ("DE89 3704 0044 0532 0130 00", ["3704 0044", "0532 0130"]),
     "phone": ("+49 221 12345678", ["12345678", "221 1234"]),
+    "pw_apostrophe": ("pass" + "word = \"Tom's Hund 2024\"", ["Hund 2024", "Tom's"]),
 }
 NAMES = ("Wanda Wachtmeister", "Max Mustermann", "Erika Musterfrau")
 
@@ -337,8 +338,11 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
                "Co-authored-by: Codex <noreply" + AT + "openai.com>\nReviewed-by: dev" + AT + "firma-intern.de")
         r = self.run_check("retries = 3\n", msg=msg)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        # not declared in this clone: still an address
+        # the Antigravity bot identity is a no-reply identity like Codex's
         r = self.run_check("retries = 4\n", msg="feat: y\n\nCo-authored-by: Antigravity <antigravity" + AT + "google.com>")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # any other undeclared address still counts
+        r = self.run_check("retries = 5\n", msg="feat: z\n\nCo-authored-by: Anna <anna" + AT + "google.com>")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_units_calendar_ids_and_word_tokens_pass(self):
@@ -408,12 +412,19 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
                     self.assertGreaterEqual(hits / 2000, 0.99, f"{name} {label}: {hits}/2000")
 
     def test_password_rules(self):
-        loud = ["pass" + 'word = "Contest-Winner-2024"', "pass" + 'word = "CorrectHorseBatteryStaple"',
+        # password keys: no fixture markers; >= 8 chars with a letter and a digit or special char
+        loud = ["pass" + 'word = "Contest-Winner-2024"', "pass" + 'word = "synth-password"',
                 "db_pa" + 'ss = "mein geheimes Passwort 2024"', "pw" + 'd = "Sommer2024!"',
-                "DB_PA" + "SSWORD=Hunter2024Secret"]
-        quiet = ['password = "synth-password"', 'password_label = "Passwort eingeben"',
+                "DB_PA" + "SSWORD=Hunter2024Secret", "DB_PA" + "SSWORD=Geheim2024",
+                "pass" + 'wort = "Schluessel#2024"', "pass" + 'word = "Test1234!"',
+                "pass" + 'word = "Tom' + "'" + 's Hund 2024"', "pass" + "phrase: 'sag \"Hallo\" 2024'"]
+        quiet = ['password_label = "Passwort eingeben"', 'password = "${DB_PASSWORD_VALUE}"',
                  'passwordPlaceholder = "Mindestens 8 Zeichen"', 'bypass = "compassionate-mode"',
-                 'pwd := os.Getwd()', 'password := cfg.Password', 'password = ""']
+                 'pwd := os.Getwd()', 'password := cfg.Password', 'password = ""',
+                 "pass" + 'word = "CorrectHorseBatteryStaple"',  # letters only
+                 'password = "hunter2"',  # 7 characters
+                 "print('PASS: missing/unreadable login status stops execution')"]  # test status
+        loud.append("PA" + "SS=Geheim2024")
         for line in loud:
             with self.subTest(loud=line):
                 self.assertTrue(tc.local_alarm(tc.alarm_view(line)))
@@ -533,8 +544,8 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
                 '"to' + 'ken": "abcd1234efgh5678"',
                 "API" + "_KEY=sk_" + "live_4f9a8b7c6d5e4f3a2b",
                 "Basic " + "dXNlcjpwYXNzd29yZDEyMzQ=",
-                '"client_' + 'secret": "GOCSPX-' + '4f9a8b7c6d5e4f3a2b1c"',
-                '"refresh_' + 'token": "1//' + '0gAbCdEf123456"',
+                '"client_' + 'secret": "GOC' + 'SPX-4f9a8b7c6d5e4f3a2b1c"',
+                '"refresh_' + 'token": "1/' + '/0gAbCdEf123456"',
                 '"api_' + 'key": "k9Xq2mV7' + 'pL4rT8wZ3nB6"',
                 '"to' + 'ken": "synth-ghp_' + '4f9a8b7c6d5e4f3a2b1c0d9e"',
                 '"to' + 'ken": "ghp_' + 'test"',  # known prefix at the start: always

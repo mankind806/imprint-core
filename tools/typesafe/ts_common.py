@@ -105,12 +105,12 @@ _MASK_KW = (r"(?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd
 # next whitespace/quote/comma/semicolon.
 RX_KEY_VAL = re.compile(
     r"(?i)(" + _MASK_KW + r"[\w.-]*[\"']?\s*[=:]\s*)"
-    r"(?:(?P<q>[\"'])(?!<redacted>(?P=q))[^\"'\n]+(?P=q)|[\"']?(?!<redacted>)[^\s\"',;]+)"
+    r"(?:(?P<dq>\")(?!<redacted>\")[^\"\n]+\"|(?P<sq>')(?!<redacted>')[^'\n]+'|[\"']?(?!<redacted>)[^\s\"',;]+)"
 )
 
 
 def _key_val_repl(m):
-    q = m.group("q") or ""
+    q = m.group("dq") or m.group("sq") or ""
     return m.group(1) + q + "<redacted>" + q
 
 
@@ -255,11 +255,12 @@ def add_counts(*dicts):
 #    Shannon entropy >= min(3.0, 2.2 + 0.025 * (length - 12)) bits per character;
 #    an unquoted value of >= 20 characters with letters and >= 4 digits;
 #  - after a password keyword (pass, pwd, passwd, password, passwort, passphrase, as a
-#    word of the key name, not label/hint/placeholder keys): any quoted value of >= 8
-#    characters, any unquoted one of >= 8 with a digit and no dot, unless the value
-#    STARTS with a fixture segment ("synth-password");
+#    word of the key name, not label/hint/placeholder keys): any value of >= 8
+#    characters with a letter and a digit or special character (unquoted: no dot);
+#    fixture markers do NOT apply here, only references like ${...} or <...>;
+#    "PASS:" in capitals is a test status, not a password key;
 #  - Bearer/Basic with a literal of >= 16 token characters.
-# Never an alarm without a known prefix: placeholders (<...>, ${...}, os.Getenv,
+# Outside password keys, never an alarm without a known prefix: placeholders (<...>, ${...}, os.Getenv,
 # REPLACE_ME, CHANGEME) and values with a fixture segment (a word that starts with
 # synth, fake, dummy, beispiel, example, test, platzhalter, changeme, gueltig,
 # ungueltig, xxx, geheim, schluessel/schlüssel, page or expired; "Contest" is no
@@ -269,6 +270,7 @@ def add_counts(*dicts):
 # identifiers and expressions (s.Weiter, "Bearer " + tok) and empty strings.
 NOREPLY_RE = re.compile(
     r"(?i)(?<![\w.+-])(?:noreply@anthropic\.com|noreply@google\.com|noreply@github\.com|noreply@openai\.com"
+    r"|antigravity@google\.com"
     r"|[\w.+-]+@users\.noreply\.github\.com)(?!\.?[\w-])")
 RESERVED_DOMAIN_RE = re.compile(
     r"(?i)^(?:[\w-]+\.)*(?:example\.(?:com|org|net)|[\w-]+\.(?:example|test|invalid|localhost))$")
@@ -282,8 +284,8 @@ _FREE_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])" + KNOWN_PREFIX + r"(?P<body>" +
 _PW_KW = r"(?<![A-Za-z])(?:pass(?:word|wort|wd|phrase)?|pwd)(?![a-z])"
 _OTHER_KW = r"(?:api[_-]?key|token|secret|credential|private[_-]?key|access[_-]?key|authorization)"
 LOCAL_KV_RE = re.compile(
-    r"(?i)(?P<key>(?:(?P<pw>" + _PW_KW + r")|" + _OTHER_KW + r")[\w.-]*)[\"']?[ \t]*(?::=|=(?!=)|:(?!=))[ \t]*"
-    r"(?:(?P<q>[\"'])(?P<qv>[^\"'\n]*)(?P=q)|(?P<uv>[A-Za-z0-9_\-./+=]+))")
+    r"(?i)(?P<key>(?:(?P<pw>" + _PW_KW + r")|" + _OTHER_KW + r")[\w.-]*)[\"']?[ \t]*(?P<sep>:=|=(?!=)|:(?!=))[ \t]*"
+    r"(?:\"(?P<dqv>[^\"\n]*)\"|'(?P<sqv>[^'\n]*)'|(?P<uv>[A-Za-z0-9_\-./+=]+))")
 _LABEL_KEY_RE = re.compile(r"(?i)label|hint|placeholder|prompt|text|title|message|msg|field|error|input")
 LOCAL_BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)[ \t]+(?P<v>[A-Za-z0-9_\-./+=]{16,})")
 _PLACEHOLDER_RE = re.compile(r"(?i)^<[^>]*>$|\$\{|os\.getenv")
@@ -369,22 +371,33 @@ def _looks_random(v):
     return n >= 12 and varied and _entropy(v) >= min(3.0, 2.2 + 0.025 * (n - 12))
 
 
+def _password_like(v):
+    """Password keys: >= 8 characters with a letter and a digit or a special character;
+    fixture markers do not count here, only references like ${...} or <...>."""
+    return (len(v) >= 8 and any(c.isalpha() for c in v)
+            and any(c.isdigit() or not (c.isalnum() or c == "_") for c in v)
+            and not (len(set(v)) <= 1 or _PLACEHOLDER_RE.search(v)))
+
+
 def _kv_alarm(m):
     pw = bool(m.group("pw")) and not _LABEL_KEY_RE.search(m.group("key"))
-    if m.group("q"):
-        v = m.group("qv")
+    if m.group("key") == "PASS" and m.group("sep") == ":":
+        pw = False  # a test status line ("PASS: ..."), not a password key
+    quoted = m.group("dqv") is not None or m.group("sqv") is not None
+    if quoted:
+        v = m.group("dqv") if m.group("dqv") is not None else m.group("sqv")
         if _known_prefix(v):
             return True
-        if _fixture(v, first_only=pw):
-            return False
         if pw:
-            return len(v) >= 8
+            return _password_like(v)
+        if _fixture(v):
+            return False
         return not any(c.isspace() for c in v) and not _word_value(v) and _looks_random(v)
     v = m.group("uv")
-    if _fixture(v, first_only=pw) and not _known_prefix(v):
+    if pw:  # unquoted: a dotted value is an expression (cfg.Password, os.Getwd)
+        return "." not in v and _password_like(v)
+    if _fixture(v) and not _known_prefix(v):
         return False
-    if pw:
-        return len(v) >= 8 and any(c.isdigit() for c in v) and "." not in v
     return (len(v) >= 20 and any(c.isalpha() for c in v) and sum(c.isdigit() for c in v) >= 4
             and not _word_value(v))
 

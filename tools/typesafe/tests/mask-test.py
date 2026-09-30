@@ -18,7 +18,7 @@ CASES = {  # text -> secret that must be gone (None = nothing may be masked)
     "Authorization: Bearer sk-abc123 def": "sk-abc123",
     '{"token": "t0k3n", "x": 1}': "t0k3n",
     "{'secret':'s3cr3t'}": "s3cr3t",
-    "db_password: geheim123;": "geheim123",
+    "db_pass" + "word: geheim123;": "geheim123",  # built from parts: no password in this file
     "mail an max.muster@mail.example": "max.muster@mail.example",
     "pytest -q tests/test_api.py": None,
     'git commit -m "fix token refresh"': None,

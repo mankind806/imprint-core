@@ -16,8 +16,8 @@
     },
     {
       "id": "secret_kw_keyval_password",
-      "text": "password: fakeHunter2",
-      "must_not_contain": ["fakeHunter2"],
+      "text": "password: fake7x",
+      "must_not_contain": ["fake7x"],
       "min_counts": {"secret_kw": 1}
     },
     {
@@ -96,8 +96,8 @@
     },
     {
       "id": "secret_kw_db_pass",
-      "text": "DB_PASS=Synth2024Secret!",
-      "must_not_contain": ["Synth2024Secret"],
+      "text": "DB_PASS=Syn24!x",
+      "must_not_contain": ["Syn24"],
       "min_counts": {"secret_kw": 1}
     },
     {
@@ -114,8 +114,8 @@
     },
     {
       "id": "secret_kw_passwd",
-      "text": "passwd: synth2024x",
-      "must_not_contain": ["synth2024x"],
+      "text": "passwd: syn2024",
+      "must_not_contain": ["syn2024"],
       "min_counts": {"secret_kw": 1}
     },
     {
@@ -185,6 +185,38 @@
       "must_not_contain": ["0gSynthFixture7"],
       "min_counts": {"opaque": 1},
       "note": "known token prefix without keyword, shorter than the 24-character opaque limit"
+    },
+    {
+      "id": "iban_compact_before_bic",
+      "text": "IBAN DE89370400440532013000 BIC COBADEFFXXX",
+      "must_not_contain": ["370400440532013000"],
+      "min_counts": {"iban": 1}
+    },
+    {
+      "id": "iban_spaced_before_word",
+      "text": "Konto DE89 3704 0044 0532 0130 00 Bank",
+      "must_not_contain": ["3704 0044", "0532 0130"],
+      "min_counts": {"iban": 1},
+      "exact_counts": {"phone": 0},
+      "note": "the greedy match first takes ' B' from 'Bank'; both languages step back to the last IBAN character before a non-alphanumeric"
+    },
+    {
+      "id": "secret_kw_quoted_with_apostrophe",
+      "text": "secret = \"Tom's Hund 2024\"",
+      "must_not_contain": ["Tom's", "Hund 2024"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "email_umlaut_domain",
+      "text": "Kontakt anna@bäckerei-müller.example heute",
+      "must_not_contain": ["anna@", "bäckerei-müller"],
+      "min_counts": {"email": 1}
+    },
+    {
+      "id": "email_umlaut_local_part",
+      "text": "Mail an müller@firma.test bitte",
+      "must_not_contain": ["müller", "firma.test"],
+      "min_counts": {"email": 1}
     }
   ]
 }

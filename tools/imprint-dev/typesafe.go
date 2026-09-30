@@ -51,13 +51,15 @@ var (
 
 	// ibanRE, phoneRE, awsKeyIDRE, knownTokenRE: the ts_common.py patterns; the
 	// lookarounds Python uses are checked by replaceBounded.
-	ibanRE       = regexp.MustCompile(`[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}`)
+	ibanRE       = regexp.MustCompile(ibanPattern)
+	ibanFullRE   = regexp.MustCompile(`^(?:` + ibanPattern + `)$`)
 	phoneRE      = regexp.MustCompile(`(?:\+49|0)(?:[ \t./()-]*\d){8,}`)
 	awsKeyIDRE   = regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`)
 	knownTokenRE = regexp.MustCompile(`(?:ghp_|gho_|ghs_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|xox[abprs]-|AKIA|ASIA|AIza|GOCSPX-|ya29\.|1//|eyJ|glpat-|npm_)[A-Za-z0-9_\-./+=]{8,}`)
 
-	// emailRE matches email addresses.
-	emailRE = regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+`)
+	// emailRE matches email addresses; letters and digits in any script, like
+	// Python's Unicode \w in ts_common.RX_EMAIL (umlauts in local part and domain).
+	emailRE = regexp.MustCompile(`[\p{L}\p{N}_.+-]+@[\p{L}\p{N}_-]+\.[\p{L}\p{N}_.-]+`)
 
 	// opaqueCandidateRE matches candidates for long opaque strings (24+ base64/hex characters).
 	opaqueCandidateRE = regexp.MustCompile(`[A-Za-z0-9_\-+/]{24,}={0,2}`)
@@ -72,6 +74,8 @@ var (
 	// unmasked (typesafe_test.go TestMaskAddresses).
 	plzOrtRE = regexp.MustCompile(`\b\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+(?:\s+(?:(?:am|an der)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+|im Breisgau|ob der Tauber))?\b`)
 )
+
+const ibanPattern = `[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}`
 
 // MaskCounts records the number of redactions by category.
 type MaskCounts struct {
@@ -92,6 +96,13 @@ func isASCIIAlnum(r rune) bool {
 // before and after the match (utf8.RuneError at the text edges). A rejected match
 // is retried one rune later, as a lookbehind would.
 func replaceBounded(text string, re *regexp.Regexp, ok func(prev, next rune) bool, repl func(m string) string) string {
+	return replaceBoundedShrink(text, re, nil, ok, repl)
+}
+
+// replaceBoundedShrink is replaceBounded for a greedy pattern: when the rune after
+// a match fails ok, the end steps back while full still matches the shorter text,
+// as Python backtracks before a lookahead ("DE89 ... 00 Bank" ends before " B").
+func replaceBoundedShrink(text string, re, full *regexp.Regexp, ok func(prev, next rune) bool, repl func(m string) string) string {
 	var b strings.Builder
 	pos, done := 0, 0
 	for pos <= len(text) {
@@ -106,6 +117,18 @@ func replaceBounded(text string, re *regexp.Regexp, ok func(prev, next rune) boo
 		}
 		if e < len(text) {
 			next, _ = utf8.DecodeRuneInString(text[e:])
+		}
+		if e > s && !ok(prev, next) && full != nil {
+			for e2 := e - 1; e2 > s; e2-- {
+				if !utf8.RuneStart(text[e2]) {
+					continue
+				}
+				n2, _ := utf8.DecodeRuneInString(text[e2:])
+				if full.MatchString(text[s:e2]) && ok(prev, n2) {
+					e, next = e2, n2
+					break
+				}
+			}
 		}
 		if e > s && ok(prev, next) {
 			b.WriteString(text[done:s])
@@ -263,7 +286,7 @@ func MaskDetail(text string) (string, MaskCounts) {
 	})
 
 	// 4. IBAN (no letter or digit directly before or after)
-	text = replaceBounded(text, ibanRE, func(prev, next rune) bool {
+	text = replaceBoundedShrink(text, ibanRE, ibanFullRE, func(prev, next rune) bool {
 		return !isASCIIAlnum(prev) && !isASCIIAlnum(next)
 	}, func(string) string {
 		counts.IBAN++
