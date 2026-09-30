@@ -13,7 +13,14 @@ nie selbst und rendert auch keine Cache-Datei — es druckt nur den passenden Au
 schon abweichen): `--apply` druckt für `agy-rechte-vorlage` `setup/vorlagen/rechte-anwenden.sh
 agy`, für `claude-rechte-vorlage` `setup/vorlagen/rechte-anwenden.sh claude` und für
 `agy-statusline` `setup/vorlagen/rechte-anwenden.sh agy-statusline` — jeder dieser drei
-gedruckten Aufrufe funktioniert (siehe „Anwenden" unten). Beide `settings.json`-Vorlagen tragen
+gedruckten Aufrufe ist der richtige, funktionierende Aufruf für seinen Eintrag (siehe „Anwenden"
+unten); `claude` und `agy-statusline` laufen damit direkt durch, `agy` verlangt zusätzlich
+`PROJEKTE` und `TRUSTED_WORKSPACE` als Umgebungsvariablen (siehe „Platzhalter" unten) — fehlen
+sie, bricht der genau so gedruckte Aufruf ohne jede Änderung mit einer klaren Fehlermeldung ab,
+die beide Variablennamen nennt (`: "${PROJEKTE:?PROJEKTE muss gesetzt sein}"`), er tut also nie
+etwas Falsches, verlangt für `agy` aber diese zwei zusätzlichen Variablen, die kein gedruckter
+Aufruf setzen kann (sie stehen nicht im Inventar, siehe „Platzhalter" unten). Beide
+`settings.json`-Vorlagen tragen
 trotzdem weiterhin eine eigene Deny-Regel gegen den `--apply`-Aufruf selbst — vorsorglich, damit
 kein Agent auch nur diesen gedruckten Aufruf selbst ausführt.
 
@@ -115,13 +122,20 @@ Alle drei Unterbefehle:
 * schreiben, wenn die Zieldatei (oder ein Verzeichnis auf ihrem Weg) ein Symlink ist, auf die
   Datei, auf die er zeigt (`readlink -f`) — der Symlink selbst bleibt erhalten.
 
-`claude` mergt den `permissions`-Block aus `claude-rechte.json` per `jq -s '.[0] * .[1]'` in die
-bestehende `~/.claude/settings.json`. Das ist ein **tiefer** Merge: `permissions.defaultMode`
-und alle anderen Top-Level-Schlüssel (`hooks`, `env`, `enabledPlugins`, `sandbox`, …) bleiben
-unverändert, aber Listen wie `permissions.allow`/`permissions.deny` werden dabei **vollständig
-durch die Vorlage ersetzt**, nicht mit dem Bestand vereinigt — ein `jq *`-Merge überschreibt
-gleichnamige Schlüssel, statt ihre Arrays zusammenzuführen. Vor dem Übernehmen prüft das Skript
-zur Plausibilität, dass `permissions.deny` im Ergebnis nicht leer ist.
+`claude` mergt den `permissions`-Block aus `claude-rechte.json` in die bestehende
+`~/.claude/settings.json`. Das ist ein **tiefer** Merge: `permissions.defaultMode` und alle
+anderen Top-Level-Schlüssel (`hooks`, `env`, `enabledPlugins`, `sandbox`, …) bleiben unverändert.
+`permissions.allow`/`permissions.deny` werden dabei als **Vereinigung** aus Bestand und Vorlage
+gebildet — Bestand zuerst, dann neue Einträge aus der Vorlage, doppelte entfernt, Reihenfolge
+stabil (Nutzerentscheid CL-131: „deep jq merge, rights preserved" — ein einfacher `jq *`-Merge
+würde beide Arrays vollständig durch die Vorlage ersetzen, weil `*` Arrays nie zusammenführt, nur
+Objekte rekursiv merged; das war bis Runde 6 ein Befund, siehe unten). Vor dem Übernehmen prüft
+das Skript, dass jeder bestehende allow-/deny-Eintrag, jeder bestehende Top-Level-Schlüssel und
+jeder bestehende Schlüssel innerhalb von `permissions` (z. B. `defaultMode`) im Ergebnis noch
+vorhanden ist — sonst bricht es ohne jede Änderung ab (Befund 1, Runde 7). Ist die bestehende
+`settings.json` einzeilig/kompakt formatiert, zeigt der Diff beide Seiten vorher mit `jq -S .`
+sortiert und eingerückt an, sonst wäre die ganze Datei als ein einziger geänderter Block zu sehen,
+statt der einzelnen geänderten Einträge.
 
 `agy` ersetzt `~/.gemini/antigravity-cli/settings.json` komplett durch `agy-settings.json` mit
 `envsubst` für `${PROJEKTE}`/`${TRUSTED_WORKSPACE}` (validiert danach per
@@ -276,7 +290,15 @@ Schlüssel.
   * `command(go run)` ist uneingeschränkt erlaubt: beliebiger Go-Code lässt sich damit ausführen,
     unabhängig von jeder anderen Regel in dieser Datei.
   * `git push +refs/heads/x:y` (die `+`-Syntax für Force-Push) läuft an den wörtlichen
-    `git push --force`/`-f`/`--force-with-lease`-Deny-Einträgen vorbei.
+    `git push --force`/`-f`/`--force-with-lease`/`--mirror`/`-uf`-Deny-Einträgen vorbei — keiner
+    von ihnen ist ein Präfix von `git push +refs/heads/x:y`.
+  * Steht ein anderes Token vor der Force-Flag, z. B. `git push origin main --force` oder
+    `git push origin --force-with-lease=main`, ist keiner der Deny-Einträge oben mehr ein
+    wörtlicher Präfix des ganzen Befehls — die Regeln matchen nur `git push --force…` am Anfang,
+    nicht `--force` irgendwo im Befehl (Befund 3, Runde 7: `--mirror`/`-uf` wurden ergänzt, weil
+    sie wie `--force` direkt nach `git push` stehen können, aber dieselbe Lücke bleibt für jede
+    Force-Variante mit einem Flag oder Positional-Argument davor offen — nicht geschlossen, nur
+    dokumentiert, solange `command(...)` kein Glob/Regex unterstützt, siehe oben).
   * In `claude-rechte.json` deckt kein Eintrag Bash allgemein ab (anders als `agy-settings.json`
     mit `command(bash -c)`/`command(sh -c)`); jeder der obigen Wege steht Claude über sein
     Bash-Werkzeug offen, auch wenn `Edit`/`Write` auf die Settings-Dateien selbst verweigert sind.

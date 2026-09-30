@@ -17,11 +17,17 @@
 # Ziel nie selbst, siehe setup/vorlagen/README.md.
 #
 # claude mergt den permissions-Block aus setup/vorlagen/claude-rechte.json in
-# ${HOME}/.claude/settings.json (jq -s '.[0] * .[1]', ein tiefer Merge; dabei
-# werden Listen wie permissions.allow/permissions.deny vollständig durch die
-# Vorlage ersetzt, nicht mit dem Bestand vereinigt. permissions.defaultMode
-# und alle anderen Top-Level-Schlüssel — hooks, env, enabledPlugins,
-# sandbox, … — bleiben unverändert, weil die Vorlage nur permissions trägt).
+# ${HOME}/.claude/settings.json (ein tiefer Merge; permissions.allow und
+# permissions.deny werden dabei als VEREINIGUNG aus Bestand und Vorlage
+# gebildet — bestehende Einträge zuerst, dann neue aus der Vorlage,
+# doppelte entfernt, Reihenfolge stabil (Nutzerentscheid CL-131: "deep jq
+# merge, rights preserved" — kein bestehendes Recht geht beim Anwenden
+# verloren). permissions.defaultMode und alle anderen Top-Level-Schlüssel —
+# hooks, env, enabledPlugins, sandbox, … — bleiben unverändert, weil die
+# Vorlage nur permissions trägt. Nach dem Merge prüft das Skript, dass jeder
+# bestehende allow-/deny-Eintrag, jeder bestehende Top-Level-Schlüssel und
+# jeder bestehende Schlüssel innerhalb von permissions im Ergebnis noch
+# vorhanden ist — sonst bricht es ohne jede Änderung ab (Befund 1, Runde 7).
 # Direkt beim Merge hält das Skript den sha256sum von
 # ${HOME}/.claude/settings.json fest und prüft ihn nach der Rückfrage
 # erneut, bevor irgendetwas geschrieben wird — ändert sich die Zieldatei
@@ -131,10 +137,13 @@ repo_root=$(cd "$script_dir/../.." && pwd -P)
 tmp=""
 statusline_tmp=""
 rueckbau_tmp=""
+diff_json_alt_tmp=""
+diff_json_neu_tmp=""
 SICHERN_BAK=""
 
 aufraeumen() {
-  rm -f "${tmp:-}" "${statusline_tmp:-}" "${rueckbau_tmp:-}"
+  rm -f "${tmp:-}" "${statusline_tmp:-}" "${rueckbau_tmp:-}" \
+        "${diff_json_alt_tmp:-}" "${diff_json_neu_tmp:-}"
 }
 trap aufraeumen EXIT
 # Zusätzlich zur EXIT-Falle: HUP/INT/TERM räumen explizit auf und beenden
@@ -210,9 +219,13 @@ pruefe_nicht_checkout() {
 # Gerätedatei) oder nicht beschreibbar ist — beides würde sichern/mv bzw.
 # install erst mitten in der Anwendung scheitern lassen, nachdem für einen
 # anderen Eintrag desselben Aufrufs (z. B. settings.json bei "agy") schon
-# etwas geschrieben wurde. Fehlt die Zieldatei noch (z. B. eine frisch zu
-# installierende statusline.py), muss stattdessen ihr Zielverzeichnis
-# existieren und beschreibbar sein.
+# etwas geschrieben wurde. Geprüft wird IMMER auch das Zielverzeichnis
+# (nicht nur bei einer fehlenden Zieldatei, Befund 2 aus Runde 7): sichern()
+# legt die Sicherung per cp und mktemp/mv die Zwischendatei im selben
+# Verzeichnis an wie die Zieldatei — eine schreibbare Datei in einem nicht
+# mehr beschreibbaren Verzeichnis (z. B. nachträglich chmod 555) lässt genau
+# diesen Schritt scheitern, nachdem ein anderes Ziel desselben Aufrufs
+# schon geschrieben wurde, wenn nur die Datei selbst geprüft wird.
 pruefe_ziel_ok() {
   local resolved="$1"
   if [ -e "$resolved" ]; then
@@ -222,11 +235,10 @@ pruefe_ziel_ok() {
     if [ ! -w "$resolved" ]; then
       die "Ziel ist nicht beschreibbar: $resolved"
     fi
-  else
-    local verz="${resolved%/*}"
-    if [ ! -d "$verz" ] || [ ! -w "$verz" ]; then
-      die "Zielverzeichnis fehlt oder ist nicht beschreibbar: $verz"
-    fi
+  fi
+  local verz="${resolved%/*}"
+  if [ ! -d "$verz" ] || [ ! -w "$verz" ]; then
+    die "Zielverzeichnis fehlt oder ist nicht beschreibbar: $verz"
   fi
 }
 
@@ -258,6 +270,34 @@ zeige_diff() {
   set -e
   if [ "$status" -eq 0 ]; then
     echo "Keine Änderung nötig — $alt entspricht bereits der Vorlage."
+    return 1
+  fi
+  return 0
+}
+
+# zeige_diff_json <alt-JSON-Datei> <neu-JSON-Datei> <Anzeigename>: wie
+# zeige_diff, aber beide Seiten werden vorher mit "jq -S ." (sortierte
+# Schlüssel, eingerückt) in Zwischendateien geschrieben — eine
+# einzeilige/kompakte settings.json würde sonst als ein einziger
+# geänderter Diff-Block erscheinen, ohne dass einzelne Einträge erkennbar
+# sind (Befund 1, Runde 7). Ändert die eigentlichen Dateien nicht, nur die
+# Anzeige.
+zeige_diff_json() {
+  local alt="$1" neu="$2" anzeigename="$3"
+  diff_json_alt_tmp=$(mktemp) || die "mktemp fehlgeschlagen"
+  diff_json_neu_tmp=$(mktemp) || die "mktemp fehlgeschlagen"
+  jq -S . "$alt" > "$diff_json_alt_tmp" || die "jq fehlgeschlagen: $alt"
+  jq -S . "$neu" > "$diff_json_neu_tmp" || die "jq fehlgeschlagen: $neu"
+  local status=0
+  set +e
+  diff -u "$diff_json_alt_tmp" "$diff_json_neu_tmp"
+  status=$?
+  set -e
+  rm -f "$diff_json_alt_tmp" "$diff_json_neu_tmp"
+  diff_json_alt_tmp=""
+  diff_json_neu_tmp=""
+  if [ "$status" -eq 0 ]; then
+    echo "Keine Änderung nötig — $anzeigename entspricht bereits der Vorlage."
     return 1
   fi
   return 0
@@ -442,15 +482,44 @@ cmd_claude() {
   local vor_sha
   vor_sha=$(sha256sum "$resolved") || die "sha256sum fehlgeschlagen: $resolved"
 
-  jq -s '.[0] * .[1]' "$resolved" "$vorlage" > "$tmp" || die "jq-Merge fehlgeschlagen"
-  if ! jq -e '.permissions.deny|length>0' "$tmp" >/dev/null 2>&1; then
-    die "Plausibilitätsprüfung fehlgeschlagen: permissions.deny ist nach dem Merge leer"
+  # permissions.allow/permissions.deny werden als VEREINIGUNG aus Bestand
+  # und Vorlage gebildet (Bestand zuerst, dann neue Einträge aus der
+  # Vorlage, doppelte entfernt, Reihenfolge stabil) — "jq -s '.[0] * .[1]'"
+  # allein würde beide Listen vollständig durch die Vorlage ERSETZEN, weil
+  # der "*"-Operator Arrays nie zusammenführt, nur Objekte rekursiv merged
+  # (Befund 1, Runde 7; Nutzerentscheid CL-131). Alles andere — auch
+  # permissions.defaultMode und alle anderen Top-Level-Schlüssel — bleibt
+  # über denselben "*"-Merge wie bisher unverändert.
+  local jq_merge='
+    def uniq_stable: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
+    .[0] as $alt | .[1] as $vorlage |
+    (($alt.permissions.allow // []) + ($vorlage.permissions.allow // []) | uniq_stable) as $allow |
+    (($alt.permissions.deny // []) + ($vorlage.permissions.deny // []) | uniq_stable) as $deny |
+    $alt * ($vorlage * {permissions: {allow: $allow, deny: $deny}})
+  '
+  jq -s "$jq_merge" "$resolved" "$vorlage" > "$tmp" || die "jq-Merge fehlgeschlagen"
+
+  # Sicherheitsprüfung NACH dem Merge, VOR jeder Anzeige/Rückfrage: jeder
+  # bestehende allow-/deny-Eintrag, jeder bestehende Top-Level-Schlüssel und
+  # jeder bestehende Schlüssel innerhalb von permissions (z. B.
+  # defaultMode) muss im Ergebnis noch vorhanden sein — sonst bricht das
+  # Skript ohne jede Änderung ab, statt eine Rechte-Vorlage zu übernehmen,
+  # die etwas vom Bestand verloren hätte.
+  if ! jq -n -e --slurpfile alt "$resolved" --slurpfile neu "$tmp" '
+        ($alt[0].permissions.allow // []) as $allow |
+        ($alt[0].permissions.deny // []) as $deny |
+        (($allow - ($neu[0].permissions.allow // [])) | length == 0) and
+        (($deny - ($neu[0].permissions.deny // [])) | length == 0) and
+        ((($alt[0] | keys) - ($neu[0] | keys)) | length == 0) and
+        ((($alt[0].permissions | keys) - ($neu[0].permissions | keys)) | length == 0)
+      ' >/dev/null 2>&1; then
+    die "Plausibilitätsprüfung fehlgeschlagen: der Merge hat bestehende allow-/deny-Einträge oder Schlüssel verloren"
   fi
 
-  echo "Merge von $vorlage in $ziel (jq -s '.[0] * .[1]'; Listen wie" \
-       "permissions.allow/permissions.deny werden dabei vollständig durch" \
-       "die Vorlage ersetzt, nicht mit dem Bestand vereinigt):"
-  if zeige_diff "$resolved" "$tmp"; then
+  echo "Merge von $vorlage in $ziel (permissions.allow/permissions.deny als" \
+       "Vereinigung aus Bestand und Vorlage, Bestand zuerst, doppelte" \
+       "entfernt; alles andere unverändert):"
+  if zeige_diff_json "$resolved" "$tmp" "$ziel"; then
     bestaetigen_oder_abbrechen
   else
     exit 0
@@ -641,11 +710,16 @@ cmd_rueckbau() {
     die "keine Sicherung zu Zeitstempel $ts gefunden ($claude_bak, $agy_bak, $statusline_bak)"
   fi
 
-  # Ziele, die dieser Aufruf tatsächlich zurückspielt, müssen VORAB reguläre,
-  # beschreibbare Dateien sein — sonst könnte claude schon zurückgespielt
-  # sein, bevor agy an einer unbeschreibbaren Zieldatei scheitert.
+  # Ziele, die dieser Aufruf tatsächlich zurückspielt (oder entfernt), müssen
+  # VORAB reguläre, beschreibbare Dateien in einem beschreibbaren Verzeichnis
+  # sein — sonst könnte claude/agy schon zurückgespielt sein, bevor
+  # statusline.py an einem unbeschreibbaren Ziel scheitert (Befund 2b aus
+  # Runde 7: sonst würde der Rückbau mitten in "statusline.py" abbrechen,
+  # ohne dass der Zeitstempel für einen Rückbau DIESES Rückbaus (unten) je
+  # ausgegeben wird, obwohl claude/agy davor schon geändert wurden).
   [ "$restore_claude" -eq 1 ] && pruefe_ziel_ok "$claude_resolved"
   [ "$restore_agy" -eq 1 ] && pruefe_ziel_ok "$agy_resolved"
+  { [ "$restore_statusline" -eq 1 ] || [ "$remove_statusline" -eq 1 ]; } && pruefe_ziel_ok "$statusline_resolved"
 
   echo "Rückbau zu Zeitstempel $ts:"
   local claude_vor_sha="" agy_vor_sha="" statusline_vor_sha=""

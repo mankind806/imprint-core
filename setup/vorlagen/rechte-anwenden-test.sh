@@ -102,11 +102,15 @@ t2_race_bei_rueckfrage() {
   local h; neues_home h
   local stub; neuer_stub_dir stub
   local real_diff; real_diff=$(command -v diff)
+  # Schreibt direkt auf die bekannte Zieldatei ($h, zur Erzeugungszeit fest
+  # eingesetzt), statt sich auf "$2" zu verlassen: seit Runde 7 zeigt
+  # "claude" den Diff über zeige_diff_json auf zwei mit "jq -S ."
+  # vorformatierten Zwischendateien an (Befund 1), diff bekommt also nicht
+  # mehr direkt die Zieldatei als Argument.
   cat >"$stub/diff" <<EOF
 #!/usr/bin/env bash
 "$real_diff" "\$@" >/dev/null; rc=\$?
-t="\$2"
-printf '%s' '{"env":{"FOO":"bar-von-anderswo-geaendert"},"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(rm -rf /:*)"]}}' > "\$t"
+printf '%s' '{"env":{"FOO":"bar-von-anderswo-geaendert"},"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(rm -rf /:*)"]}}' > "$h/.claude/settings.json"
 exit \$rc
 EOF
   chmod +x "$stub/diff"
@@ -359,6 +363,73 @@ t10_agy_ziel_kein_teilschreiben() {
   fi
 }
 
+# --- T11 (Befund 1, Runde 7): claude bildet die Vereinigung aus Bestand
+# und Vorlage für permissions.allow/permissions.deny (CL-131) - eigene,
+# vor dem Anwenden vorhandene Regeln (auch eine so scharfe wie
+# "Bash(rm -rf /:*)") gehen dabei nicht verloren, defaultMode bleibt
+# ebenfalls erhalten. ---
+t11_claude_merge_vereinigung() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  cat >"$h/.claude/settings.json" <<'EOF'
+{"env":{"FOO":"bar"},"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(rm -rf /:*)","Read(~/.config/archiv/**)","Bash(git push --force:*)"],"defaultMode":"auto"}}
+EOF
+  chmod 600 "$h/.claude/settings.json"
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local f="$h/.claude/settings.json"
+
+  local fehlt=""
+  for e in "Bash(rm -rf /:*)" "Read(~/.config/archiv/**)" "Bash(git push --force:*)" "Bash(ls:*)"; do
+    jq -e --arg e "$e" '(.permissions.allow + .permissions.deny) | index($e) != null' "$f" >/dev/null 2>&1 \
+      || fehlt="$fehlt [$e]"
+  done
+  local defaultmode_ok=1
+  jq -e '.permissions.defaultMode=="auto" and .env.FOO=="bar"' "$f" >/dev/null 2>&1 && defaultmode_ok=0
+
+  if [ "$rc" -eq 0 ] && [ -z "$fehlt" ] && [ "$defaultmode_ok" -eq 0 ]; then
+    report "T11 claude-Merge verliert keine bestehenden allow-/deny-Einträge (Vereinigung)" 0
+  else
+    report "T11 claude-Merge verliert keine bestehenden allow-/deny-Einträge (Vereinigung)" 1 \
+      "rc=$rc, fehlende Einträge=[$fehlt], defaultMode/env erhalten=$([ "$defaultmode_ok" -eq 0 ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T12 (Befund 2b, Runde 7): rueckbau prüft VOR jeder Änderung auch
+# statusline.py auf ein beschreibbares Zielverzeichnis - eine
+# statusline.py, die per Symlink in ein nicht mehr beschreibbares
+# Verzeichnis zeigt, darf claude nicht schon zurückgespielt haben, bevor
+# der Rückbau daran scheitert. ---
+t12_rueckbau_statusline_nicht_beschreibbar() {
+  local h; neues_home h
+  local ts
+  ts=$(echo j | HOME="$h" bash "$skript" claude 2>&1 | sed -n 's/^Zeitstempel für rueckbau: //p' | tail -1)
+  if [ -z "$ts" ]; then
+    report "T12 rueckbau bricht ab, wenn statusline.py-Verzeichnis nicht beschreibbar ist" 1 "kein Zeitstempel"
+    return
+  fi
+
+  local ro; ro=$(mktemp -d); aufraeumen_dirs+=("$ro")
+  echo "old-content" >"$ro/statusline.py"
+  echo "backup-content" >"$ro/statusline.py.bak-$ts"
+  ln -s "$ro/statusline.py" "$h/.gemini/antigravity-cli/statusline.py"
+  chmod 555 "$ro"
+
+  local vor_claude; vor_claude=$(cat "$h/.claude/settings.json")
+  echo j | HOME="$h" bash "$skript" rueckbau "$ts" >/dev/null 2>&1
+  local rc=$?
+  chmod 755 "$ro"
+  local nach_claude; nach_claude=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor_claude" = "$nach_claude" ]; then
+    report "T12 rueckbau bricht ab, wenn statusline.py-Verzeichnis nicht beschreibbar ist" 0
+  else
+    report "T12 rueckbau bricht ab, wenn statusline.py-Verzeichnis nicht beschreibbar ist" 1 \
+      "rc=$rc, claude unverändert=$([ "$vor_claude" = "$nach_claude" ] && echo ja || echo nein)"
+  fi
+}
+
 t1_cp_scheitert
 t2_race_bei_rueckfrage
 t3_signal_raeumt_auf HUP 129
@@ -370,6 +441,8 @@ t6_rueckbau_rundlauf
 t7_symlink_zwischenverzeichnis
 t8_agy_statusline_eigenstaendig
 t9_mehrere_json_dokumente
+t11_claude_merge_vereinigung
+t12_rueckbau_statusline_nicht_beschreibbar
 t10_agy_ziel_kein_teilschreiben
 
 echo "---"

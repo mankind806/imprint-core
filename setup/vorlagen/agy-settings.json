@@ -66,6 +66,8 @@
       "command(git push --force)",
       "command(git push -f)",
       "command(git push --force-with-lease)",
+      "command(git push --mirror)",
+      "command(git push -uf)",
       "command(gh pr merge)",
       "command(rm)",
       "command(curl)",
