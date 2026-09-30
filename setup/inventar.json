@@ -6,5 +6,32 @@
     "ziel": "${HOME}/.git/hooks/pre-push",
     "rechte": false,
     "beschreibung": "Pre-push githook verification script"
+  },
+  {
+    "id": "agy-rechte-vorlage",
+    "typ": "rechte-vorlage",
+    "quelle": "setup/vorlagen/agy-settings.json",
+    "ziel": "${HOME}/.gemini/antigravity-cli/settings.json",
+    "rechte": true,
+    "anwenden": "ersetzen",
+    "beschreibung": "Rechte-Vorlage für agy: permissions.allow/permissions.deny werden als Vereinigung aus Bestand und Vorlage gemergt, statusLine/trustedWorkspaces und jeder andere von der Vorlage getragene Schlüssel ersetzen den Bestand, ein nur im Bestand vorhandener Schlüssel bleibt unverändert; nur der Mensch wendet sie an, siehe setup/vorlagen/README.md. ${PROJEKTE} und ${TRUSTED_WORKSPACE} vorher als Umgebungsvariablen setzen, rechte-anwenden.sh agy validiert und setzt sie per jq ein (kein envsubst, siehe README)"
+  },
+  {
+    "id": "claude-rechte-vorlage",
+    "typ": "rechte-vorlage",
+    "quelle": "setup/vorlagen/claude-rechte.json",
+    "ziel": "${HOME}/.claude/settings.json",
+    "rechte": true,
+    "anwenden": "fragment-merge",
+    "beschreibung": "Rechte-Vorlage für den permissions-Block von Claude Code, deckt nur diesen Block ab, nicht die ganze Zieldatei; nur der Mensch mergt sie ein, siehe setup/vorlagen/README.md"
+  },
+  {
+    "id": "agy-statusline",
+    "typ": "copy",
+    "quelle": "setup/vorlagen/statusline.py",
+    "ziel": "${HOME}/.gemini/antigravity-cli/statusline.py",
+    "rechte": true,
+    "anwenden": "ersetzen",
+    "beschreibung": "Statuszeilen-Skript für agy; agy führt es aus, wer es schreibt führt darüber Code aus, deshalb rechte:true; nur der Mensch kopiert es, siehe setup/vorlagen/README.md. Wird von rechte-anwenden.sh agy-statusline (bzw. gleichwertig innerhalb von rechte-anwenden.sh agy) per install -m 0755 installiert."
   }
 ]

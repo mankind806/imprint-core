@@ -50,6 +50,10 @@ jobs:
         # Fixtures and stub agy/timeout binaries only: no account, no model
         # call. Needs python3 on the runner.
         run: sh tools/test-arrival-agy.sh
+      - name: rechte-anwenden.sh test (Fake-HOME)
+        # Jedes Szenario legt sein eigenes Fake-HOME per mktemp -d an und
+        # räumt sich selbst auf; nichts im Checkout wird angefasst.
+        run: bash setup/vorlagen/rechte-anwenden-test.sh
       - name: imprint-dev check
         run: go run ./tools/imprint-dev check --root . --sarif "$RUNNER_TEMP/imprint-dev.sarif"
       - name: typesafe Python tests (offline, no key)

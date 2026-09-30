@@ -1,0 +1,1030 @@
+#!/usr/bin/env bash
+# rechte-anwenden-test.sh — testet setup/vorlagen/rechte-anwenden.sh gegen
+# die Runde-5- und Runde-6-Befunde aus PR 36 (CL-012): ein scheiterndes cp
+# bei der Sicherung, ein gleichzeitiger Schreibzugriff während der
+# Diff-Rückfrage, ein Abbruch per HUP/INT/TERM während der Rückfrage,
+# statusline.py unabhängig von settings.json (seit Runde 6 auch mit
+# Rückfrage bei einer Neuinstallation), ein Symlink-Ziel in den eigenen
+# Checkout (auch über ein symlinked Zwischenverzeichnis), eine
+# settings.json mit mehr als einem JSON-Dokument, ein nicht beschreibbares
+# bzw. kein reguläres Ziel, der eigenständige Unterbefehl agy-statusline
+# und ein vollständiger Rückbau. Jedes Szenario legt sein eigenes Fake-HOME
+# per mktemp -d an, ändert nie eine echte Datei unter dem eigenen HOME und
+# räumt sich danach selbst auf. Ohne Netz- oder Systemzugriff, gedacht für
+# .github/workflows/check.yml.
+
+set -uo pipefail
+
+script_dir=$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)
+skript="$script_dir/rechte-anwenden.sh"
+vorlagen_dir="$script_dir"
+
+pass=0
+fail=0
+report() {
+  local name="$1" ok="$2" detail="${3:-}"
+  if [ "$ok" -eq 0 ]; then
+    echo "PASS $name"
+    pass=$((pass + 1))
+  else
+    echo "FAIL $name - $detail"
+    fail=$((fail + 1))
+  fi
+}
+
+# Echte Werkzeuge VOR jeder PATH-Änderung auflösen, damit die Stubs unten
+# sie aufrufen können, ohne selbst einen Rechnerpfad fest einzucodieren
+# (der Befund an den Stubs aus Runde 5: die trugen /usr/bin und
+# /home/linuxbrew/... fest codiert).
+real_cp=$(command -v cp) || { echo "cp fehlt" >&2; exit 2; }
+
+aufraeumen_dirs=()
+trap 'for d in ${aufraeumen_dirs[@]+"${aufraeumen_dirs[@]}"}; do rm -rf "$d"; done' EXIT
+
+neues_home() {
+  # neues_home <var>: legt ein frisches Fake-HOME mit .claude/settings.json
+  # und .gemini/antigravity-cli/settings.json an, schreibt seinen Pfad in
+  # die genannte Variable und merkt es zum Aufräumen vor.
+  local __var="$1" __neues_home_dir
+  __neues_home_dir=$(mktemp -d)
+  aufraeumen_dirs+=("$__neues_home_dir")
+  mkdir -p "$__neues_home_dir/.claude" "$__neues_home_dir/.gemini/antigravity-cli"
+  cat >"$__neues_home_dir/.claude/settings.json" <<'EOF'
+{"env":{"FOO":"bar"},"hooks":{},"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(rm -rf /:*)"]}}
+EOF
+  cat >"$__neues_home_dir/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  chmod 600 "$__neues_home_dir/.claude/settings.json" "$__neues_home_dir/.gemini/antigravity-cli/settings.json"
+  printf -v "$__var" '%s' "$__neues_home_dir"
+}
+
+neuer_stub_dir() {
+  local __var="$1" __neuer_stub_dir
+  __neuer_stub_dir=$(mktemp -d)
+  aufraeumen_dirs+=("$__neuer_stub_dir")
+  printf -v "$__var" '%s' "$__neuer_stub_dir"
+}
+
+# agy_projekte_dir/agy_tw_dir: EIN gemeinsames Paar echter, vorhandener
+# Verzeichnisse (nicht $HOME, kein Vorfahre von $HOME) für PROJEKTE/
+# TRUSTED_WORKSPACE in allen agy-Testfällen — seit Runde 9 validiert das
+# Skript beide vorab (absoluter, per "realpath -e" auflösbarer Pfad, siehe
+# pruefe_agy_pfad); ein Platzhalter wie "/nicht-verwendet" oder $HOME selbst
+# (wie in früheren Runden verwendet) würde jetzt schon dort abgelehnt.
+agy_projekte_dir=$(mktemp -d)
+agy_tw_dir=$(mktemp -d)
+aufraeumen_dirs+=("$agy_projekte_dir" "$agy_tw_dir")
+
+# --- T1 (Befund 1): ein cp, das beim Schreiben der Sicherung scheitert,
+# muss ohne jede Änderung an der Zieldatei abbrechen und darf keine (leere)
+# Sicherung zurücklassen, auf die rueckbau hereinfallen könnte. ---
+t1_cp_scheitert() {
+  local h; neues_home h
+  local stub; neuer_stub_dir stub
+  cat >"$stub/cp" <<EOF
+#!/usr/bin/env bash
+last="\${@: -1}"
+case "\$last" in *.bak-*) : > "\$last"; exit 1;; esac
+exec "$real_cp" "\$@"
+EOF
+  chmod +x "$stub/cp"
+
+  local vor nach rc
+  vor=$(cat "$h/.claude/settings.json")
+  echo j | PATH="$stub:$PATH" HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  rc=$?
+  nach=$(cat "$h/.claude/settings.json")
+  local reste; reste=$(find "$h" \( -name '*.bak-*' -o -name '.rechte-anwenden.*' \) 2>/dev/null)
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ] && [ -z "$reste" ]; then
+    report "T1 scheiterndes cp bei der Sicherung bricht ohne Änderung ab" 0
+  else
+    report "T1 scheiterndes cp bei der Sicherung bricht ohne Änderung ab" 1 \
+      "rc=$rc, Ziel unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein), Reste=[$reste]"
+  fi
+}
+
+# --- T2 (Befund 2): ändert sich die Zieldatei während der Diff-Rückfrage
+# (z. B. durch Claude Code selbst), muss das Skript abbrechen, statt eine
+# Sicherung des inzwischen veralteten Standes anzulegen. ---
+t2_race_bei_rueckfrage() {
+  local h; neues_home h
+  local stub; neuer_stub_dir stub
+  local real_diff; real_diff=$(command -v diff)
+  # Schreibt direkt auf die bekannte Zieldatei ($h, zur Erzeugungszeit fest
+  # eingesetzt), statt sich auf "$2" zu verlassen: seit Runde 7 zeigt
+  # "claude" den Diff über zeige_diff_json auf zwei mit "jq -S ."
+  # vorformatierten Zwischendateien an (Befund 1), diff bekommt also nicht
+  # mehr direkt die Zieldatei als Argument.
+  cat >"$stub/diff" <<EOF
+#!/usr/bin/env bash
+"$real_diff" "\$@" >/dev/null; rc=\$?
+printf '%s' '{"env":{"FOO":"bar-von-anderswo-geaendert"},"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(rm -rf /:*)"]}}' > "$h/.claude/settings.json"
+exit \$rc
+EOF
+  chmod +x "$stub/diff"
+
+  local vor nach rc
+  vor=$(cat "$h/.claude/settings.json")
+  echo j | PATH="$stub:$PATH" HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  rc=$?
+  nach=$(cat "$h/.claude/settings.json")
+  local reste; reste=$(find "$h" \( -name '*.bak-*' -o -name '.rechte-anwenden.*' \) 2>/dev/null)
+
+  # Die konkurrierende Änderung selbst bleibt stehen (das Skript überschreibt
+  # sie nicht rückwirkend) - geprüft wird nur, dass unser eigener Merge NICHT
+  # zusätzlich angewendet wurde und keine Sicherung/Zwischendatei übrig blieb.
+  if [ "$rc" -ne 0 ] && ! grep -qF 'Bash(gh pr merge:*)' "$h/.claude/settings.json" && [ -z "$reste" ]; then
+    report "T2 Änderung während der Rückfrage bricht ohne Sicherung ab" 0
+  else
+    report "T2 Änderung während der Rückfrage bricht ohne Sicherung ab" 1 "rc=$rc, Reste=[$reste]"
+  fi
+}
+
+# --- T3 (Befund 3): HUP/INT/TERM während der Rückfrage räumen die
+# Zwischendatei zuverlässig auf, egal wie das Skript endet. ---
+t3_signal_raeumt_auf() {
+  local sig="$1" erwarteter_rc="$2"
+  local h; neues_home h
+  local stub; neuer_stub_dir stub
+  local real_diff; real_diff=$(command -v diff)
+  cat >"$stub/diff" <<EOF
+#!/usr/bin/env bash
+"$real_diff" "\$@" >/dev/null; kill -$sig \$PPID; sleep 0.3; exit 1
+EOF
+  chmod +x "$stub/diff"
+
+  echo j | PATH="$stub:$PATH" HOME="$h" timeout 5 bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local reste; reste=$(find "$h" \( -name '*.bak-*' -o -name '.rechte-anwenden.*' \) 2>/dev/null)
+
+  if [ "$rc" -eq "$erwarteter_rc" ] && [ -z "$reste" ]; then
+    report "T3 $sig während der Rückfrage räumt auf (rc=$erwarteter_rc)" 0
+  else
+    report "T3 $sig während der Rückfrage räumt auf (rc=$erwarteter_rc)" 1 "rc=$rc (erwartet $erwarteter_rc), Reste=[$reste]"
+  fi
+}
+
+# --- T4 (Befund 4): statusline.py wird auch installiert, wenn
+# settings.json schon der Vorlage entspricht - unabhängig davon. ---
+t4_statusline_unabhaengig() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  # Baut die "schon angewendete" Fixture mit demselben jq-Verfahren wie
+  # render_agy_vorlage im Skript (split/join, tojson-Escaping), nicht mehr
+  # mit envsubst (Befund 5, Runde 10) — sonst würde diese Fixture nicht
+  # mehr exakt dem entsprechen, was "agy" selbst erzeugt, seit envsubst
+  # durch jq ersetzt wurde (Befund 1, Runde 9). $h enthält hier keinen
+  # Symlink, "realpath -e" liefert also denselben Wert wie $h selbst; die
+  # Auflösung steht trotzdem hier, damit die Fixture auch dann noch zu dem
+  # passt, was "agy" mit seinem eigenen home_kanon erzeugt, falls sich das
+  # je ändert.
+  local h_kanon; h_kanon=$(realpath -e "$h")
+  jq -nr --rawfile tpl "$vorlagen_dir/agy-settings.json" \
+    --arg home "$h_kanon" --arg projekte "$agy_projekte_dir" --arg tw "$agy_tw_dir" '
+    def esc($v): ($v | tojson | .[1:-1]);
+    $tpl
+    | split("${HOME}") | join(esc($home))
+    | split("${PROJEKTE}") | join(esc($projekte))
+    | split("${TRUSTED_WORKSPACE}") | join(esc($tw))
+  ' >"$h/.gemini/antigravity-cli/settings.json"
+  chmod 600 "$h/.gemini/antigravity-cli/settings.json"
+  # statusline.py existiert bewusst noch nicht.
+
+  local out
+  out=$(echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy 2>&1)
+  local rc=$?
+
+  if [ "$rc" -eq 0 ] && [ -x "$h/.gemini/antigravity-cli/statusline.py" ] \
+     && printf '%s' "$out" | grep -qF 'Keine Änderung nötig'; then
+    report "T4 statusline.py wird installiert, obwohl settings.json schon passt" 0
+  else
+    report "T4 statusline.py wird installiert, obwohl settings.json schon passt" 1 "rc=$rc, output=[$out]"
+  fi
+}
+
+# --- T5 (Befund 4): ein Ziel, das per Symlink in den eigenen Checkout
+# zeigt, muss VOR jeder Änderung abbrechen - auch vor dem mv der
+# settings.json. Läuft gegen eine Kopie von vorlagen/, nie gegen den
+# echten Checkout. ---
+t5_symlink_in_checkout() {
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+  local kopie_statusline="$repo/setup/vorlagen/statusline.py"
+
+  local h; neues_home h
+  ln -s "$kopie_statusline" "$h/.gemini/antigravity-cli/statusline.py"
+
+  local vor_statusline vor_settings
+  vor_statusline=$(cat "$kopie_statusline")
+  vor_settings=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$kopie_skript" agy >/dev/null 2>&1
+  local rc=$?
+
+  local nach_statusline nach_settings
+  nach_statusline=$(cat "$kopie_statusline")
+  nach_settings=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor_statusline" = "$nach_statusline" ] && [ "$vor_settings" = "$nach_settings" ]; then
+    report "T5 Symlink in den Checkout bricht vor jeder Änderung ab" 0
+  else
+    report "T5 Symlink in den Checkout bricht vor jeder Änderung ab" 1 \
+      "rc=$rc, statusline unverändert=$([ "$vor_statusline" = "$nach_statusline" ] && echo ja || echo nein), settings unverändert=$([ "$vor_settings" = "$nach_settings" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T6 (Befund 5, Runde 6: Zeitstempel-Flackern behoben): rueckbau zeigt
+# den Diff, fragt einmal nach, sichert den aktuellen Stand vorher unter
+# einem neuen Zeitstempel und spielt dann claude, agy und eine frisch
+# installierte statusline.py wieder zurück (letztere per Marker entfernt,
+# weil sie vorher nicht existierte). claude und agy laufen in getrennten
+# Aufrufen und können — je nach Sekundengrenze — unterschiedliche
+# Zeitstempel bekommen; der Test liest deshalb den Zeitstempel aus der
+# jeweils letzten Ausgabezeile "Zeitstempel für rueckbau: …" JEDES Aufrufs
+# (nicht aus einem Sicherungs-Dateinamen) und ruft rueckbau einmal je
+# unterschiedlichem Zeitstempel auf. Ein Test, der nur den
+# .claude-Zeitstempel gelesen und rueckbau nur damit aufgerufen hätte, wäre
+# genau dann flackernd gewesen, wenn agy einen anderen Zeitstempel bekam
+# (Befund aus Runde 6) — der agy-Anteil (settings.json + statusline.py)
+# wäre dann unbemerkt nicht zurückgespielt worden. ---
+t6_rueckbau_rundlauf() {
+  local h; neues_home h
+
+  local vor_claude vor_agy
+  vor_claude=$(cat "$h/.claude/settings.json")
+  vor_agy=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  local claude_out agy_out
+  claude_out=$(echo j | HOME="$h" bash "$skript" claude 2>&1) || { report "T6 Rückbau-Rundlauf" 1 "claude-Anwenden fehlgeschlagen: $claude_out"; return; }
+  agy_out=$(echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy 2>&1) || { report "T6 Rückbau-Rundlauf" 1 "agy-Anwenden fehlgeschlagen: $agy_out"; return; }
+
+  local ts_claude ts_agy
+  ts_claude=$(printf '%s\n' "$claude_out" | sed -n 's/^Zeitstempel für rueckbau: //p' | tail -1)
+  ts_agy=$(printf '%s\n' "$agy_out" | sed -n 's/^Zeitstempel für rueckbau: //p' | tail -1)
+  if [ -z "$ts_claude" ] || [ -z "$ts_agy" ]; then
+    report "T6 Rückbau-Rundlauf" 1 "kein Zeitstempel in der Ausgabe gefunden (claude=[$ts_claude], agy=[$ts_agy])"
+    return
+  fi
+
+  # agy läuft chronologisch NACH claude, ts_agy ist also nie kleiner als
+  # ts_claude. rueckbau legt bei jedem Aufruf eine eigene, neue Sicherung
+  # des GERADE AKTUELLEN Standes unter einem frischen Zeitstempel an; würde
+  # dieser zweite Aufruf zuerst für ts_claude laufen, könnte seine eigene
+  # (später, in Echtzeit gebildete) Sicherung zufällig genau auf ts_agy
+  # fallen und von einem anschließenden "rueckbau ts_agy" fälschlich als
+  # dessen Sicherung gelesen werden. Der jüngere Zeitstempel zuerst schließt
+  # das aus: eine Selbst-Sicherung entsteht dabei immer erst NACH ts_agy,
+  # kann also nie mit dem noch ausstehenden, kleineren ts_claude kollidieren.
+  local rc=0
+  if [ "$ts_agy" != "$ts_claude" ]; then
+    echo j | HOME="$h" bash "$skript" rueckbau "$ts_agy" >/dev/null 2>&1 || rc=$?
+  fi
+  echo j | HOME="$h" bash "$skript" rueckbau "$ts_claude" >/dev/null 2>&1 || rc=$?
+
+  local nach_claude nach_agy
+  nach_claude=$(cat "$h/.claude/settings.json")
+  nach_agy=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -eq 0 ] && [ "$vor_claude" = "$nach_claude" ] && [ "$vor_agy" = "$nach_agy" ] \
+     && [ ! -e "$h/.gemini/antigravity-cli/statusline.py" ]; then
+    report "T6 Rückbau-Rundlauf (claude+agy+statusline)" 0
+  else
+    report "T6 Rückbau-Rundlauf (claude+agy+statusline)" 1 \
+      "rc=$rc, ts_claude=$ts_claude, ts_agy=$ts_agy, claude wiederhergestellt=$([ "$vor_claude" = "$nach_claude" ] && echo ja || echo nein), agy wiederhergestellt=$([ "$vor_agy" = "$nach_agy" ] && echo ja || echo nein), statusline entfernt=$([ ! -e "$h/.gemini/antigravity-cli/statusline.py" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T7 (Befund 1, Runde 6): der ganze Zielpfad wird IMMER mit readlink -f
+# aufgelöst, auch wenn nur ein Zwischenverzeichnis (nicht die Zieldatei
+# selbst) ein Symlink ist — z. B. ~/.claude als Symlink in eine Kopie des
+# Checkouts. Muss ohne jede Änderung abgelehnt werden. ---
+t7_symlink_zwischenverzeichnis() {
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  local planted="$repo/planted-claude-dir"
+  mkdir -p "$planted"
+  cat >"$planted/settings.json" <<'EOF'
+{"env":{},"permissions":{"allow":[],"deny":["x"]}}
+EOF
+  ln -s "$planted" "$h/.claude"
+
+  local vor; vor=$(cat "$planted/settings.json")
+  echo j | HOME="$h" bash "$kopie_skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$planted/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T7 Symlink-Zwischenverzeichnis (~/.claude) wird abgelehnt" 0
+  else
+    report "T7 Symlink-Zwischenverzeichnis (~/.claude) wird abgelehnt" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T8 (Befund 2, Runde 6): der eigenständige Unterbefehl agy-statusline
+# installiert statusline.py unabhängig von agy/settings.json, braucht
+# weder PROJEKTE noch TRUSTED_WORKSPACE, und braucht auch für eine
+# Neuinstallation eine Rückfrage (Befund 5). ---
+t8_agy_statusline_eigenstaendig() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+
+  local out
+  out=$(echo j | HOME="$h" bash "$skript" agy-statusline 2>&1)
+  local rc=$?
+
+  if [ "$rc" -eq 0 ] && [ -x "$h/.gemini/antigravity-cli/statusline.py" ] \
+     && printf '%s' "$out" | grep -qF 'Neu installieren'; then
+    report "T8 agy-statusline installiert eigenständig, ohne PROJEKTE/TRUSTED_WORKSPACE" 0
+  else
+    report "T8 agy-statusline installiert eigenständig, ohne PROJEKTE/TRUSTED_WORKSPACE" 1 "rc=$rc, output=[$out]"
+  fi
+}
+
+# --- T9 (Befund 7, Runde 6): eine settings.json mit mehr als einem
+# aneinandergehängten JSON-Dokument wird abgelehnt, ohne jede Änderung. ---
+t9_mehrere_json_dokumente() {
+  local h; neues_home h
+  printf '{"a":1}\n{"b":2}\n' >"$h/.claude/settings.json"
+  local vor; vor=$(cat "$h/.claude/settings.json")
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T9 settings.json mit mehr als einem JSON-Dokument wird abgelehnt" 0
+  else
+    report "T9 settings.json mit mehr als einem JSON-Dokument wird abgelehnt" 1 "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T10 (Befund 3, Runde 6): agy prüft vorab, dass ALLE seine Ziele
+# (settings.json UND statusline.py) reguläre, beschreibbare Dateien sind —
+# eine statusline.py, die ein Verzeichnis ist, darf settings.json nicht
+# mehr anfassen (kein Teilschreiben). ---
+t10_agy_ziel_kein_teilschreiben() {
+  local h; neues_home h
+  mkdir -p "$h/.gemini/antigravity-cli/statusline.py"
+  local vor; vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T10 agy bricht vor jeder Änderung ab, wenn statusline.py kein reguläres Ziel ist" 0
+  else
+    report "T10 agy bricht vor jeder Änderung ab, wenn statusline.py kein reguläres Ziel ist" 1 \
+      "rc=$rc, settings unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T11 (Befund 1, Runde 7): claude bildet die Vereinigung aus Bestand
+# und Vorlage für permissions.allow/permissions.deny (CL-131) - eigene,
+# vor dem Anwenden vorhandene Regeln (auch eine so scharfe wie
+# "Bash(rm -rf /:*)") gehen dabei nicht verloren, defaultMode bleibt
+# ebenfalls erhalten. ---
+t11_claude_merge_vereinigung() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  cat >"$h/.claude/settings.json" <<'EOF'
+{"env":{"FOO":"bar"},"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(rm -rf /:*)","Read(~/.config/archiv/**)","Bash(git push --force:*)"],"defaultMode":"auto"}}
+EOF
+  chmod 600 "$h/.claude/settings.json"
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local f="$h/.claude/settings.json"
+
+  local fehlt=""
+  for e in "Bash(rm -rf /:*)" "Read(~/.config/archiv/**)" "Bash(git push --force:*)" "Bash(ls:*)"; do
+    jq -e --arg e "$e" '(.permissions.allow + .permissions.deny) | index($e) != null' "$f" >/dev/null 2>&1 \
+      || fehlt="$fehlt [$e]"
+  done
+  local defaultmode_ok=1
+  jq -e '.permissions.defaultMode=="auto" and .env.FOO=="bar"' "$f" >/dev/null 2>&1 && defaultmode_ok=0
+
+  if [ "$rc" -eq 0 ] && [ -z "$fehlt" ] && [ "$defaultmode_ok" -eq 0 ]; then
+    report "T11 claude-Merge verliert keine bestehenden allow-/deny-Einträge (Vereinigung)" 0
+  else
+    report "T11 claude-Merge verliert keine bestehenden allow-/deny-Einträge (Vereinigung)" 1 \
+      "rc=$rc, fehlende Einträge=[$fehlt], defaultMode/env erhalten=$([ "$defaultmode_ok" -eq 0 ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T12 (Befund 2b, Runde 7): rueckbau prüft VOR jeder Änderung auch
+# statusline.py auf ein beschreibbares Zielverzeichnis - eine
+# statusline.py, die per Symlink in ein nicht mehr beschreibbares
+# Verzeichnis zeigt, darf claude nicht schon zurückgespielt haben, bevor
+# der Rückbau daran scheitert. ---
+t12_rueckbau_statusline_nicht_beschreibbar() {
+  local h; neues_home h
+  local ts
+  ts=$(echo j | HOME="$h" bash "$skript" claude 2>&1 | sed -n 's/^Zeitstempel für rueckbau: //p' | tail -1)
+  if [ -z "$ts" ]; then
+    report "T12 rueckbau bricht ab, wenn statusline.py-Verzeichnis nicht beschreibbar ist" 1 "kein Zeitstempel"
+    return
+  fi
+
+  local ro; ro=$(mktemp -d); aufraeumen_dirs+=("$ro")
+  echo "old-content" >"$ro/statusline.py"
+  echo "backup-content" >"$ro/statusline.py.bak-$ts"
+  ln -s "$ro/statusline.py" "$h/.gemini/antigravity-cli/statusline.py"
+  chmod 555 "$ro"
+
+  local vor_claude; vor_claude=$(cat "$h/.claude/settings.json")
+  echo j | HOME="$h" bash "$skript" rueckbau "$ts" >/dev/null 2>&1
+  local rc=$?
+  chmod 755 "$ro"
+  local nach_claude; nach_claude=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor_claude" = "$nach_claude" ]; then
+    report "T12 rueckbau bricht ab, wenn statusline.py-Verzeichnis nicht beschreibbar ist" 0
+  else
+    report "T12 rueckbau bricht ab, wenn statusline.py-Verzeichnis nicht beschreibbar ist" 1 \
+      "rc=$rc, claude unverändert=$([ "$vor_claude" = "$nach_claude" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T13 (Befund 1, Runde 8): agy bildet die Vereinigung aus Bestand und
+# Vorlage für permissions.allow/permissions.deny genau wie claude — eigene,
+# vorher vorhandene Regeln (allow UND deny) und ein zusätzlicher
+# Top-Level-Schlüssel (hier "model") gehen dabei nicht verloren, obwohl
+# agy "ersetzen" ist und statusLine/trustedWorkspaces weiterhin aus der
+# Vorlage übernommen werden. ---
+t13_agy_merge_vereinigung() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"model":"custom-model","permissions":{"allow":["command(make)"],"deny":["command(git reset --hard)"]},"trustedWorkspaces":["/old"]}
+EOF
+  chmod 600 "$h/.gemini/antigravity-cli/settings.json"
+
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local f="$h/.gemini/antigravity-cli/settings.json"
+
+  local fehlt=""
+  jq -e '.permissions.allow|index("command(make)")!=null' "$f" >/dev/null 2>&1 || fehlt="$fehlt [allow command(make)]"
+  jq -e '.permissions.deny|index("command(git reset --hard)")!=null' "$f" >/dev/null 2>&1 || fehlt="$fehlt [deny command(git reset --hard)]"
+  local model_ok=1
+  jq -e '.model=="custom-model"' "$f" >/dev/null 2>&1 && model_ok=0
+  local trustedws_ok=1
+  jq -e --arg tw "$agy_tw_dir" '.trustedWorkspaces[0]==$tw' "$f" >/dev/null 2>&1 && trustedws_ok=0
+
+  if [ "$rc" -eq 0 ] && [ -z "$fehlt" ] && [ "$model_ok" -eq 0 ] && [ "$trustedws_ok" -eq 0 ]; then
+    report "T13 agy-Merge verliert keine bestehenden Regeln/Schlüssel (Vereinigung)" 0
+  else
+    report "T13 agy-Merge verliert keine bestehenden Regeln/Schlüssel (Vereinigung)" 1 \
+      "rc=$rc, fehlend=[$fehlt], model erhalten=$([ "$model_ok" -eq 0 ] && echo ja || echo nein), trustedWorkspaces aus Vorlage=$([ "$trustedws_ok" -eq 0 ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T14 (Befund 3, Runde 8): eine manipulierte claude-rechte.json mit
+# einem fremden Top-Level-Schlüssel (defaultMode) wird VOR jeder Änderung
+# abgelehnt — läuft gegen eine Kopie von vorlagen/, nie gegen den echten
+# Checkout. ---
+t14_claude_manipulierte_vorlage() {
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  cat >"$repo/setup/vorlagen/claude-rechte.json" <<'EOF'
+{"permissions":{"allow":["Bash(gh pr merge:*)"],"deny":["x"]},"defaultMode":"bypassPermissions"}
+EOF
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  cat >"$h/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":["y"]},"defaultMode":"default"}
+EOF
+  local vor; vor=$(cat "$h/.claude/settings.json")
+
+  echo j | HOME="$h" bash "$kopie_skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T14 manipulierte claude-rechte.json (fremder Top-Level-Schlüssel) wird abgelehnt" 0
+  else
+    report "T14 manipulierte claude-rechte.json (fremder Top-Level-Schlüssel) wird abgelehnt" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T15 (Befund 4, Runde 8): claude prüft jetzt auch vorab, dass die
+# Zieldatei beschreibbar ist (0444 wird abgelehnt, nichts geschrieben). ---
+t15_claude_ziel_nicht_beschreibbar() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  cat >"$h/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":["x"]}}
+EOF
+  chmod 444 "$h/.claude/settings.json"
+  local vor; vor=$(cat "$h/.claude/settings.json")
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  chmod 644 "$h/.claude/settings.json" 2>/dev/null || true
+  local nach; nach=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T15 claude bricht ab, wenn settings.json nicht beschreibbar ist (0444)" 0
+  else
+    report "T15 claude bricht ab, wenn settings.json nicht beschreibbar ist (0444)" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T16 (Befund 2, Runde 8): eine settings.json ohne permissions-Block
+# bricht mit einer klaren Meldung ab (kein jq-Fehler aus "null | keys"),
+# und wendet trotzdem korrekt an (die Vorlage liefert permissions neu). ---
+t16_claude_ohne_permissions_block() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  echo '{"env":{"FOO":"bar"}}' >"$h/.claude/settings.json"
+
+  local out
+  out=$(echo j | HOME="$h" bash "$skript" claude 2>&1)
+  local rc=$?
+  local f="$h/.claude/settings.json"
+
+  if [ "$rc" -eq 0 ] && jq -e '.permissions.deny|length>0' "$f" >/dev/null 2>&1 \
+     && jq -e '.env.FOO=="bar"' "$f" >/dev/null 2>&1; then
+    report "T16 settings.json ohne permissions-Block wird sauber gemerged" 0
+  else
+    report "T16 settings.json ohne permissions-Block wird sauber gemerged" 1 "rc=$rc, output=[$out]"
+  fi
+}
+
+t1_cp_scheitert
+t2_race_bei_rueckfrage
+t3_signal_raeumt_auf HUP 129
+t3_signal_raeumt_auf INT 130
+t3_signal_raeumt_auf TERM 143
+t4_statusline_unabhaengig
+t5_symlink_in_checkout
+t6_rueckbau_rundlauf
+t7_symlink_zwischenverzeichnis
+t8_agy_statusline_eigenstaendig
+t9_mehrere_json_dokumente
+t11_claude_merge_vereinigung
+t12_rueckbau_statusline_nicht_beschreibbar
+t10_agy_ziel_kein_teilschreiben
+t13_agy_merge_vereinigung
+t14_claude_manipulierte_vorlage
+t15_claude_ziel_nicht_beschreibbar
+t16_claude_ohne_permissions_block
+
+# --- T17 (Befund 1, Runde 9): das Injektions-Probe — ein TRUSTED_WORKSPACE
+# mit einem passend platzierten Anführungszeichen darf die Vorlage nicht
+# mehr per Textersetzung aufbrechen können (envsubst-Befund). Bricht vorab
+# an der Wertprüfung ab (enthält ein "), nichts wird geschrieben. ---
+t17_agy_injektion() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local vor; vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+  local boese='/x"], "permissions": {"allow": ["x"], "deny": []}, "trustedWorkspaces": ["/'
+
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$boese" bash "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T17 Anführungszeichen in TRUSTED_WORKSPACE bricht ohne Änderung ab (Injektions-Probe)" 0
+  else
+    report "T17 Anführungszeichen in TRUSTED_WORKSPACE bricht ohne Änderung ab (Injektions-Probe)" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T18 (Befund 1, Runde 9): eine Reihe ungültiger PROJEKTE-Werte wird
+# jeweils ohne jede Änderung abgelehnt: /, ., .., relativ, $HOME selbst,
+# ein Symlink auf $HOME, ein nicht vorhandener Pfad, ein Glob-Muster. ---
+t18_agy_pfad_werte() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local link; link=$(mktemp -d); aufraeumen_dirs+=("$link")
+  ln -s "$h" "$link/homelink"
+
+  local name wert vor nach rc alle_ok=0
+  local -a faelle=(
+    "/"
+    "."
+    ".."
+    "relative-pfad"
+    "$h"
+    "$link/homelink"
+    "/nicht-vorhanden-$$-xyz"
+    ".*"
+  )
+  for wert in "${faelle[@]}"; do
+    vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$h" PROJEKTE="$wert" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      alle_ok=1
+      report "T18 PROJEKTE=[$wert] wird abgelehnt" 1 "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+    fi
+  done
+  [ "$alle_ok" -eq 0 ] && report "T18 alle ungültigen PROJEKTE-Werte werden abgelehnt (/, ., .., relativ, \$HOME, Symlink auf \$HOME, fehlend, Glob)" 0
+}
+
+# --- T19 (Befund 2, Runde 9): eine manipulierte agy-settings.json mit
+# einem fremden statusLine.command wird VOR jeder Änderung abgelehnt —
+# läuft gegen eine Kopie von vorlagen/, nie gegen den echten Checkout. ---
+t19_agy_statusline_manipuliert() {
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  jq '.statusLine.command = "/bin/sh -c whoami"' "$vorlagen_dir/agy-settings.json" \
+    > "$repo/setup/vorlagen/agy-settings.json"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local vor; vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" bash "$kopie_skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T19 manipulierte agy-settings.json (fremdes statusLine.command) wird abgelehnt" 0
+  else
+    report "T19 manipulierte agy-settings.json (fremdes statusLine.command) wird abgelehnt" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T20 (Befund 3, Runde 9): eine erweiterte ACL auf der Zieldatei
+# überlebt claude (kopiere_rechte statt chmod --reference allein). Nur
+# ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t20_acl_erhalten() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T20 ACL bleibt nach claude erhalten (übersprungen, getfacl/setfacl fehlen)" 0
+    return
+  fi
+  local h; neues_home h
+  local f="$h/.claude/settings.json"
+  if ! setfacl -m u:"$(id -u)":rwx "$f" 2>/dev/null; then
+    report "T20 ACL bleibt nach claude erhalten (übersprungen, setfacl schlägt hier fehl, z. B. Dateisystem ohne ACL-Unterstützung)" 0
+    return
+  fi
+  local acl_vor; acl_vor=$(getfacl -c "$f" 2>/dev/null)
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local acl_nach; acl_nach=$(getfacl -c "$f" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && [ "$acl_vor" = "$acl_nach" ] && printf '%s' "$acl_nach" | grep -Eq '^user:[^:]+:'; then
+    report "T20 ACL bleibt nach claude erhalten (kopiere_rechte statt chmod --reference)" 0
+  else
+    report "T20 ACL bleibt nach claude erhalten (kopiere_rechte statt chmod --reference)" 1 \
+      "rc=$rc, ACL gleich=$([ "$acl_vor" = "$acl_nach" ] && echo ja || echo nein)"
+  fi
+}
+
+t17_agy_injektion
+t18_agy_pfad_werte
+t19_agy_statusline_manipuliert
+t20_acl_erhalten
+
+# --- T21 (Befund 1, Runde 10): $HOME ist selbst ein Symlink (der Bluefin-
+# Fall /home -> var/home). TRUSTED_WORKSPACE=$HOME (roh, der Symlink-Pfad),
+# TRUSTED_WORKSPACE=das aufgelöste Ziel und TRUSTED_WORKSPACE=ein Vorfahre
+# des Ziels müssen alle drei abgelehnt werden. ---
+t21_home_symlink() {
+  local real_home; real_home=$(mktemp -d); aufraeumen_dirs+=("$real_home")
+  mkdir -p "$real_home/.gemini/antigravity-cli"
+  cat >"$real_home/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  local linkdir; linkdir=$(mktemp -d); aufraeumen_dirs+=("$linkdir")
+  local home_link="$linkdir/homelink"
+  ln -s "$real_home" "$home_link"
+  local vorfahre; vorfahre=$(dirname "$real_home")
+
+  local alle_ok=0 tw vor nach rc
+  local -a faelle=("$home_link" "$real_home" "$vorfahre")
+  for tw in "${faelle[@]}"; do
+    vor=$(cat "$real_home/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$home_link" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$tw" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$real_home/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      alle_ok=1
+      report "T21 TRUSTED_WORKSPACE=[$tw] bei \$HOME als Symlink wird abgelehnt" 1 "rc=$rc"
+    fi
+  done
+  [ "$alle_ok" -eq 0 ] && report "T21 \$HOME als Symlink: \$HOME selbst/Ziel/Vorfahre werden trotzdem erkannt" 0
+}
+
+# --- T22 (Befund 2, Runde 10): TRUSTED_WORKSPACE mit je einem verbotenen
+# Zeichen (| + ( ) { } ^ $) oder U+202E wird abgelehnt — der Pfad existiert
+# jeweils wirklich (realpath -e muss durchkommen), damit die Positivliste
+# selbst geprüft wird, nicht nur "Pfad fehlt". ---
+t22_zeichensatz() {
+  local basis; basis=$(mktemp -d); aufraeumen_dirs+=("$basis")
+  local ok=0 zeichen dir h vor nach rc
+  local -a zeichen_liste=('|' '+' '(' ')' '{' '}' '^' '$')
+  for zeichen in "${zeichen_liste[@]}"; do
+    dir="$basis/x${zeichen}y"
+    mkdir -p "$dir" 2>/dev/null
+    [ -d "$dir" ] || continue
+    h=$(mktemp -d); aufraeumen_dirs+=("$h")
+    mkdir -p "$h/.gemini/antigravity-cli"
+    cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+    vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$dir" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      ok=1
+      report "T22 Zeichen [$zeichen] in TRUSTED_WORKSPACE wird abgelehnt" 1 "rc=$rc, Pfad=$dir"
+    fi
+  done
+  # U+202E (Right-to-Left Override) gesondert, kein normales Shell-Zeichen.
+  local rlo; rlo=$(printf '\xe2\x80\xae')
+  dir="$basis/x${rlo}y"
+  if mkdir -p "$dir" 2>/dev/null; then
+    h=$(mktemp -d); aufraeumen_dirs+=("$h")
+    mkdir -p "$h/.gemini/antigravity-cli"
+    cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+    vor=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    echo j | HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$dir" bash "$skript" agy >/dev/null 2>&1
+    rc=$?
+    nach=$(cat "$h/.gemini/antigravity-cli/settings.json")
+    if [ "$rc" -eq 0 ] || [ "$vor" != "$nach" ]; then
+      ok=1
+      report "T22 U+202E in TRUSTED_WORKSPACE wird abgelehnt" 1 "rc=$rc"
+    fi
+  fi
+  [ "$ok" -eq 0 ] && report 'T22 verbotene Zeichen (| + ( ) { } ^ $, U+202E) in TRUSTED_WORKSPACE werden abgelehnt' 0
+}
+
+# --- T23 (Befund 3, Runde 10): eine ACL auf der Zieldatei, aber
+# getfacl/setfacl fehlen im PATH -> Abbruch VOR der Rückfrage/Sicherung,
+# keine überzählige .bak-Datei. Nur ausgeführt, wenn getfacl/setfacl real
+# vorhanden sind (um die ACL überhaupt setzen zu können). ---
+t23_acl_werkzeuge_fehlen_vorab() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (übersprungen, getfacl/setfacl fehlen hier ganz)" 0
+    return
+  fi
+  local h; neues_home h
+  local f="$h/.claude/settings.json"
+  if ! setfacl -m u:"$(id -u)":rwx "$f" 2>/dev/null; then
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (übersprungen, setfacl schlägt hier fehl)" 0
+    return
+  fi
+
+  local stub; neuer_stub_dir stub
+  local prog
+  for prog in bash jq mktemp readlink chmod diff cp mv grep install cmp sha256sum ls realpath env cat sleep date; do
+    command -v "$prog" >/dev/null 2>&1 && ln -s "$(command -v "$prog")" "$stub/$prog"
+  done
+
+  local vor; vor=$(cat "$f")
+  echo j | PATH="$stub" HOME="$h" "$stub/bash" "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$f")
+  local reste; reste=$(find "$h" -name '*.bak-*' 2>/dev/null)
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ] && [ -z "$reste" ]; then
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (keine überzählige .bak)" 0
+  else
+    report "T23 fehlende ACL-Werkzeuge brechen vor Rückfrage/Sicherung ab (keine überzählige .bak)" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein), Reste=[$reste]"
+  fi
+}
+
+# --- T24 (Befund 4, Runde 10): die Quelle hat keine ACL, aber das
+# Zielverzeichnis trägt ein Default-ACL — die neue Datei darf die geerbte
+# ACL nicht behalten. Nur ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t24_geerbte_acl_entfernt() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (übersprungen, getfacl/setfacl fehlen)" 0
+    return
+  fi
+  local h; neues_home h
+  if ! setfacl -d -m u:"$(id -u)":rwx "$h/.claude" 2>/dev/null; then
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (übersprungen, Default-ACL hier nicht setzbar)" 0
+    return
+  fi
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  local acl_nach; acl_nach=$(getfacl -c "$h/.claude/settings.json" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && ! printf '%s' "$acl_nach" | grep -Eq '^user:[^:]+:'; then
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (setfacl -b)" 0
+  else
+    report "T24 vom Verzeichnis geerbte ACL wird entfernt (setfacl -b)" 1 "rc=$rc, ACL=[$acl_nach]"
+  fi
+}
+
+# --- T25 (Befund 1, Runde 11): eine frisch installierte statusline.py
+# übernimmt NIE die ACL des Checkouts — läuft gegen eine Kopie von
+# vorlagen/, deren statusline.py eine eigene, dem Ziel fremde ACL trägt.
+# Nur ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t25_statusline_uebernimmt_nie_checkout_acl() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (übersprungen, getfacl/setfacl fehlen)" 0
+    return
+  fi
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+  local kopie_statusline="$repo/setup/vorlagen/statusline.py"
+  if ! setfacl -m u:"$(id -u)":rwx "$kopie_statusline" 2>/dev/null; then
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (übersprungen, setfacl schlägt hier fehl)" 0
+    return
+  fi
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  echo j | HOME="$h" bash "$kopie_skript" agy-statusline >/dev/null 2>&1
+  local rc=$?
+  local acl_ziel; acl_ziel=$(getfacl -c "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && ! printf '%s' "$acl_ziel" | grep -Eq '^user:[^:]+:'; then
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (Neuinstallation)" 0
+  else
+    report "T25 statusline.py übernimmt nie die ACL des Checkouts (Neuinstallation)" 1 "rc=$rc, ACL=[$acl_ziel]"
+  fi
+}
+
+# --- T26 (Befund 1, Runde 11): beim Ersetzen einer bestehenden
+# statusline.py kommt die ACL vom BESTEHENDEN Ziel, nicht vom Checkout —
+# das bestehende Ziel und der Checkout tragen hier je eine andere,
+# unterscheidbare ACL. Nur ausgeführt, wenn getfacl/setfacl vorhanden sind. ---
+t26_statusline_ersetzen_acl_vom_ziel() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels (übersprungen)" 0
+    return
+  fi
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+  local kopie_statusline="$repo/setup/vorlagen/statusline.py"
+  if ! setfacl -m u:"$(id -u)":r-- "$kopie_statusline" 2>/dev/null; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels (übersprungen)" 0
+    return
+  fi
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  # Ziel existiert schon, mit anderem Inhalt (damit ein Diff ansteht) und
+  # einer eigenen ACL, die sich vom Checkout unterscheidet.
+  printf '#!/usr/bin/env python3\nprint("alt")\n' >"$h/.gemini/antigravity-cli/statusline.py"
+  chmod 0755 "$h/.gemini/antigravity-cli/statusline.py"
+  if ! setfacl -m u:"$(id -u)":rwx "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels (übersprungen)" 0
+    return
+  fi
+
+  echo j | HOME="$h" bash "$kopie_skript" agy-statusline >/dev/null 2>&1
+  local rc=$?
+  local acl_ziel; acl_ziel=$(getfacl -c "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null)
+
+  if [ "$rc" -eq 0 ] && printf '%s' "$acl_ziel" | grep -q "user:$(id -un):rwx"; then
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels, nicht die des Checkouts" 0
+  else
+    report "T26 statusline.py-Ersetzen übernimmt die ACL des bestehenden Ziels, nicht die des Checkouts" 1 \
+      "rc=$rc, ACL=[$acl_ziel]"
+  fi
+}
+
+# --- T27 (Befund 2a, Runde 11): fehlen getfacl/setfacl und trägt
+# statusline.py eine ACL, muss "agy" abbrechen, BEVOR settings.json
+# geschrieben wird. Nur ausgeführt, wenn getfacl/setfacl real vorhanden
+# sind (um die ACL überhaupt setzen zu können). ---
+t27_agy_statusline_acl_vor_settings() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab (übersprungen)" 0
+    return
+  fi
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":[]},"trustedWorkspaces":["/old"]}
+EOF
+  printf '#!/usr/bin/env python3\nprint("alt")\n' >"$h/.gemini/antigravity-cli/statusline.py"
+  chmod 0755 "$h/.gemini/antigravity-cli/statusline.py"
+  if ! setfacl -m u:"$(id -u)":rwx "$h/.gemini/antigravity-cli/statusline.py" 2>/dev/null; then
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab (übersprungen)" 0
+    return
+  fi
+
+  local stub; neuer_stub_dir stub
+  local prog
+  for prog in bash jq mktemp readlink chmod diff cp mv grep install cmp sha256sum ls realpath env cat sleep date; do
+    command -v "$prog" >/dev/null 2>&1 && ln -s "$(command -v "$prog")" "$stub/$prog"
+  done
+
+  local vor_settings; vor_settings=$(cat "$h/.gemini/antigravity-cli/settings.json")
+  echo j | PATH="$stub" HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" \
+    "$stub/bash" "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local nach_settings; nach_settings=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor_settings" = "$nach_settings" ]; then
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab" 0
+  else
+    report "T27 fehlende ACL-Werkzeuge für statusline.py brechen vor settings.json ab" 1 \
+      "rc=$rc, settings unverändert=$([ "$vor_settings" = "$nach_settings" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T28 (Befund 2b, Runde 11): rueckbau erkennt eine vom Zielverzeichnis
+# geerbte ACL schon in der frühen Vorab-Prüfung (nicht erst am
+# tatsächlichen mktemp) — hier trägt NUR das agy-Zielverzeichnis ein
+# Default-ACL. Ein gestubbter "date" erzwingt denselben Zeitstempel für
+# claude und agy, damit ein einziger rueckbau-Aufruf beide zusammen
+# zurückspielen soll (genau das im Befund beschriebene Szenario, nicht dem
+# Zufall überlassen) — ohne getfacl/setfacl darf rueckbau claude dabei
+# NICHT zurückspielen, bevor es an agy scheitert (all-or-nothing). Nur
+# ausgeführt, wenn getfacl/setfacl real vorhanden sind. ---
+t28_rueckbau_default_acl_frueh_erkannt() {
+  if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+    report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing (übersprungen)" 0
+    return
+  fi
+  local h; neues_home h
+  if ! setfacl -d -m u:"$(id -u)":rwx "$h/.gemini/antigravity-cli" 2>/dev/null; then
+    report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing (übersprungen, Default-ACL hier nicht setzbar)" 0
+    return
+  fi
+
+  local datestub; datestub=$(mktemp -d); aufraeumen_dirs+=("$datestub")
+  local real_date; real_date=$(command -v date)
+  local ts_fix="20261231-235900"
+  printf '#!/usr/bin/env bash\nif [ "$1" = "+%%Y%%m%%d-%%H%%M%%S" ]; then echo %s; else exec "%s" "$@"; fi\n' \
+    "$ts_fix" "$real_date" >"$datestub/date"
+  chmod +x "$datestub/date"
+
+  echo j | PATH="$datestub:$PATH" HOME="$h" bash "$skript" claude >/dev/null 2>&1 \
+    || { report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing" 1 "claude-Anwenden fehlgeschlagen"; return; }
+  echo j | PATH="$datestub:$PATH" HOME="$h" PROJEKTE="$agy_projekte_dir" TRUSTED_WORKSPACE="$agy_tw_dir" \
+    bash "$skript" agy >/dev/null 2>&1 \
+    || { report "T28 rueckbau erkennt geerbte ACL vorab, all-or-nothing" 1 "agy-Anwenden fehlgeschlagen"; return; }
+
+  local stub; neuer_stub_dir stub
+  local prog
+  for prog in bash jq mktemp readlink chmod diff cp mv grep install cmp sha256sum ls realpath env cat sleep date; do
+    command -v "$prog" >/dev/null 2>&1 && ln -s "$(command -v "$prog")" "$stub/$prog"
+  done
+
+  local vor_claude; vor_claude=$(cat "$h/.claude/settings.json")
+  local vor_agy; vor_agy=$(cat "$h/.gemini/antigravity-cli/settings.json")
+  echo j | PATH="$stub" HOME="$h" "$stub/bash" "$skript" rueckbau "$ts_fix" >/dev/null 2>&1
+  local rc=$?
+  local nach_claude; nach_claude=$(cat "$h/.claude/settings.json")
+  local nach_agy; nach_agy=$(cat "$h/.gemini/antigravity-cli/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor_claude" = "$nach_claude" ] && [ "$vor_agy" = "$nach_agy" ]; then
+    report "T28 rueckbau erkennt geerbte ACL im agy-Zielverzeichnis vorab, claude bleibt unverändert (all-or-nothing)" 0
+  else
+    report "T28 rueckbau erkennt geerbte ACL im agy-Zielverzeichnis vorab, claude bleibt unverändert (all-or-nothing)" 1 \
+      "rc=$rc, claude unverändert=$([ "$vor_claude" = "$nach_claude" ] && echo ja || echo nein), agy unverändert=$([ "$vor_agy" = "$nach_agy" ] && echo ja || echo nein)"
+  fi
+}
+
+t21_home_symlink
+t22_zeichensatz
+t23_acl_werkzeuge_fehlen_vorab
+t24_geerbte_acl_entfernt
+t25_statusline_uebernimmt_nie_checkout_acl
+t26_statusline_ersetzen_acl_vom_ziel
+t27_agy_statusline_acl_vor_settings
+t28_rueckbau_default_acl_frueh_erkannt
+
+echo "---"
+echo "$pass PASS, $fail FAIL"
+[ "$fail" -eq 0 ]
