@@ -13,7 +13,8 @@
     "quelle": "setup/vorlagen/agy-settings.json",
     "ziel": "${HOME}/.gemini/antigravity-cli/settings.json",
     "rechte": true,
-    "beschreibung": "Rechte-Vorlage für agy (permissions, statusLine, trustedWorkspaces); nur der Mensch wendet sie an, siehe setup/vorlagen/README.md"
+    "anwenden": "ersetzen",
+    "beschreibung": "Rechte-Vorlage für agy (permissions, statusLine, trustedWorkspaces), deckt die ganze Zieldatei ab; nur der Mensch wendet sie an, siehe setup/vorlagen/README.md. ${PROJEKTE} und ${TRUSTED_WORKSPACE} vorher mit envsubst setzen"
   },
   {
     "id": "claude-rechte-vorlage",
@@ -21,7 +22,8 @@
     "quelle": "setup/vorlagen/claude-rechte.json",
     "ziel": "${HOME}/.claude/settings.json",
     "rechte": true,
-    "beschreibung": "Rechte-Vorlage für den permissions-Block von Claude Code; nur der Mensch mergt sie ein, siehe setup/vorlagen/README.md"
+    "anwenden": "fragment-merge",
+    "beschreibung": "Rechte-Vorlage für den permissions-Block von Claude Code, deckt nur diesen Block ab, nicht die ganze Zieldatei; nur der Mensch mergt sie ein, siehe setup/vorlagen/README.md"
   },
   {
     "id": "agy-statusline",
