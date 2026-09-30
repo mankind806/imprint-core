@@ -28,7 +28,7 @@
     "typ": "copy",
     "quelle": "setup/vorlagen/statusline.py",
     "ziel": "${HOME}/.gemini/antigravity-cli/statusline.py",
-    "rechte": false,
-    "beschreibung": "Statuszeilen-Skript für agy; kein Sicherheits-/Rechte-Inhalt, wird nach dem Anwenden der agy-Rechte-Vorlage dorthin kopiert, siehe setup/vorlagen/README.md"
+    "rechte": true,
+    "beschreibung": "Statuszeilen-Skript für agy; agy führt es aus, wer es schreibt führt darüber Code aus, deshalb rechte:true; nur der Mensch kopiert es, siehe setup/vorlagen/README.md"
   }
 ]

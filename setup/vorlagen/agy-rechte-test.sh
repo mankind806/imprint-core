@@ -99,18 +99,6 @@ allowed_ok() {
   ' >/dev/null 2>&1
 }
 
-# denied_nonempty <blob>: valid_status AND at least one denied action,
-# without checking which kind. Used only where the probe has no single
-# expected action kind to assert (T6: the write itself is what is checked).
-denied_nonempty() {
-  local obj
-  obj="$(result_json "$1")" || return 1
-  printf '%s' "$obj" | jq -e '
-    type == "object" and has("status") and (.status != null) and
-    (((.denied_actions // []) | length) > 0)
-  ' >/dev/null 2>&1
-}
-
 # denied_as <blob> <kind>: valid_status AND at least one denied action whose
 # stringified form contains <kind> (e.g. read_file, command). Tolerant on
 # purpose: see the header comment on the unknown field layout.
@@ -220,10 +208,10 @@ t6_out="$(run_agy "Create the file $t6_target containing exactly the text: shoul
 if [ -e "$t6_target" ] || [ -L "$t6_target" ]; then
   rm -rf "$t6_target"
   report "T6 write outside allowlist (must be denied)" 1 "file was created despite missing grant"
-elif denied_nonempty "$t6_out"; then
+elif denied_as "$t6_out" write_file; then
   report "T6 write outside allowlist (must be denied)" 0 ""
 else
-  report "T6 write outside allowlist (must be denied)" 1 "no confirmed denial (invalid/empty output, or empty denied_actions) and file absent - inconclusive"
+  report "T6 write outside allowlist (must be denied)" 1 "no confirmed write_file denial (invalid/empty output, or not denied) and file absent - inconclusive"
 fi
 
 # T7: git push --force in a disposable repo with no remote, expect denial.

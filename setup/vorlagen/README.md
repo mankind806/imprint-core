@@ -24,7 +24,8 @@ Abweichung, keine Auslassung durch Versehen.
 ## Platzhalter
 
 * `${HOME}` — Home-Verzeichnis.
-* `${PROJEKTE}` — Ordner der Repo-Checkouts (bei der Quelle: `~/Projekte`).
+* `${PROJEKTE}` — Ordner der Repo-Checkouts, vom Menschen beim Anwenden per Umgebungsvariable
+  gesetzt (z. B. `${PROJEKTE}/imprint`); kein im Repository fest eincodierter Rechnerpfad.
 * `${TRUSTED_WORKSPACE}` — der Wert für `trustedWorkspaces`; absichtlich ohne Vorbelegung
   auf `${HOME}`, damit der Mensch beim Anwenden bewusst entscheidet, wie weit dieser Eintrag
   reicht, statt eine stillschweigende Vorbelegung zu übernehmen.
@@ -39,8 +40,9 @@ oder mit `envsubst` beim Anwenden. Deshalb zeigt `setup --plan` diese beiden Ein
 nicht auf einen Checkout-Pfad: agy läuft das Kommando direkt aus, und ein Checkout-Pfad wäre nach
 einem `git worktree remove` oder einem Verschieben des Klons weg. Beim Anwenden kopiert der Mensch
 `setup/vorlagen/statusline.py` selbst dorthin (siehe „Anwenden" unten); das Inventar trägt dafür
-den Eintrag `agy-statusline` (Typ `copy`, `rechte: false` — das Skript selbst ist kein
-Sicherheits- oder Rechte-Inhalt, nur sein Aufrufpfad in `agy-settings.json` ist es).
+den Eintrag `agy-statusline` (Typ `copy`, `rechte: true` — agy führt diese Datei direkt aus, wer
+sie schreibt, führt damit Code in agys Kontext aus; das ist Rechte-Inhalt, nicht nur ihr Aufrufpfad
+in `agy-settings.json`). Der Mensch-Schritt zum Kopieren steht in „Anwenden" oben.
 
 ## Anwenden (nur der Mensch)
 
@@ -110,17 +112,17 @@ läuft ausdrücklich unter `--mode accept-edits`, weil genau dieser Modus die `w
 umgeht (siehe nächster Abschnitt).
 
 ```sh
-AGY_TEST_WORKDIR=~/Projekte/imprint \
-AGY_TEST_ALLOWED_DIR=~/Projekte/imprint-wt \
+AGY_TEST_WORKDIR=${PROJEKTE}/imprint \
+AGY_TEST_ALLOWED_DIR=${PROJEKTE}/imprint-wt \
 AGY_TEST_SERVICE=imprint-oberflaeche.service \
   setup/vorlagen/agy-rechte-test.sh
 ```
 
 Leere oder nicht als JSON lesbare `agy`-Ausgabe zählt in keinem der acht Fälle als Ablehnung: das
 Skript verlangt zuerst gültiges JSON mit einem gesetzten `status`-Feld, und prüft für die
-Lese-Verweigerungen (T2, T8) und die Kommando-Verweigerungen (T4, T7) zusätzlich, dass die
-zurückgemeldeten `denied_actions` tatsächlich `read_file` beziehungsweise `command` erkennen
-lassen. Das genaue Feldlayout von `denied_actions` ist dabei nicht dokumentiert bekannt — nur gegen
+Lese-Verweigerungen (T2, T8), die Schreib-Verweigerung (T6) und die Kommando-Verweigerungen (T4,
+T7) zusätzlich, dass die zurückgemeldeten `denied_actions` tatsächlich `read_file`, `write_file`
+beziehungsweise `command` erkennen lassen. Das genaue Feldlayout von `denied_actions` ist dabei nicht dokumentiert bekannt — nur gegen
 eine reale `agy`-Ausgabe als Bestehen/Nichtbestehen gemessen, nie gegen ein Schema —, deshalb prüft
 das Skript das per Teilstring-Test auf die stringifizierte Form, nicht auf einen konkreten
 Schlüssel.
