@@ -158,7 +158,7 @@ class TestNoSentinelReachesPost(_NamesFileMixin, unittest.TestCase):
 
 class TestMaskThenCut(_NamesFileMixin, unittest.TestCase):
     SECRET = "api_key=wachWertBeta"
-    TOKEN = "Qw8eR7tY6uI5oP4aS3dF2gH1jK9lZx"  # 30 chars; a 20-char fragment is no longer "opaque"
+    RAND = "Qw8eR7tY6uI5oP4a" + "S3dF2gH1jK9lZx"  # 30 chars; a 20-char fragment is no longer "opaque"
     MAIL = "wache.sentinel@mail.example"
 
     def test_done_check_tail_cut_inside_api_key(self):
@@ -187,7 +187,7 @@ class TestMaskThenCut(_NamesFileMixin, unittest.TestCase):
         # (diff, fragments that must not reach tc.post)
         return [
             (self.cut_inside(self.SECRET.replace("Beta", "Gamma"), 5), ["wachWertGamma"]),  # inside "api_key="
-            (self.cut_inside(self.TOKEN, 20), [self.TOKEN[:12]]),  # 20-char token fragment
+            (self.cut_inside(self.RAND, 20), [self.RAND[:12]]),  # 20-char token fragment
             (self.cut_inside(self.MAIL, len("wache.sentinel@mai")), ["wache.sentinel"]),  # inside the domain
         ]
 
@@ -220,7 +220,7 @@ class TestMaskThenCut(_NamesFileMixin, unittest.TestCase):
 
 # Built from parts so this test file's own diff carries no real-looking secret.
 REAL_KEY_LINE = "api" + '_key = "sk-live-' + '4f9a8b7c6d5e4f3a2b1c"'
-REAL_BEARER_LINE = "Authorization: " + "Bearer " + "eyJhbGciOiJIUzI1NiJ9" + "abcdef123456"
+REAL_BEARER_LINE = "Authorization: " + "Bearer " + "eyJ" + "hbGciOiJIUzI1NiJ9" + "abcdef123456"
 GO_CODE_LINES = [
     '// Laufs (seitenToken == "").',
     'if err != nil && seitenToken == "" {',
@@ -294,6 +294,39 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
     def test_regression_empty_commit_with_trailer_passes(self):
         r = self.run_tool("ts-commit-check", "--cached", "--msg", "docs: x\n\n" + NOREPLY_TRAILERS)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # --- blind round 3, B: range resolution, root commit, empty message ---
+    def test_three_dot_and_two_dot_ranges(self):
+        self.commit("retries = 3\n", "chore: base")
+        subprocess.run(["git", "-C", self.repo, "branch", "-M", "main"], check=True)
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "-b", "feat"], check=True)
+        self.commit(REAL_KEY_LINE + "\n", "feat: key")
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "main"], check=True)
+        for rng in ("main...feat", "main..feat", "...feat", "feat"):  # "...feat" = HEAD(main)...feat
+            with self.subTest(rng=rng):
+                r = self.run_tool("ts-commit-check", rng)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        r = self.run_tool("ts-commit-check", "main..nicht-da")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("nicht auflösbar", r.stdout)
+
+    def test_root_commit_is_checked(self):
+        self.commit(REAL_KEY_LINE + "\n", "feat: first")
+        r = self.run_tool("ts-commit-check")  # default HEAD~1..HEAD, HEAD is the root
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        mod = load_tool("ts-commit-check")
+        args = mod.argparse.Namespace(msg_file=None, msg=None, cached=False, range="HEAD~1..HEAD")
+        msg, diff, _, units, err = mod.get_diff_and_msg(args, cwd=self.repo)
+        self.assertIsNone(err)
+        self.assertIn("sk-live-", diff)  # TypeSafe sees the root diff, not an empty one
+        self.assertEqual(msg.strip(), "feat: first")
+
+    def test_empty_message_does_not_skip_local_alarm(self):
+        with open(os.path.join(self.repo, "config.py"), "w") as f:
+            f.write(REAL_KEY_LINE + "\n")
+        subprocess.run(["git", "-C", self.repo, "add", "config.py"], check=True)
+        r = self.run_tool("ts-commit-check", "--cached")  # no commits yet, so no message
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     # --- blind round 3, A: executor identities and non-addresses ---
     def test_declared_identities_pass(self):
@@ -498,7 +531,7 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         # Built from parts so this test file's own diff carries none of them whole.
         loud = [REAL_KEY_LINE, REAL_BEARER_LINE,
                 '"to' + 'ken": "abcd1234efgh5678"',
-                "API" + "_KEY=sk_live_4f9a8b7c6d5e4f3a2b",
+                "API" + "_KEY=sk_" + "live_4f9a8b7c6d5e4f3a2b",
                 "Basic " + "dXNlcjpwYXNzd29yZDEyMzQ=",
                 '"client_' + 'secret": "GOCSPX-' + '4f9a8b7c6d5e4f3a2b1c"',
                 '"refresh_' + 'token": "1//' + '0gAbCdEf123456"',

@@ -1,5 +1,5 @@
 {
-  "//": "Shared masking test cases for ts_common.mask_detail (Python, canonical) and its Go counterpart (imprint-core tools/imprint-dev/typesafe.go MaskDetail, ported in a later package). All names/addresses/keys below are synthetic fixtures, never real data. 'names' lists the entries that must be present in TYPESAFE_NAMES_FILE for the 'name' category cases to hit.",
+  "//": "Shared masking test cases for ts_common.mask_detail (Python, canonical) and its Go counterpart (imprint-core tools/imprint-dev/typesafe.go MaskDetail, run by TestMaskParity in typesafe_test.go). All names/addresses/keys below are synthetic fixtures, never real data. 'names' lists the entries that must be present in TYPESAFE_NAMES_FILE for the 'name' category cases to hit.",
   "names": ["Max Mustermann", "Erika Musterfrau"],
   "cases": [
     {
@@ -16,8 +16,8 @@
     },
     {
       "id": "secret_kw_keyval_password",
-      "text": "password: hunter2fake",
-      "must_not_contain": ["hunter2fake"],
+      "text": "password: fakeHunter2",
+      "must_not_contain": ["fakeHunter2"],
       "min_counts": {"secret_kw": 1}
     },
     {
@@ -93,6 +93,98 @@
       "must_not_contain": ["12345 Musterstadt am Fluss", "Fluss"],
       "min_counts": {"address": 1},
       "note": "Python's PLZ+Ort pattern accepts any '(am|an der|im) <Capitalized word>' suffix generically. Since imprint-core-CL-013a, Go's plzOrtRE generalizes the 'am'/'an der' suffix the same way (any capitalized word); 'im'/'ob der' stay a fixed list (im Breisgau, ob der Tauber) so 'PLZ ist 10115 Berlin im Brief.' still leaves 'im Brief' unmasked (typesafe_test.go TestMaskAddresses) - a narrower parity than Python's fully generic 'im' handling, intentional and covered by both test suites."
+    },
+    {
+      "id": "secret_kw_db_pass",
+      "text": "DB_PASS=Synth2024Secret!",
+      "must_not_contain": ["Synth2024Secret"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_quoted_password_with_spaces",
+      "text": "password = \"synth geheimes Passwort 2024\"",
+      "must_not_contain": ["geheimes", "Passwort 2024"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_passphrase",
+      "text": "passphrase: \"synth-correct-horse-9\"",
+      "must_not_contain": ["correct-horse"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_passwd",
+      "text": "passwd: synth2024x",
+      "must_not_contain": ["synth2024x"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_credential",
+      "text": "credential=SynthCred2024",
+      "must_not_contain": ["SynthCred2024"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_private_key",
+      "text": "private_key = \"synth-pk-material-7\"",
+      "must_not_contain": ["pk-material"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_access_key",
+      "text": "aws_access_key_id = SynthAccessKey2024",
+      "must_not_contain": ["SynthAccessKey2024"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "secret_kw_auth",
+      "text": "auth=synthAuthValue7 weiter",
+      "must_not_contain": ["synthAuthValue7"],
+      "min_counts": {"secret_kw": 1}
+    },
+    {
+      "id": "opaque_aws_key_id_akia",
+      "text": "aws_id AKIAIOSFODNN7EXAMPLE im Log",
+      "must_not_contain": ["IOSFODNN7EXAMPLE"],
+      "min_counts": {"opaque": 1},
+      "note": "20 characters, under the 24-character opaque limit; AWS's own documentation example."
+    },
+    {
+      "id": "opaque_aws_key_id_asia",
+      "text": "session ASIAIOSFODNN7EXAMPLE im Log",
+      "must_not_contain": ["IOSFODNN7EXAMPLE"],
+      "min_counts": {"opaque": 1}
+    },
+    {
+      "id": "iban",
+      "text": "IBAN DE89 3704 0044 0532 0130 00 bitte",
+      "must_not_contain": ["3704 0044", "0532 0130"],
+      "min_counts": {"iban": 1}
+    },
+    {
+      "id": "phone_plus49",
+      "text": "Tel. +49 221 12345678 tagsüber",
+      "must_not_contain": ["12345678"],
+      "min_counts": {"phone": 1}
+    },
+    {
+      "id": "phone_leading_zero",
+      "text": "mobil 0171/1234567-8 abends",
+      "must_not_contain": ["1234567"],
+      "min_counts": {"phone": 1}
+    },
+    {
+      "id": "negative_dates_versions",
+      "text": "Datum 01.01.2024, 04:06 Uhr, Version 0.12.3, Port 8080",
+      "must_not_contain": [],
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "opaque_known_prefix_short",
+      "text": "refresh 1//0gSynthFixture7 ende",
+      "must_not_contain": ["0gSynthFixture7"],
+      "min_counts": {"opaque": 1},
+      "note": "known token prefix without keyword, shorter than the 24-character opaque limit"
     }
   ]
 }

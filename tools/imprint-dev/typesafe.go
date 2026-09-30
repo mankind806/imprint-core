@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -43,7 +44,17 @@ const (
 
 var (
 	bearerBasicRE = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+)([^\s"',;]+)`)
-	secretKWRE    = regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|authorization)[\w.-]*["']?\s*[=:]\s*["']?)([^\s"',;]+)`)
+	// secretKWRE: keyword, separator, then a quoted value (masked as a whole,
+	// whitespace included) or an unquoted one. Same keyword list as ts_common.py
+	// _MASK_KW; RE2 has no backreferences, so quote pairing is checked in code.
+	secretKWRE = regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential|private[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*["']?\s*[=:]\s*)("[^"\n]+"|'[^'\n]+'|["']?[^\s"',;]+)`)
+
+	// ibanRE, phoneRE, awsKeyIDRE, knownTokenRE: the ts_common.py patterns; the
+	// lookarounds Python uses are checked by replaceBounded.
+	ibanRE       = regexp.MustCompile(`[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}`)
+	phoneRE      = regexp.MustCompile(`(?:\+49|0)(?:[ \t./()-]*\d){8,}`)
+	awsKeyIDRE   = regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`)
+	knownTokenRE = regexp.MustCompile(`(?:ghp_|gho_|ghs_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|xox[abprs]-|AKIA|ASIA|AIza|GOCSPX-|ya29\.|1//|eyJ|glpat-|npm_)[A-Za-z0-9_\-./+=]{8,}`)
 
 	// emailRE matches email addresses.
 	emailRE = regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+`)
@@ -69,6 +80,47 @@ type MaskCounts struct {
 	Opaque   int `json:"opaque"`
 	Address  int `json:"address"`
 	Name     int `json:"name"`
+	IBAN     int `json:"iban"`
+	Phone    int `json:"phone"`
+}
+
+func isASCIIAlnum(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
+// replaceBounded replaces the matches of re that pass ok(prev, next), the runes
+// before and after the match (utf8.RuneError at the text edges). A rejected match
+// is retried one rune later, as a lookbehind would.
+func replaceBounded(text string, re *regexp.Regexp, ok func(prev, next rune) bool, repl func(m string) string) string {
+	var b strings.Builder
+	pos, done := 0, 0
+	for pos <= len(text) {
+		loc := re.FindStringIndex(text[pos:])
+		if loc == nil {
+			break
+		}
+		s, e := pos+loc[0], pos+loc[1]
+		prev, next := utf8.RuneError, utf8.RuneError
+		if s > 0 {
+			prev, _ = utf8.DecodeLastRuneInString(text[:s])
+		}
+		if e < len(text) {
+			next, _ = utf8.DecodeRuneInString(text[e:])
+		}
+		if e > s && ok(prev, next) {
+			b.WriteString(text[done:s])
+			b.WriteString(repl(text[s:e]))
+			done, pos = e, e
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(text[s:])
+		if size == 0 {
+			break
+		}
+		pos = s + size
+	}
+	b.WriteString(text[done:])
+	return b.String()
 }
 
 // getNamesFilePath resolves the path to the names file:
@@ -159,8 +211,10 @@ func loadNames(filePath string) []string {
 	return names
 }
 
-// MaskDetail redacts sensitive patterns in text before transmission.
-// Order of execution: secret_kw (bearer/basic + secret keywords), email, opaque, address, name.
+// MaskDetail redacts sensitive patterns in text before transmission, in the same
+// order as ts_common.py MASK_RES: secret_kw (bearer/basic, keywords), email, iban,
+// phone, address (street, PLZ+Ort), name, opaque (AWS key IDs, known token
+// prefixes, 24+ character strings with digits and letters).
 func MaskDetail(text string) (string, MaskCounts) {
 	var counts MaskCounts
 
@@ -178,19 +232,28 @@ func MaskDetail(text string) (string, MaskCounts) {
 		return "<redacted>"
 	})
 
-	// 2. Secret keywords with = or :
+	// 2. Secret keywords with = or :; a quoted value is masked as a whole.
 	text = secretKWRE.ReplaceAllStringFunc(text, func(m string) string {
 		sub := secretKWRE.FindStringSubmatch(m)
-		if len(sub) >= 3 {
-			val := sub[2]
-			if val == "<redacted>" || strings.EqualFold(val, "bearer") || strings.EqualFold(val, "basic") {
+		if len(sub) < 3 {
+			counts.SecretKW++
+			return "<redacted>"
+		}
+		val := sub[2]
+		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+			q := val[:1]
+			if val[1:len(val)-1] == "<redacted>" {
 				return m
 			}
 			counts.SecretKW++
-			return sub[1] + "<redacted>"
+			return sub[1] + q + "<redacted>" + q
+		}
+		bare := strings.TrimLeft(val, `"'`)
+		if bare == "<redacted>" || strings.HasPrefix(bare, "<redacted>") || strings.EqualFold(bare, "bearer") || strings.EqualFold(bare, "basic") {
+			return m
 		}
 		counts.SecretKW++
-		return "<redacted>"
+		return sub[1] + "<redacted>"
 	})
 
 	// 3. email
@@ -199,7 +262,59 @@ func MaskDetail(text string) (string, MaskCounts) {
 		return "<email>"
 	})
 
-	// 4. opaque: 24+ chars with at least one digit and one letter.
+	// 4. IBAN (no letter or digit directly before or after)
+	text = replaceBounded(text, ibanRE, func(prev, next rune) bool {
+		return !isASCIIAlnum(prev) && !isASCIIAlnum(next)
+	}, func(string) string {
+		counts.IBAN++
+		return "<iban>"
+	})
+
+	// 5. German phone numbers: +49 or a leading 0, then 8+ digits (no word
+	// character, "+" or "." directly before).
+	text = replaceBounded(text, phoneRE, func(prev, next rune) bool {
+		return !(unicode.IsLetter(prev) || unicode.IsDigit(prev) || prev == '_' || prev == '+' || prev == '.') &&
+			!unicode.IsDigit(next)
+	}, func(string) string {
+		counts.Phone++
+		return "<phone>"
+	})
+
+	// 6. address: Straße + Hausnummer
+	text = streetRE.ReplaceAllStringFunc(text, func(m string) string {
+		counts.Address++
+		return "<address>"
+	})
+
+	// 7. address: PLZ + Ort
+	text = plzOrtRE.ReplaceAllStringFunc(text, func(m string) string {
+		counts.Address++
+		return "<address>"
+	})
+
+	// 8. names: from TYPESAFE_NAMES_FILE or ~/.config/typesafe/names.txt
+	// Case-insensitive to match ts_common.py's get_name_regex ((?i)), e.g.
+	// "max mustermann" lowercase must also be masked.
+	if names := loadNames(getNamesFilePath()); len(names) > 0 {
+		for _, name := range names {
+			re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
+			text = re.ReplaceAllStringFunc(text, func(m string) string {
+				counts.Name++
+				return "<name>"
+			})
+		}
+	}
+
+	// 9. opaque: AWS key IDs and known token prefixes (not inside a word), then
+	// 24+ chars with at least one digit and one letter.
+	opaque := func(string) string {
+		counts.Opaque++
+		return "<redacted>"
+	}
+	text = replaceBounded(text, awsKeyIDRE, func(prev, next rune) bool {
+		return !isASCIIAlnum(prev) && !isASCIIAlnum(next)
+	}, opaque)
+	text = replaceBounded(text, knownTokenRE, func(prev, _ rune) bool { return !isASCIIAlnum(prev) }, opaque)
 	text = opaqueCandidateRE.ReplaceAllStringFunc(text, func(m string) string {
 		hasDigit := false
 		hasLetter := false
@@ -217,38 +332,13 @@ func MaskDetail(text string) (string, MaskCounts) {
 		return m
 	})
 
-	// 5. address: Straße + Hausnummer
-	text = streetRE.ReplaceAllStringFunc(text, func(m string) string {
-		counts.Address++
-		return "<address>"
-	})
-
-	// 6. address: PLZ + Ort
-	text = plzOrtRE.ReplaceAllStringFunc(text, func(m string) string {
-		counts.Address++
-		return "<address>"
-	})
-
-	// 7. names: from TYPESAFE_NAMES_FILE or ~/.config/typesafe/names.txt
-	// Case-insensitive to match ts_common.py's get_name_regex ((?i)), e.g.
-	// "max mustermann" lowercase must also be masked.
-	if names := loadNames(getNamesFilePath()); len(names) > 0 {
-		for _, name := range names {
-			re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
-			text = re.ReplaceAllStringFunc(text, func(m string) string {
-				counts.Name++
-				return "<name>"
-			})
-		}
-	}
-
 	return text, counts
 }
 
 // Mask redacts sensitive patterns and returns the masked string and total redaction count.
 func Mask(text string) (string, int) {
 	masked, counts := MaskDetail(text)
-	return masked, counts.SecretKW + counts.Email + counts.Opaque + counts.Address + counts.Name
+	return masked, counts.SecretKW + counts.Email + counts.Opaque + counts.Address + counts.Name + counts.IBAN + counts.Phone
 }
 
 // --- Key Lookup --------------------------------------------------------------

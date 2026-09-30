@@ -93,27 +93,62 @@ def get_diff_and_msg(args, cwd=None):
         names = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=cwd)
         return commit_msg, diff_text, stat_text, [(commit_msg, diff_text, names)], None
 
-    rng = args.range or "HEAD~1..HEAD"
+    resolved = resolve_range(args.range or "HEAD~1..HEAD", cwd)
+    if isinstance(resolved, str):
+        return None, None, None, None, resolved
+    start, end = resolved
     if commit_msg is None:
-        commit_msg = run_cmd(["git", "log", "-1", "--pretty=%B", rng.split("..")[-1]], cwd=cwd)
-    diff_text = run_cmd(["git", "diff", rng], cwd=cwd)
-    stat_text = run_cmd(["git", "diff", "--stat", rng], cwd=cwd)
-    units = tc.commit_units(rng, cwd=cwd)
+        commit_msg = run_cmd(["git", "log", "-1", "--pretty=%B", end], cwd=cwd)
+    if start is None:  # the range reaches back past the root commit: diff the root itself
+        diff_text = run_cmd(["git", "diff-tree", "-p", "--root", "--no-commit-id", end], cwd=cwd)
+        stat_text = run_cmd(["git", "diff-tree", "--stat", "--root", "--no-commit-id", end], cwd=cwd)
+        units = tc.commit_units(end + "^!", cwd=cwd)
+    else:
+        diff_text = run_cmd(["git", "diff", start, end], cwd=cwd)
+        stat_text = run_cmd(["git", "diff", "--stat", start, end], cwd=cwd)
+        units = tc.commit_units(f"{start}..{end}", cwd=cwd)
     if args.msg:  # an explicit message is checked too
         units.append((commit_msg, "", ""))
     return commit_msg, diff_text, stat_text, units, None
+
+
+def resolve_range(rng, cwd=None):
+    """(start, end) commit IDs for A..B, A...B (start = merge base, as git diff A...B
+    does) or a single commit X (= X^..X); start is None when it would lie before the
+    root commit (HEAD~1..HEAD in a one-commit repository). An error text otherwise."""
+    def rev(r):
+        return run_cmd(["git", "rev-parse", "--verify", "--quiet", (r or "HEAD") + "^{commit}"], cwd=cwd)
+    if "..." in rng:
+        a, b = rng.split("...", 1)
+        end = rev(b)
+        start = run_cmd(["git", "merge-base", a or "HEAD", end], cwd=cwd) if end else ""
+    elif ".." in rng:
+        a, b = rng.split("..", 1)
+        end, start = rev(b), rev(a)
+    else:
+        a, end = rng + "^", rev(rng)
+        start = rev(a) if end else ""
+    if not end:
+        return f"Commit-Bereich {rng!r}: Ende nicht auflösbar"
+    if not start:
+        if "..." not in rng and run_cmd(["git", "rev-list", "--max-parents=0", end], cwd=cwd) == end:
+            return None, end
+        return f"Commit-Bereich {rng!r}: Anfang nicht auflösbar"
+    return start, end
 
 
 def check_commit(commit_msg, diff_text, stat_text, units=None, allowed=frozenset()):
     """units: [(message, diff, file names)] for the local alarm; default: this change,
     with the stat text standing in for the file names. allowed: the clone's declared
     identities (tc.allowed_addresses), never an alarm."""
-    if not commit_msg:
-        return {"status": "error", "message": "No commit message provided"}
     if units is None:
         units = [(commit_msg, diff_text, stat_text)]
-    # Local part of the leak check (rules in ts_common): runs before and without TypeSafe.
+    # Local part of the leak check (rules in ts_common): runs first, without TypeSafe
+    # and also without a message, so neither can skip it.
     local_leak = any(tc.leak_found(*u, allowed=allowed) for u in units)
+    if not commit_msg:
+        return {"status": "error", "message": "No commit message provided",
+                "leak_prob": 1.0 if local_leak else None}
     if not diff_text:
         return {"status": "ok", "empty_diff": True, "message": "Diff is empty (nothing changed)",
                 "leak_prob": 1.0 if local_leak else None}
@@ -200,13 +235,9 @@ def main():
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return
 
-    if res["status"] == "error":
-        print(f"Hinweis: {res['message']} (fail-open)")
-        sys.exit(0)
-
-    if res["status"] == "fail_open" or res.get("empty_diff"):
+    if res["status"] in ("error", "fail_open") or res.get("empty_diff"):
         print("Hinweis: Diff ist leer (keine Änderungen)." if res.get("empty_diff")
-              else f"Hinweis: {res['message']}")
+              else f"Hinweis: {res['message']}" + (" (fail-open)" if res["status"] == "error" else ""))
         if res.get("leak_prob") is not None:
             print("❌ ABBRUCH: Secret oder E-Mail-Adresse in Nachricht, neuen Diff-Zeilen oder "
                   "Dateinamen (lokal erkannt, ohne TypeSafe). Bitte manuell prüfen.")

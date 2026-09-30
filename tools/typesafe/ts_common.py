@@ -247,7 +247,8 @@ def add_counts(*dicts):
 #    IDs (...@group.calendar.google.com, ...@import.calendar.google.com); one-letter
 #    fixtures like a@b.com count as synthetic;
 #  - a known token prefix at a segment start with >= 8 token characters behind it
-#    (at least one digit among them), with or without a keyword; AWS key IDs;
+#    (at least one digit among them), with or without a keyword; AWS key IDs; both
+#    not when the part after the prefix is a fixture ("sk-fake-...", "AKIA...EXAMPLE");
 #  - after a keyword (api_key, token, secret, credential, private_key, access_key,
 #    authorization) and = := or :, a quoted literal that starts with a known prefix,
 #    or one of >= 12 characters without whitespace, with a digit or mixed case and a
@@ -276,7 +277,7 @@ NOT_ADDRESS_DOMAIN_RE = re.compile(
     r"(?i)^(?:[\w-]+\.)+(?:service|timer|socket|path|target|mount|automount|slice|scope|swap|device)$"
     r"|^(?:group|import)\.calendar\.google\.com$")
 _PREFIX_AT_START_RE = re.compile(KNOWN_PREFIX)
-_PREFIX_AT_SEGMENT_RE = re.compile(r"(?<=[-_./:=+])" + KNOWN_PREFIX + _TOKEN_CHARS + r"{8,}")
+_PREFIX_AT_SEGMENT_RE = re.compile(r"(?<=[-_./:=+])" + KNOWN_PREFIX + r"(?P<body>" + _TOKEN_CHARS + r"{8,})")
 _FREE_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])" + KNOWN_PREFIX + r"(?P<body>" + _TOKEN_CHARS + r"{8,})")
 _PW_KW = r"(?<![A-Za-z])(?:pass(?:word|wort|wd|phrase)?|pwd)(?![a-z])"
 _OTHER_KW = r"(?:api[_-]?key|token|secret|credential|private[_-]?key|access[_-]?key|authorization)"
@@ -340,6 +341,15 @@ def _known_prefix(v):
     return bool(_PREFIX_AT_START_RE.match(v) or _PREFIX_AT_SEGMENT_RE.search(v))
 
 
+def _real_prefix_token(v):
+    """A known prefix (at the start or a segment start) whose rest is no fixture:
+    "sk-fake-..." and AWS's "AKIA...EXAMPLE" are documentation fakes."""
+    m = _PREFIX_AT_START_RE.match(v)
+    if m and v[m.end():] and not _fixture(v[m.end():]):
+        return True
+    return any(not _fixture(m.group("body")) for m in _PREFIX_AT_SEGMENT_RE.finditer(v))
+
+
 def _fixture(v, first_only=False):
     """Placeholder, or a value with a fixture segment (word starting with a marker);
     first_only (password keys): only if the value STARTS with a fixture segment, so
@@ -381,11 +391,12 @@ def _kv_alarm(m):
 
 def local_alarm(text):
     """True if text (already through alarm_view) holds an address or a real-looking secret."""
-    if RX_EMAIL.search(text) or RX_AWS_KEY_ID.search(text):
+    if RX_EMAIL.search(text) or any(not _fixture(m.group(0)[4:]) for m in RX_AWS_KEY_ID.finditer(text)):
         return True
-    if any(any(c.isdigit() for c in m.group("body")) for m in _FREE_PREFIX_RE.finditer(text)):
+    if any(any(c.isdigit() for c in m.group("body")) and not _fixture(m.group("body"))
+           for m in _FREE_PREFIX_RE.finditer(text)):
         return True
-    if any(_known_prefix(m.group("v")) or not (_fixture(m.group("v")) or _word_value(m.group("v")))
+    if any(_real_prefix_token(m.group("v")) or not (_fixture(m.group("v")) or _word_value(m.group("v")))
            for m in LOCAL_BEARER_RE.finditer(text)):
         return True
     return any(_kv_alarm(m) for m in LOCAL_KV_RE.finditer(text))

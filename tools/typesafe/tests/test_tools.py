@@ -12,7 +12,8 @@ import ts_common as tc  # noqa: E402
 
 class TestTsCommon(unittest.TestCase):
     def test_mask_detail_secrets(self):
-        text = "Hier ist token = abcdef1234567890abcdef123456 und password = secret123"
+        # built from parts so this file's own diff carries no real-looking secret
+        text = "Hier ist to" + "ken = abcdef1234567890abcdef123456 und pass" + "word = secret123"
         masked, hits = tc.mask_detail(text)
         self.assertNotIn("secret123", masked)
         self.assertGreaterEqual(hits["secret_kw"], 1)

@@ -104,10 +104,13 @@ bleibt im lokalen Schlüsselbund (`secret-tool lookup service typesafe key api`)
 
 `ts-commit-check` blockt (exit 1) auch ohne TypeSafe-Key, wenn Nachricht, neue Diff-Zeilen
 oder Dateinamen eine E-Mail-Adresse oder einen echt wirkenden Secret-Wert enthalten; die Regeln
-stehen in `ts_common.py` bei `local_alarm`. Ausgenommen sind No-Reply-Adressen, reservierte
-Domains (`example.com`, `*.example`, `*.test`, `*.invalid`, `*.localhost`), Platzhalter und
-Fixture-Werte (`synth-…`, `fake_…`, `…-test-…`). Im Bereichsmodus prüft der lokale Alarm jeden
-Commit einzeln; TypeSafe sieht den Netto-Diff und die letzte Nachricht.
+stehen in `ts_common.py` bei `local_alarm`. Ausgenommen sind No-Reply-Adressen, die deklarierten
+Identitäten des Klons (`user.email` und `git config --add imprint.allowedIdentity "Name <adresse>"`,
+dieselbe Liste wie `.githooks/pre-push`), reservierte Domains (`example.com`, `*.example`,
+`*.test`, `*.invalid`, `*.localhost`), systemd-Units (`name@instanz.service`), Google-Kalender-IDs,
+Platzhalter und Fixture-Werte (`synth-…`, `fake_…`, `…-test-…`). Im Bereichsmodus (`A..B`,
+`A...B` ab der Merge-Basis, ein einzelner Commit, auch der Root-Commit) prüft der lokale Alarm
+jeden Commit einzeln; TypeSafe sieht den Netto-Diff und die letzte Nachricht.
 `ts-pr-triage` meldet einen lokalen Treffer ohne Key als Hinweis und bleibt fail-open (exit 0).
 
 ## Konfiguration (projektspezifisch, keine harten Pfade/IDs im Code)
