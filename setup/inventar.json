@@ -33,5 +33,13 @@
     "rechte": true,
     "anwenden": "ersetzen",
     "beschreibung": "Statuszeilen-Skript für agy; agy führt es aus, wer es schreibt führt darüber Code aus, deshalb rechte:true; nur der Mensch kopiert es, siehe setup/vorlagen/README.md. Wird von rechte-anwenden.sh agy-statusline (bzw. gleichwertig innerhalb von rechte-anwenden.sh agy) per install -m 0755 installiert."
+  },
+  {
+    "id": "oberflaeche",
+    "typ": "systemd",
+    "quelle": "setup/systemd/imprint-oberflaeche.service",
+    "ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-oberflaeche.service",
+    "rechte": false,
+    "beschreibung": "Dienst-Unit der Web-App (imprint), nicht aktiviert; Aktivierung macht der Nutzer"
   }
 ]

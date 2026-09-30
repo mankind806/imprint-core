@@ -1,0 +1,85 @@
+# Kanonische Quelle: imprint-core setup/systemd (Nutzerentscheid CL-160)
+#
+# Einheit für die lokale Web-Oberfläche von imprint (tools/oberflaeche, Scheibe W1;
+# docs/umbau-2026-09-25/bauplan-oberflaeche.md Teil 1 Nr. 4): „Der Server ist
+# ein Abfrage-Dienst im Sinn von S3. Im Echtbetrieb läuft er deshalb als
+# systemd-Benutzer-Unit (…, installiert der Nutzer). Claude startet ihn nur mit
+# -demo, also nur mit synthetischen Daten.”
+#
+# Installiert nach Nutzer-Ja (CL-115/CL-118, 2026-09-29/30), Reihenfolge und
+# Voraussetzungen in docs/einrichten.md §10:
+#   betrieb install --ziel ~/.local/share/imprint/betrieb-code <main-sha>
+#     (baut auch tools/oberflaeche/oberflaeche für ExecStart unten)
+#   install -m 0644 ~/.local/share/imprint/betrieb-code/aktuell/betrieb/systemd/imprint-oberflaeche.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now imprint-oberflaeche.service
+#
+# Anmelden: `oberflaeche link` holt über $XDG_RUNTIME_DIR/imprint/oberflaeche.sock
+# einen Einmal-Link (60 s). Der Dienst druckt beim Start nur die Adresse ohne
+# Token, im Journal steht also kein Token.
+#
+# Zweiter Ursprung „fremd” für die Seiten mit fremdem Text (-fremd-port 7421:
+# Suche, Freigaben, Beleg; N129 entschieden: 7420 eigener Ursprung, 7421 fremder Text).
+# ExecStart übergibt die ganze Kette: -port 7420, -fremd-port 7421, -archiv
+# (Pflichtangabe, da das Wiki ohne Archiv fail-closed ist), -index und -wissen.
+#
+# Jede TCP-Verbindung muss von derselben UID kommen wie der Dienst (Nachschlagen
+# in /proc/net/tcp). Nicht geprüft: ob die Sandbox-Optionen unten (bei einer
+# Benutzer-Unit ggf. mit Benutzer-Namensraum) die UID-Spalte dort verändern. Scheitert
+# das Nachschlagen, weist der Dienst jede Verbindung ab (fail-closed), er öffnet nichts.
+[Unit]
+Description=imprint Oberfläche (127.0.0.1:7420)
+# Wie die Sync-Dienste (N49): nur mit der angemeldeten Sitzung, ohne Linger.
+After=graphical-session.target
+Requisite=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Platzhalter - Pfad zum gebauten Programm vor der Prüfung setzen, etwa in der
+# schreibgeschützten Kopie von `betrieb install` (N39). Die Arbeitskopie legt die
+# relativen Standardpfade des Lagebilds fest (docs/umbau-2026-09-25/...).
+WorkingDirectory=%h/.local/share/imprint/betrieb-code/aktuell
+ExecStart=%h/.local/share/imprint/betrieb-code/aktuell/tools/oberflaeche/oberflaeche -port 7420 -fremd-port 7421 -archiv %h/.local/share/archiv/privat/archiv.db -index %h/.local/share/archiv/privat/index.db -wissen %h/.local/share/imprint/wissen/wissen.db
+# Belegter Port = Abbruch, kein Ausweichport; ein Neustart hilft dann nicht sofort.
+Restart=on-failure
+RestartSec=30s
+LimitCORE=0
+NoNewPrivileges=yes
+# Nur lesen, mit zwei Ausnahmen: dem Socket-Ordner und den beiden DB-Ordnern.
+# ProtectSystem=strict macht auch /run schreibgeschützt; RuntimeDirectory legt
+# $XDG_RUNTIME_DIR/imprint (%t/imprint) mit 0700 an und lässt ihn beschreibbar.
+# Der Server prüft beim Start selbst: eigener Ordner, kein Symlink, genau 0700.
+ProtectHome=read-only
+ProtectSystem=strict
+PrivateTmp=yes
+# DB-Ordner beschreibbar (imprint-CL-216, Review-Runde 1, Variante C, Leitung
+# CL-137): archiv.db, index.db und wissen.db laufen im WAL-Modus. Ein Leser
+# braucht daneben -wal und -shm und muss sie anlegen, wenn der letzte Schreiber
+# sie beim Schließen gelöscht hat (etwa direkt nach `archiv sync`). Ohne
+# Schreibrecht im Ordner scheitert dann der Start (gemessen mit bwrap --ro-bind:
+# „unable to open database file“). Die App öffnet alle drei weiter nur mit
+# mode=ro (plus Authorizer bzw. query_only). Das Schreibrecht ist also eine
+# Grenze des Kernels weniger, keine neue Funktion.
+# Genau die Ordner der drei Pfade aus ExecStart, nichts darüber.
+# Restrisiko: Der Prozess darf dort alles schreiben und löschen. In
+# archiv/privat liegen laut Code archiv.db, index.db (samt -wal/-shm,
+# index.db.lock und index.db.neu-* beim Neuaufbau), blobs/ (die gespeicherten
+# Rohinhalte) und die Sync-Sperrdateien .sync-*.lock; in imprint/wissen liegt
+# wissen.db (samt -wal/-shm). Zugangsdaten liegen nicht darin
+# (~/.local/share/archiv/secrets, ~/.config). Die engere Variante ohne jedes
+# Schreibrecht ist der Entwurf imprint-CL-230.
+# "-": laut systemd.exec(5) ignoriert systemd einen fehlenden Pfad dann. Fehlt
+# ein Ordner, fehlt auch die Datenbank darin, und der Dienst bricht selbst
+# fail-closed ab, mit eigener Meldung statt eines Namensraum-Fehlers beim Start.
+# Mehr Rechte gibt das "-" nicht.
+ReadWritePaths=-%h/.local/share/archiv/privat -%h/.local/share/imprint/wissen
+RuntimeDirectory=imprint
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# Kein PrivateNetwork=: das gäbe dem Dienst ein eigenes Loopback, das der
+# Browser nicht erreicht. Netz braucht nur gh pr list (Kachel „Laufende PRs“).
+SyslogIdentifier=imprint-oberflaeche
+
+[Install]
+WantedBy=graphical-session.target
