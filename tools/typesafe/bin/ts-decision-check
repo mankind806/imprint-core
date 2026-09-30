@@ -165,7 +165,10 @@ def get_input_text(args):
             with open(args.file, "r", encoding="utf-8") as f:
                 return f.read().strip()
         except Exception as e:
-            return f"Fehler beim Lesen der Datei: {e}"
+            # Never turn a read error into proposal text: it would carry the path
+            # to TypeSafe and get "checked" instead of failing.
+            print(f"Fehler beim Lesen der Datei: {e}", file=sys.stderr)
+            sys.exit(1)
     if args.text:
         return " ".join(args.text).strip()
     if not sys.stdin.isatty():
@@ -182,8 +185,10 @@ def check_decision(proposal_text, invariants_file=None):
     if len(masked_proposal) > 10000:
         masked_proposal = masked_proposal[:10000] + "\n... [gekürzt für Prüfung]"
 
+    # The register is project text too (names, paths, hosts): masked like the proposal.
+    masked_register, _ = tc.mask_detail(load_invariants(invariants_file))
     state = {
-        "reference_invariants": load_invariants(invariants_file),
+        "reference_invariants": masked_register,
         "proposal_or_diff": masked_proposal
     }
 
@@ -275,7 +280,7 @@ def main():
     print(f" • Widerspruchs-Gefahr: Wahrscheinlichkeit {res['violation_prob']:.2f}")
     print(f" • Betroffener Bereich: {area_str} (Konfidenz: {res['risk_area_confidence']:.2f})")
     print(f" • Nutzerentscheid nötig: Wahrscheinlichkeit {res['clarification_needed_prob']:.2f}")
-    print(f" • Lokale Maskierung  : Schlüssel {m['secret_kw']}, E-Mail {m['email']}, Token {m['opaque']}")
+    print(f" • Lokale Maskierung  : {tc.format_counts(m)}")
     print("═══════════════════════════════════════════════════════════════")
 
     if res["violation_prob"] >= 0.7 or res["compliance_level"] == 0:

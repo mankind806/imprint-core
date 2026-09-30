@@ -37,7 +37,7 @@ flowchart TD
 ts-agent-dispatch "Führe Lese-Review von PR #90 durch"
 # -> Modell: FLASH, Worktree: NEIN (inherit), Risiko: 0
 
-ts-agent-dispatch "Implementiere Proton Bridge Adapter mit TLS-Pinning im Worktree"
+ts-agent-dispatch "Implementiere einen Mail-Bridge-Adapter mit TLS-Pinning im Worktree"
 # -> Modell: PRO, Worktree: JA (branch), Risiko: 2 (Blind-Review)
 ```
 
@@ -79,8 +79,8 @@ chmod +x .git/hooks/commit-msg
 
 ## Herkunft & Lizenz
 
-Übernommen aus dem privaten Entwicklungsrepo `typesafe-dev` (Stand `4f604bb`, ohne Git-Historie,
-ohne lokale Kalibrier-Logs oder Daten) nach imprint-core-CL-013a. Es gilt die Lizenz im
+Übernommen aus einem privaten Entwicklungsrepo (ohne Git-Historie, ohne lokale
+Kalibrier-Logs oder Daten) nach imprint-core-CL-013a. Es gilt die Lizenz im
 Repository-Wurzelverzeichnis ([`LICENSE`](../../LICENSE)); dieses Verzeichnis hat keine eigene.
 
 ## Datenschutz & Maskierung

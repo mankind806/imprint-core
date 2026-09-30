@@ -183,7 +183,7 @@ def main():
     print(f" • Risiko-Stufe         : {res['risk_level']}/2 (Konfidenz: {res['risk_confidence']:.2f})")
     print(f" • Erforderliche Prüfung: {res['review_depth']}")
     print(f" • Komplexität          : {res['complexity']} (Konfidenz: {res['complexity_confidence']:.2f})")
-    print(f" • Lokale Maskierung    : Schlüssel {m['secret_kw']}, E-Mail {m['email']}, Token {m['opaque']}")
+    print(f" • Lokale Maskierung    : {tc.format_counts(m)}")
     print("═══════════════════════════════════════════════════════════════")
 
 

@@ -5,7 +5,10 @@ Validates:
  1. alignment (Score 0..3): Accuracy of commit message relative to actual code diff.
  2. omissions (Noul): Significant changes omitted from the commit message.
  3. conventional (Noul): Compliance with Conventional Commits syntax (feat:, fix:, docs:, etc.).
- 4. secret_leak (Noul + Local): Secrets, API keys, or PII in diff or commit message.
+ 4. leak (Noul + Local): Secrets, API keys, or PII in diff or commit message.
+    Local part: a keyword secret (api_key=..., token: ..., Bearer ...) or an email
+    address found by the local masking sets leak_prob to 1.0, with or without a
+    TypeSafe key. leak_prob >= 0.5 is a hard block (exit 1), also in fail-open mode.
 
 Usage:
   ts-commit-check [COMMIT_RANGE]             # e.g. HEAD~1..HEAD (default)
@@ -47,7 +50,7 @@ QUESTIONS = {
         "type": "noul",
         "instructions": "Does the first line of the commit message strictly follow Conventional Commits formatting, e.g. type(scope): description or type: description (feat, fix, docs, refactor, test, chore, perf, build, ci)?"
     },
-    "secret_leak": {
+    "leak": {
         "type": "noul",
         "instructions": "Does either the commit message or the code diff contain real secrets, API keys, passwords, private tokens, or real personal identifiable data (PII)?"
     }
@@ -100,15 +103,18 @@ def check_commit(commit_msg, diff_text, stat_text):
     if not diff_text:
         return {"status": "ok", "empty_diff": True, "message": "Diff is empty (nothing changed)"}
 
-    # Cap diff to avoid context bloat
-    if len(diff_text) > 12000:
-        diff_text = diff_text[:12000] + "\n... [diff truncated for check]"
-
-    # Masking before anything leaves the machine (privacy: only masked text goes to TypeSafe)
+    # Masking before anything leaves the machine (privacy: only masked text goes to TypeSafe).
+    # Mask first, then cut: a cut first could split a token or an address so that the
+    # masking no longer recognises the remaining fragment.
     masked_msg, h1 = tc.mask_detail(commit_msg)
     masked_diff, h2 = tc.mask_detail(diff_text)
     masked_stat, h3 = tc.mask_detail(stat_text)
     hits = tc.add_counts(h1, h2, h3)
+    if len(masked_diff) > 12000:
+        masked_diff = masked_diff[:12000] + "\n... [diff truncated for check]"
+    # Local part of the leak check, as in ts-pr-triage: only keyword secrets and emails
+    # raise the alarm; opaque strings (hashes, long identifiers) are masked, no alarm.
+    local_leak = bool(hits["secret_kw"] or hits["email"])
 
     state = {
         "commit_message": masked_msg,
@@ -121,6 +127,7 @@ def check_commit(commit_msg, diff_text, stat_text):
         return {
             "status": "fail_open",
             "message": "TypeSafe API unreachable or key missing (fail-open)",
+            "leak_prob": 1.0 if local_leak else None,
             "masked_detail": hits
         }
 
@@ -129,7 +136,9 @@ def check_commit(commit_msg, diff_text, stat_text):
 
     omissions = tc.noul(answers, "omissions") or 0.0
     conventional = tc.noul(answers, "conventional") or 0.0
-    secret_leak = tc.noul(answers, "secret_leak") or 0.0
+    leak_prob = tc.noul(answers, "leak") or 0.0
+    if local_leak:
+        leak_prob = 1.0
 
     align_label = [
         "Unzureichend / Halluzination",
@@ -145,7 +154,7 @@ def check_commit(commit_msg, diff_text, stat_text):
         "alignment_label": align_label,
         "omissions_prob": omissions,
         "conventional_prob": conventional,
-        "secret_leak_prob": secret_leak,
+        "leak_prob": leak_prob,
         "masked_detail": hits,
         "raw_answers": answers
     }
@@ -178,6 +187,11 @@ def main():
 
     if res["status"] == "fail_open":
         print(f"Hinweis: {res['message']}")
+        if res["leak_prob"] is not None:
+            print(f" • Lokale Maskierung: {tc.format_counts(res['masked_detail'])}")
+            print("❌ ABBRUCH: Schlüsselwort-Secret oder E-Mail-Adresse im Diff oder in der Nachricht "
+                  "(lokal erkannt, ohne TypeSafe). Bitte manuell prüfen.")
+            sys.exit(1)
         sys.exit(0)
 
     if res.get("empty_diff"):
@@ -191,12 +205,12 @@ def main():
     print(f" • Übereinstimmung   : Stufe {res['alignment_level']}/3 – {res['alignment_label']} (Konfidenz: {res['alignment_confidence']:.2f})")
     print(f" • Auslassungen      : Wahrscheinlichkeit {res['omissions_prob']:.2f}")
     print(f" • Conventional Style: Wahrscheinlichkeit {res['conventional_prob']:.2f}")
-    print(f" • Secret/PII Leak   : Wahrscheinlichkeit {res['secret_leak_prob']:.2f}"
-          f" (lokal maskiert: Schlüssel {m.get('secret_kw', 0)}, E-Mail {m.get('email', 0)}, Adressen {m.get('address', 0)}, Namen {m.get('name', 0)}, Token {m.get('opaque', 0)})")
+    print(f" • Secret/PII Leak   : Wahrscheinlichkeit {res['leak_prob']:.2f}"
+          f" (lokal maskiert: {tc.format_counts(m)})")
     print("═══════════════════════════════════════════════════════════════")
 
     # Hard blocker: secret leak stops execution
-    if res["secret_leak_prob"] >= 0.5:
+    if res["leak_prob"] >= 0.5:
         print("❌ ABBRUCH: Verdacht auf Secret- oder PII-Leak! Bitte manuell prüfen.")
         sys.exit(1)
 

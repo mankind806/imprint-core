@@ -4,7 +4,7 @@
 Determines:
  1. risk_level (Score 0..2): 0=reversibel (kein Review), 1=mittel (1 Runde), 2=hoch/Krypto/Auth/Netz (blind bis sauber)
  2. scope_leak (Noul): Änderungen außerhalb des deklarierten Auftrags?
- 3. secret_or_pii_leak (Noul): Reale Tokens, Keys oder PII in Code oder Testdaten?
+ 3. leak (Noul + lokal): Reale Tokens, Keys oder PII in Code oder Testdaten?
  4. tests_present (Noul): Ausreichende Tests für neue Logik vorhanden?
 """
 import argparse
@@ -36,7 +36,7 @@ QUESTIONS = {
         "type": "noul",
         "instructions": "Does this diff modify files or dependencies that are unrelated to the stated commit purpose?"
     },
-    "secret_or_pii_leak": {
+    "leak": {
         "type": "noul",
         "instructions": "Does this diff contain real secrets, API keys, passwords, private tokens, or real personal identifiable data (PII)?"
     },
@@ -62,15 +62,15 @@ def evaluate_diff(commit_range, cwd=None):
     stat_text = run_cmd(["git", "diff", "--stat", commit_range], cwd=cwd)
     diff_text = run_cmd(["git", "diff", commit_range], cwd=cwd)
 
-    # Cap diff to avoid blowing token limit (e.g. max 12,000 chars)
-    if len(diff_text) > 12000:
-        diff_text = diff_text[:12000] + "\n... [diff truncated for triage]"
-
     # Only masked text leaves the machine (user decision 2026-09-29). Secrets and
     # emails are found locally by the masking itself; TypeSafe judges the rest.
+    # Mask first, then cut (max 12,000 chars): a cut first could split a token or
+    # an address so that the masking no longer recognises the fragment.
     log_text, h1 = tc.mask_detail(log_text)
     stat_text, h2 = tc.mask_detail(stat_text)
     diff_text, h3 = tc.mask_detail(diff_text)
+    if len(diff_text) > 12000:
+        diff_text = diff_text[:12000] + "\n... [diff truncated for triage]"
     hits = tc.add_counts(h1, h2, h3)
     local_hits = sum(hits.values())
     paths = run_cmd(["git", "diff", "--name-only", commit_range], cwd=cwd).splitlines()
@@ -90,11 +90,11 @@ def evaluate_diff(commit_range, cwd=None):
         return {"status": "error", "message": "TypeSafe answer without risk score"}
     risk_lvl, risk_conf = risk
     scope_leak = tc.noul(answers, "scope_leak")
-    secret_leak = tc.noul(answers, "secret_or_pii_leak") or 0.0
+    leak_prob = tc.noul(answers, "leak") or 0.0
     # only keyword secrets and emails raise the alarm; opaque strings (hashes, long
     # identifiers) are masked but not reported (retro test: 24/35 false alarms)
     if hits["secret_kw"] or hits["email"]:
-        secret_leak = 1.0
+        leak_prob = 1.0
 
     # risk floor: only tightens
     floor_reasons = []
@@ -119,7 +119,7 @@ def evaluate_diff(commit_range, cwd=None):
         "risk_confidence": risk_conf,
         "review_depth": review_depth,
         "scope_leak_prob": scope_leak,
-        "secret_leak_prob": secret_leak,
+        "leak_prob": leak_prob,
         "masked_locally": local_hits,
         "masked_detail": hits,
         "risk_floor": floor_reasons,
@@ -156,10 +156,9 @@ def main():
         print(f"   {why}")
     print(f" • Review-Tiefe      : {res['review_depth']}")
     print(f" • Scope-Verletzung  : Wahrscheinlichkeit {fmt(res['scope_leak_prob'])}")
-    print(f" • Secret/PII Leak   : Wahrscheinlichkeit {res['secret_leak_prob']:.2f}"
-          f" (lokal maskiert: {res['masked_locally']}; "
-          f"Schlüsselwort {res['masked_detail']['secret_kw']}, E-Mail {res['masked_detail']['email']}, "
-          f"undurchsichtig {res['masked_detail']['opaque']} ohne Alarm)")
+    print(f" • Secret/PII Leak   : Wahrscheinlichkeit {res['leak_prob']:.2f}"
+          f" (lokal maskiert: {res['masked_locally']}; {tc.format_counts(res['masked_detail'])};"
+          f" Alarm nur bei Schlüsselwort/E-Mail)")
     print(f" • Tests vorhanden   : Wahrscheinlichkeit {fmt(res['tests_present_prob'])}")
     print("═══════════════════════════════════════════════════════════════")
 

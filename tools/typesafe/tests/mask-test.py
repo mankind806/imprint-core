@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """Secret values must never survive ts_common.mask (regression: value after key= leaked, found in PR #29 review)."""
-import os, sys
+import atexit, os, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import ts_common as tc
-names_file = os.environ.get("TYPESAFE_NAMES_FILE", os.path.expanduser("~/.config/typesafe/names.txt"))
-if not os.path.exists(names_file):
-    os.makedirs(os.path.dirname(names_file), exist_ok=True)
-    with open(names_file, "w", encoding="utf-8") as f:
-        f.write("# TypeSafe known names for local masking\nMax Mustermann\nErika Musterfrau\n")
+# Own temporary names file with synthetic names only: this test never reads or
+# writes the real, private ~/.config/typesafe/names.txt.
+_fd, names_file = tempfile.mkstemp(prefix="typesafe-mask-test-names-", suffix=".txt")
+with os.fdopen(_fd, "w", encoding="utf-8") as f:
+    f.write("# synthetic names for the mask test\nMax Mustermann\nErika Musterfrau\n")
+atexit.register(os.remove, names_file)
+os.environ["TYPESAFE_NAMES_FILE"] = names_file
 
 CASES = {  # text -> secret that must be gone (None = nothing may be masked)
-    "api_key=SECRETVALUE99 mail a@b.de": "SECRETVALUE99",
+    "api_key=SECRETVALUE99 mail a@b.example": "SECRETVALUE99",
     "password=hunter2 end": "hunter2",
     "export API_KEY=abcd1234 x": "abcd1234",
     "Authorization: Bearer sk-abc123 def": "sk-abc123",
     '{"token": "t0k3n", "x": 1}': "t0k3n",
     "{'secret':'s3cr3t'}": "s3cr3t",
     "db_password: geheim123;": "geheim123",
-    "mail an max.muster@example.org": "max.muster@example.org",
+    "mail an max.muster@mail.example": "max.muster@mail.example",
     "pytest -q tests/test_api.py": None,
     'git commit -m "fix token refresh"': None,
     # Names and addresses

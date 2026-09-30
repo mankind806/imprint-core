@@ -18,9 +18,9 @@ class TestTsCommon(unittest.TestCase):
         self.assertGreaterEqual(hits["secret_kw"], 1)
 
     def test_mask_detail_emails(self):
-        text = "Kontakt: max.mustermann@example.org für Support"
+        text = "Kontakt: max.mustermann@mail.example für Support"
         masked, hits = tc.mask_detail(text)
-        self.assertNotIn("max.mustermann@example.org", masked)
+        self.assertNotIn("max.mustermann@mail.example", masked)
         self.assertEqual(hits["email"], 1)
 
     def test_mask_detail_address(self):
@@ -65,10 +65,10 @@ class TestCliTools(unittest.TestCase):
         self.bin_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "bin")
 
     def test_agent_dispatch_cli(self):
-        # No TypeSafe key/network in CI: status is "fail_open" there, "ok" only
-        # when a real key is configured (e.g. local dev via secret-tool). Both
-        # are valid CLI outcomes (fail-open by design), so accept either and
-        # only check the model/workspace fields when a live answer came back.
+        # The expected status follows from the key: "ok" when a key is configured
+        # (env or secret-tool), "fail_open" without one (CI, offline runs). A key
+        # with an unreachable API is a real failure, not an accepted outcome.
+        expected = "ok" if tc.get_key() else "fail_open"
         cmd = [
             os.path.join(self.bin_dir, "ts-agent-dispatch"),
             "--json",
@@ -77,15 +77,15 @@ class TestCliTools(unittest.TestCase):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, f"Stderr: {r.stderr}")
         payload = json.loads(r.stdout)
-        self.assertIn(payload.get("status"), ("ok", "fail_open"))
+        self.assertEqual(payload.get("status"), expected)
         self.assertIn("masked_detail", payload)
-        if payload["status"] == "ok":
+        if expected == "ok":
             self.assertEqual(payload["model_tier"], "flash")
             self.assertEqual(payload["workspace_mode"], "inherit")
 
     def test_decision_check_cli(self):
-        # See test_agent_dispatch_cli: fail_open (no key/network) is a valid
-        # outcome too, expected in CI.
+        # See test_agent_dispatch_cli for how the expected status is derived.
+        expected = "ok" if tc.get_key() else "fail_open"
         cmd = [
             os.path.join(self.bin_dir, "ts-decision-check"),
             "--json",
@@ -94,13 +94,13 @@ class TestCliTools(unittest.TestCase):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, f"Stderr: {r.stderr}")
         payload = json.loads(r.stdout)
-        self.assertIn(payload.get("status"), ("ok", "fail_open"))
+        self.assertEqual(payload.get("status"), expected)
         self.assertIn("masked_detail", payload)
 
     def test_review_dedup_cli(self):
-        # See test_agent_dispatch_cli: fail_open (no key/network) is a valid
-        # outcome too, expected in CI. Local dedup findings are present in
-        # both cases.
+        # See test_agent_dispatch_cli for how the expected status is derived.
+        # Local dedup findings are present in both cases.
+        expected = "ok" if tc.get_key() else "fail_open"
         cmd = [
             os.path.join(self.bin_dir, "ts-review-dedup"),
             "--json",
@@ -110,7 +110,7 @@ class TestCliTools(unittest.TestCase):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, f"Stderr: {r.stderr}")
         payload = json.loads(r.stdout)
-        self.assertIn(payload.get("status"), ("ok", "fail_open"))
+        self.assertEqual(payload.get("status"), expected)
         self.assertIn("findings", payload)
 
 

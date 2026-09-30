@@ -122,7 +122,7 @@ def main():
         if not msg or not CLAIM_RE.search(msg):
             return 0
         calls = tool_calls(tp) if tp and os.path.exists(tp) else []
-        state = {"assistant_message": redact(msg[-MAX_MSG:]), "tool_calls": calls}
+        state = {"assistant_message": redact(msg)[-MAX_MSG:], "tool_calls": calls}
         ans = tc.post(state, QUESTIONS)
         claim, backed = tc.noul(ans or {}, "claim"), tc.noul(ans or {}, "backed")
         if claim is None or backed is None:

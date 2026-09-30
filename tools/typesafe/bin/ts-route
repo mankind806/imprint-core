@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ts-route "<task text>" [--json] [--threshold 0.6] [--repo NAME] [--lead LEAD]  (or task on stdin)
 
-Classifies a task via TypeSafe (only the task text is sent) and maps the
+Classifies a task via TypeSafe (only the MASKED task text is sent) and maps the
 answers to a routing recommendation. The mapping lives HERE, not in the model.
 
 The concrete rule set (which repos Jules may execute in, which leads exist, model
@@ -142,7 +142,9 @@ def main():
     if not text:
         ap.error("kein Aufgabentext")
 
-    ans = tc.post(text, QUESTIONS)
+    # Only the masked task text leaves the machine; JULES_EXCLUDE and the repo check
+    # below keep working on the original text.
+    ans = tc.post(tc.mask_detail(text)[0], QUESTIONS)
     parsed = None
     if ans:
         s, r = (round_up(ans, k, a.threshold) for k in ("size", "risk"))

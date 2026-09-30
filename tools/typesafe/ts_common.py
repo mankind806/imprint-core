@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import urllib.error
 import urllib.request
 
 URL = "https://api.typesafe.ai/v1/systemone"
@@ -28,23 +29,52 @@ def get_key():
     return None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects: a 3xx becomes an HTTPError, so post() fails open
+    instead of re-sending the request (and its Authorization header) elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _mask_tree(obj):
+    """Mask every string leaf of state/questions; dict KEYS stay as they are
+    (question IDs and choice keys are the answer contract)."""
+    if isinstance(obj, str):
+        return mask_detail(obj)[0]
+    if isinstance(obj, dict):
+        return {k: _mask_tree(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_mask_tree(v) for v in obj]
+    return obj
+
+
 def post(state, questions, timeout=TIMEOUT):
-    """One batched request. Returns the `answers` dict, or None on ANY failure."""
+    """One batched request. Returns the `answers` dict, or None on ANY failure.
+
+    Second line of defence: every string leaf of state and questions is masked here
+    again, in addition to the masking each tool does itself."""
     try:
         key = get_key()
         if not key:
             return None
-        body = json.dumps({"state": state, "model": MODEL, "questions": questions}).encode()
+        body = json.dumps({"state": _mask_tree(state), "model": MODEL,
+                           "questions": _mask_tree(questions)}).encode()
         req = urllib.request.Request(URL, data=body, method="POST", headers={
-            "Authorization": "Bearer " + key,
             "Content-Type": "application/json",
             "User-Agent": "typesafe-dev/0.1"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        req.add_unredirected_header("Authorization", "Bearer " + key)
+        with _OPENER.open(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return None
             answers = json.loads(resp.read().decode()).get("answers")
             return answers if isinstance(answers, dict) else None
-    except Exception:
+    except Exception as e:
+        if isinstance(e, urllib.error.HTTPError):  # e.g. an unfollowed 3xx: release the response
+            e.close()
         return None
 
 
@@ -158,6 +188,15 @@ def mask(text):
     """(masked text, number of masked spans) - backward compatible."""
     text, counts = mask_detail(text)
     return text, sum(counts.values())
+
+
+CATEGORY_LABELS = ("Schlüsselwort", "E-Mail", "Adresse", "Name", "Token")  # same order as DEFAULT_CATEGORIES
+
+
+def format_counts(counts):
+    """Display line for mask counts, one entry per category in DEFAULT_CATEGORIES order."""
+    return ", ".join(f"{label} {counts.get(cat, 0)}"
+                     for cat, label in zip(DEFAULT_CATEGORIES, CATEGORY_LABELS))
 
 
 def add_counts(*dicts):

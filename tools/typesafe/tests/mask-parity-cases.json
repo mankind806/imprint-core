@@ -4,7 +4,7 @@
   "cases": [
     {
       "id": "secret_kw_bearer",
-      "text": "curl -H 'Authorization: Bearer sk-fake-AbC123XYZ0000' https://api.example.com/v1/x",
+      "text": "curl -H 'Authorization: Bearer sk-fake-AbC123XYZ0000' https://api.service.example/v1/x",
       "must_not_contain": ["sk-fake-AbC123XYZ0000"],
       "min_counts": {"secret_kw": 1}
     },
@@ -22,8 +22,8 @@
     },
     {
       "id": "email_simple",
-      "text": "Kontakt: test.user@example.org für Rückfragen",
-      "must_not_contain": ["test.user@example.org"],
+      "text": "Kontakt: test.user@mail.example für Rückfragen",
+      "must_not_contain": ["test.user@mail.example"],
       "min_counts": {"email": 1}
     },
     {
@@ -76,8 +76,8 @@
     },
     {
       "id": "mixed_secret_and_email",
-      "text": "token=abcd1234efgh5678, bitte an sync.bot@example.net melden",
-      "must_not_contain": ["abcd1234efgh5678", "sync.bot@example.net"],
+      "text": "token=abcd1234efgh5678, bitte an sync.bot@bots.test melden",
+      "must_not_contain": ["abcd1234efgh5678", "sync.bot@bots.test"],
       "min_counts": {"secret_kw": 1, "email": 1}
     },
     {
@@ -90,7 +90,7 @@
     {
       "id": "address_plz_ort_generic_suffix",
       "text": "Wohnort laut Formular: 12345 Musterstadt am Fluss",
-      "must_not_contain": ["12345 Musterstadt am Fluss"],
+      "must_not_contain": ["12345 Musterstadt am Fluss", "Fluss"],
       "min_counts": {"address": 1},
       "note": "Python's PLZ+Ort pattern accepts any '(am|an der|im) <Capitalized word>' suffix generically. Since imprint-core-CL-013a, Go's plzOrtRE generalizes the 'am'/'an der' suffix the same way (any capitalized word); 'im'/'ob der' stay a fixed list (im Breisgau, ob der Tauber) so 'PLZ ist 10115 Berlin im Brief.' still leaves 'im Brief' unmasked (typesafe_test.go TestMaskAddresses) - a narrower parity than Python's fully generic 'im' handling, intentional and covered by both test suites."
     }

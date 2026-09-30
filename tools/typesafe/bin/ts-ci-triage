@@ -83,7 +83,7 @@ def main():
     else:
         m = res["masked_detail"]
         print(f"CI-Fehler: {LABEL.get(res['cause'], res['cause'])} (Konfidenz {res['confidence']:.2f}; "
-              f"maskiert: Schlüsselwort {m['secret_kw']}, E-Mail {m['email']}, undurchsichtig {m['opaque']})")
+              f"maskiert: {tc.format_counts(m)})")
         if res["hint"]:
             print(res["hint"])
     sys.exit(0)  # fail-open
