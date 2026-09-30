@@ -10,7 +10,7 @@
       "name": "imprint",
       "source": "./",
       "description": "Working rules in two layers: multi-agent collaboration (delegation contract, measuring before asserting, session handover) and knowledge keeping for a store that stays provable. Runs in Claude Code, Codex, and Antigravity, with four skills, a read-only review agent, core card injection, subagent runtime logging, and host update watching.",
-      "version": "0.9.2",
+      "version": "0.10.0",
       "category": "workflow"
     }
   ]
