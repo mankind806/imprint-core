@@ -9,28 +9,37 @@ imprint-dev setup (--plan | --check) [--root dir] [--repo path]
 imprint-dev setup --apply --root dir [--repo path]
 ```
 
+Aufruf im Plugin-Checkout (dem Ordner mit `.claude-plugin/plugin.json`):
+
+```sh
+go run ./tools/imprint-dev setup --plan --root .     # oder --apply
+go build ./tools/imprint-dev                          # oder go install ./tools/imprint-dev, beides ohne -trimpath
+```
+
+`--apply` prüft einen Anker: Der Go-Compiler bettet den absoluten Quellpfad `<checkout>/tools/imprint-dev/` in das Binary ein, und `--root` muss genau dieser Checkout sein (`os.SameFile`). Ein Binary aus einem anderen Worktree, eines mit `-trimpath` und eines aus `go install …@version` (Quellpfad im Modul-Cache, nicht im Checkout) verweigern `--apply` deshalb; `--plan` und `--check` gehen mit jedem Binary.
+
 Optionen (genau eines der Modi-Flags muss angegeben werden):
 * `--plan`: Vergleicht Einträge mit Zielpfaden und gibt Status-Tabelle sowie Diffs aus, ohne Schreibaktionen.
 * `--apply`: Wendet Einträge im System an (schreibt Zieldateien, konfiguriert Git-Hooks, rendert Rechte-Vorlagen).
 * `--check`: Prüft auf Drift zwischen Soll- und Ist-Zustand ohne Schreibaktionen (Exit 0 bei Übereinstimmung, Exit 1 bei Drift).
-* `--root dir`: Wurzelverzeichnis für das Hauptinventar `setup/inventar.json` (Standard für `--plan`/`--check`: `.`). Bei `--apply` Pflicht, ohne Standard: der Root muss der Plugin-Root sein, aus dem das laufende `imprint-dev` gebaut ist (Anker, siehe Sicherheitsgrenze), `.claude-plugin/plugin.json` mit `name` `imprint` tragen (reguläre Datei; weder `.claude-plugin/` noch die Datei ein Symlink) und darf nicht dasselbe Verzeichnis wie `--repo` sein. Ein bloßes `setup --apply` in einem fremden Checkout endet mit exit 2.
+* `--root dir`: Wurzelverzeichnis für das Hauptinventar `setup/inventar.json` (Standard für `--plan`/`--check`: `.`). Bei `--apply` Pflicht, ohne Standard: der Root muss der Plugin-Root sein, aus dem das laufende `imprint-dev` gebaut ist (Anker, siehe oben und Sicherheitsgrenze; im Checkout also `--root .` mit `go run ./tools/imprint-dev`), `.claude-plugin/plugin.json` mit `name` `imprint` tragen (reguläre Datei; weder `.claude-plugin/` noch die Datei ein Symlink) und darf nicht dasselbe Verzeichnis wie `--repo` sein. Ein bloßes `setup --apply` in einem fremden Checkout endet mit exit 2.
 * `--repo path`: Optionales Pfad-Argument zu einem Projekt-Repository. Falls angegeben, wird zusätzlich `<repo>/.imprint/setup.json` gelesen. Einträge aus `--repo` werden nie angewendet und nie mit Diff gezeigt, nur ihr Status (siehe Sicherheitsgrenze).
 
 ## Sicherheitsgrenze (Rechte-Tor)
 
-Was `setup` lesen, zeigen und schreiben darf, entscheiden die Pfadprüfungen in `tools/imprint-dev/setup.go`, nicht das Feld `rechte` des Inventars und nicht der Env-Guard (der ist nur beratend). Durchgesetzt von `setup.go` (und `setup_fs_linux.go` für die fd-Pfade), bewacht von `setup_security_test.go`, `setup_round2_test.go` und `setup_round3_test.go`.
+Was `setup` lesen, zeigen und schreiben darf, entscheiden die Pfadprüfungen in `tools/imprint-dev/setup.go`, nicht das Feld `rechte` des Inventars und nicht der Env-Guard (der ist nur beratend). Durchgesetzt von `setup.go` (und `setup_fs_linux.go` für die fd-Pfade), bewacht von `setup_security_test.go`, `setup_round2_test.go`, `setup_round3_test.go` und `setup_round4_test.go`.
 
 | Regel | Wirkung |
 |---|---|
 | `id` nur `^[a-z0-9][a-z0-9-]{0,63}$`; `quelle`/`ziel` nur `[A-Za-z0-9._/+-]` (plus `${HOME}`, `${XDG_CONFIG_HOME}`, `${XDG_CACHE_HOME}`, `${XDG_DATA_HOME}`) | sonst ist das Inventar ungültig (exit 2) |
 | `typ=rechte-vorlage` verlangt `rechte=true`; `rechte=true` verlangt `anwenden`; `anwenden` nur `ersetzen` oder `fragment-merge`, `fragment-merge` nur mit `rechte=true` und `.json`-Ziel | sonst ist das Inventar ungültig (exit 2) |
-| `--apply` nur mit ausdrücklichem `--root`, der der Plugin-Root ist, aus dem das laufende Binary gebaut ist (Anker: der vom Go-Compiler eingebettete absolute Quellpfad `<root>/tools/imprint-dev/`, verglichen per `os.SameFile`), `.claude-plugin/plugin.json` mit `name` `imprint` trägt (ohne Symlink ab `--root`) und nicht `--repo` ist | sonst exit 2, nichts geschrieben; ein mit `-trimpath` gebautes Binary hat keinen Anker und verweigert `--apply` |
+| `--apply` nur mit ausdrücklichem `--root`, der der Plugin-Root ist, aus dem das laufende Binary gebaut ist (Anker: der vom Go-Compiler eingebettete absolute Quellpfad `<root>/tools/imprint-dev/`, verglichen per `os.SameFile`), `.claude-plugin/plugin.json` mit `name` `imprint` trägt (ohne Symlink ab `--root`) und nicht `--repo` ist | sonst exit 2, nichts geschrieben; ein mit `-trimpath` oder per `go install …@version` gebautes Binary hat keinen Anker im Checkout und verweigert `--apply` (Aufruf siehe oben: `go run ./tools/imprint-dev` oder `go build`/`go install ./tools/imprint-dev` im Checkout) |
 | Allowlist für `rechte=false`: `shim` → `${HOME}/.local/bin/<id>` mit `id` = `imprint-…`; `systemd` → `${XDG_CONFIG_HOME}/systemd/user/imprint-<id>.service\|.timer`; `copy` → unter `${XDG_CONFIG_HOME}/imprint/` oder `${XDG_DATA_HOME}/imprint/`; `githook` → nur `git config --local core.hooksPath` | alles andere: Status `verweigert` |
 | Shim: Name schon ein anderes ausführbares Kommando in `PATH` (außerhalb `~/.local/bin`; ein führendes `~`, `~+`, `~-` oder `~name` in einem `PATH`-Element wird wie von bash expandiert), oder vorhandenes Ziel ohne die Markerzeile `# imprint-shim: …` | Status `verweigert`; eine fremde Datei wird nie ersetzt |
 | Shim: `quelle` fehlt im Root oder ist nicht ausführbar | Fehler, kein Shim geschrieben |
 | systemd: Unit-Name existiert schon in einem anderen User-Unit-Pfad (`systemd-analyze --user unit-paths` plus die Standardpfade aus systemd.unit(5), z. B. `/etc/systemd/user`, `/usr/lib/systemd/user`, `${XDG_DATA_HOME}/systemd/user`) | wird wie `rechte=true` behandelt: nur gedruckt, Status mit `(Mensch)` |
 | Hardlinks: Ziel oder `.bak` mit mehr als einem Link (`fstat`, `Nlink>1`) | nie gelesen, nie im Diff gezeigt, nie ersetzt |
-| Schreiben: Ziel-Verzeichnis über Verzeichnis-fds ab der aufgelösten erlaubten Wurzel, jeder Bestandteil mit `O_DIRECTORY\|O_NOFOLLOW` per `openat` (Linux; die Garantie von `openat2` mit `RESOLVE_NO_SYMLINKS\|RESOLVE_BENEATH`, ohne `golang.org/x/sys`); Datei über Temp-Datei im selben Verzeichnis plus `renameat` | ein nach der Prüfung vertauschtes Verzeichnis wird nicht verfolgt |
+| Schreiben und Lesen (Ziel, `.bak`, Rechte-Cache, gedruckte Befehle): Ziel-Verzeichnis über Verzeichnis-fds immer ab dem aufgelösten `$HOME`, auch die Ordner zwischen `$HOME` und einer XDG-Wurzel (etwa `~/.local`), jeder Bestandteil mit `O_DIRECTORY\|O_NOFOLLOW` per `openat` (Linux; die Garantie von `openat2` mit `RESOLVE_NO_SYMLINKS\|RESOLVE_BENEATH`, ohne `golang.org/x/sys`); Datei über Temp-Datei im selben Verzeichnis plus `renameat` | ein nach der Prüfung vertauschtes Verzeichnis wird nicht verfolgt |
 | `XDG_*_HOME` nicht unterhalb von `$HOME` (etwa `/`, `/etc` oder `$HOME` selbst) oder `HOME=/` | gilt als nicht gesetzt; ein XDG-Ordner unter `$HOME`, der per Symlink hinausführt, ergibt keine erlaubte Wurzel |
 | Allowlist-Basis (`~/.config/imprint`, `~/.local/share/imprint`, `~/.local/bin`, `~/.config/systemd/user`) oder ein Ordner zwischen `$HOME` und dem Ziel ist ein Symlink | Status `verweigert`, auch wenn der Symlink innerhalb von `$HOME` bleibt |
 | Modus geschriebener Dateien | `0600`, ein Shim `0755`; das Inventar kann ihn nicht aufweiten |

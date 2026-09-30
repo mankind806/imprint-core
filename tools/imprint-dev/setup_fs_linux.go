@@ -14,8 +14,9 @@ import (
 )
 
 // On Linux, setup reaches every target directory through directory file
-// descriptors: the walk opens a resolved allowed root and then each further
-// component with O_DIRECTORY|O_NOFOLLOW relative to the previous one (openat).
+// descriptors: the walk opens the resolved $HOME (a target) or the resolved
+// inventory root (a quelle) and then each further component with
+// O_DIRECTORY|O_NOFOLLOW relative to the previous one (openat).
 // A component swapped for a symlink after the path checks makes the walk fail
 // instead of being followed. This is the guarantee openat2 gives with
 // RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH, built from openat because

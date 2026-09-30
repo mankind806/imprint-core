@@ -658,24 +658,33 @@ func readBeneath(base, rel string) ([]byte, error) {
 }
 
 // openTargetDir opens the resolved target directory dir through directory file
-// descriptors, starting at the longest existing resolved allowed root that
-// contains it. A component swapped for a symlink after checkZiel is then not
-// followed (Linux; see setup_fs_linux.go).
+// descriptors. The walk always starts at the resolved $HOME, never at an
+// allowed root below it: every component from $HOME down, the ones between
+// $HOME and an XDG root (~/.local for XDG_DATA_HOME) included, is opened with
+// O_NOFOLLOW (Linux; see setup_fs_linux.go), so a component swapped for a
+// symlink after checkZiel is not followed. Every allowed root lies within the
+// resolved $HOME (resolvedRoots), so dir must too.
 func openTargetDir(dir string, create bool, perm fs.FileMode) (*os.File, error) {
-	base := ""
-	for _, r := range currentSetupEnv().resolvedRoots() {
-		if len(r) <= len(base) || !isWithin(r, dir) {
-			continue
-		}
-		if fi, err := os.Lstat(r); err == nil && fi.IsDir() {
-			base = r
-		}
+	env := currentSetupEnv()
+	if env.home == "" {
+		return nil, errors.New("HOME nicht gesetzt")
 	}
-	if base == "" {
-		return nil, fmt.Errorf("%s liegt unter keiner vorhandenen erlaubten Wurzel", dir)
+	base, err := resolvePath(env.home)
+	if err != nil {
+		return nil, fmt.Errorf("$HOME nicht auflösbar: %v", err)
 	}
+	if !isWithin(base, dir) {
+		return nil, fmt.Errorf("%s liegt nicht unter dem aufgelösten $HOME %s", dir, base)
+	}
+	beforeTargetWalk(base, dir)
 	return openDirBeneath(base, dir, create, perm)
 }
+
+// beforeTargetWalk runs in openTargetDir once the walk's start is fixed and
+// before its first component is opened. It does nothing; a test replaces it to
+// swap a directory at exactly that moment, the window race-anc.sh hit by
+// chance.
+var beforeTargetWalk = func(base, dir string) {}
 
 // openRegularAt opens name in d for reading, never through a symlink, and only
 // if it is a regular file with one link: a hard link planted at a target or a
@@ -1106,7 +1115,7 @@ func checkPluginRoot(root, repo string) error {
 	}
 	anchors := pluginAnchors()
 	if len(anchors) == 0 {
-		return fmt.Errorf("dieses imprint-dev trägt keinen Quellpfad (gebaut mit -trimpath?); --apply braucht ein Binary, das aus dem Plugin-Root gebaut ist (go build ohne -trimpath, oder go run ./tools/imprint-dev im Plugin-Root)")
+		return fmt.Errorf("dieses imprint-dev trägt keinen Quellpfad eines Plugin-Checkouts (gebaut mit -trimpath, oder per go install …@version aus dem Modul-Cache?); --apply braucht ein Binary, das aus dem Plugin-Checkout gebaut ist: dort go run ./tools/imprint-dev setup --apply --root ., oder go build bzw. go install ./tools/imprint-dev ohne -trimpath")
 	}
 	rootFi, err := os.Stat(root)
 	if err != nil {
