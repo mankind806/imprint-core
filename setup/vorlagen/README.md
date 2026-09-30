@@ -57,9 +57,16 @@ Umgebungsvariablen gesetzt sein, bevor `setup/vorlagen/rechte-anwenden.sh agy` (
 `agy-statusline`) sie per `envsubst` einsetzt (siehe „Anwenden" unten). Deshalb zeigt
 `setup --plan` (und damit auch der `--apply`-Aufruf für `agy-rechte-vorlage`, siehe oben) diesen
 einen Eintrag immer als `abweichend` — das ist erwartet, nicht ein Fehler der Vorlage (siehe
-Abweichungen unten). `claude-rechte-vorlage` und `agy-statusline` tragen dagegen keine solchen
-Platzhalter; nach dem Anwenden zeigt `--plan` für beide `gleich` (gemessen 2026-09-30 gegen
-`imprint-dev38 setup --plan`, Head `bfc0ecb`).
+Abweichungen unten). Seit der Vereinigung aus Bestand und Vorlage (Runde 8) gilt das praktisch
+auch für `claude-rechte-vorlage`: `--plan`/`--apply` vergleichen Bytes nach `jq *`-Semantik (ein
+Array gilt nur als gleich, wenn es exakt der Vorlage entspricht, siehe `fragmentStatus`/
+`deepMerge` in `tools/imprint-dev/setup.go`), aber die angewendete Datei trägt jetzt zusätzlich
+jeden vorher schon vorhandenen allow-/deny-Eintrag — sie ist nach dem Anwenden im Allgemeinen
+eine ECHTE OBERMENGE der Vorlage, keine exakte Kopie mehr, und zeigt deshalb `abweichend`, sobald
+vor dem ersten Anwenden auch nur ein einziger eigener Eintrag vorhanden war. Ein `gleich` nach dem
+Anwenden bräuchte auf der `--plan`-Seite eine Teilmengen-Prüfung (Vorlage ⊆ Ziel) statt exakter
+Gleichheit — das ändert #38, nicht dieser PR (siehe „Merge-Reihenfolge" im Pull-Request-Text). Nur
+der `copy`-Eintrag `agy-statusline` (reines Kopieren, kein Merge) erreicht weiterhin `gleich`.
 
 `statusLine.command` in `agy-settings.json` zeigt auf `${HOME}/.gemini/antigravity-cli/statusline.py`,
 nicht auf einen Checkout-Pfad: agy läuft das Kommando direkt aus, und ein Checkout-Pfad wäre nach
@@ -127,20 +134,32 @@ Alle drei Unterbefehle:
 anderen Top-Level-Schlüssel (`hooks`, `env`, `enabledPlugins`, `sandbox`, …) bleiben unverändert.
 `permissions.allow`/`permissions.deny` werden dabei als **Vereinigung** aus Bestand und Vorlage
 gebildet — Bestand zuerst, dann neue Einträge aus der Vorlage, doppelte entfernt, Reihenfolge
-stabil (Nutzerentscheid CL-131: „deep jq merge, rights preserved" — ein einfacher `jq *`-Merge
-würde beide Arrays vollständig durch die Vorlage ersetzen, weil `*` Arrays nie zusammenführt, nur
-Objekte rekursiv merged; das war bis Runde 6 ein Befund, siehe unten). Vor dem Übernehmen prüft
-das Skript, dass jeder bestehende allow-/deny-Eintrag, jeder bestehende Top-Level-Schlüssel und
-jeder bestehende Schlüssel innerhalb von `permissions` (z. B. `defaultMode`) im Ergebnis noch
-vorhanden ist — sonst bricht es ohne jede Änderung ab (Befund 1, Runde 7). Ist die bestehende
-`settings.json` einzeilig/kompakt formatiert, zeigt der Diff beide Seiten vorher mit `jq -S .`
-sortiert und eingerückt an, sonst wäre die ganze Datei als ein einziger geänderter Block zu sehen,
-statt der einzelnen geänderten Einträge.
+stabil (Leitungsentscheid CL-131: Rechte bleiben erhalten — ein einfacher `jq *`-Merge würde
+beide Arrays vollständig durch die Vorlage ersetzen, weil `*` Arrays nie zusammenführt, nur
+Objekte rekursiv merged; das war bis Runde 6 ein Befund, siehe unten). Die Vorlage darf dabei nur
+`permissions.allow`/`permissions.deny` tragen (`agy-settings.json` zusätzlich `statusLine`/
+`trustedWorkspaces`) — jeder andere Schlüssel bricht den Merge ab, bevor irgendetwas geschrieben
+wird (Befund 3, Runde 8: eine manipulierte Vorlage könnte sonst z. B. `defaultMode` auf einen
+unsicheren Wert setzen). Vor dem Übernehmen prüft das Skript, dass jeder bestehende
+allow-/deny-Eintrag noch vorhanden ist und dass jeder Wert außerhalb von
+`permissions.allow`/`permissions.deny` byte-identisch zum Stand davor ist — ein reiner
+Schlüsselvergleich hätte eine Vorlage, die einen bestehenden Wert überschreibt statt ihn
+wegzulassen, nicht erkannt (Befund 1, Runde 7; Befund 2 und 3, Runde 8: die Prüfung verträgt jetzt
+auch eine Zieldatei ganz ohne `permissions`-Block). Ist die bestehende `settings.json`
+einzeilig/kompakt formatiert, zeigt der Diff beide Seiten vorher mit `jq -S .` sortiert und
+eingerückt an, sonst wäre die ganze Datei als ein einziger geänderter Block zu sehen, statt der
+einzelnen geänderten Einträge. `agy` mergt seit Runde 8 genauso: `permissions.allow`/`deny` als
+Vereinigung, `statusLine`/`trustedWorkspaces` und jeder andere von der Vorlage getragene
+Top-Level-Schlüssel ersetzen weiterhin den Bestand (das ist beabsichtigt, siehe unten), nur ein
+schon vorhandener, von der Vorlage nicht getragener Schlüssel (z. B. ein von Hand ergänztes
+`model`) bleibt unverändert — ein voller Ersatz hätte eigene `deny`-Regeln wie `command(make)`
+stillschweigend gelöscht.
 
-`agy` ersetzt `~/.gemini/antigravity-cli/settings.json` komplett durch `agy-settings.json` mit
-`envsubst` für `${PROJEKTE}`/`${TRUSTED_WORKSPACE}` (validiert danach per
-`jq -e -s 'length==1'`, dass das Ergebnis gültiges JSON mit genau einem Dokument ist und kein
-unersetztes `${` mehr enthält). `statusline.py` wird davon unabhängig behandelt, nicht nur dann,
+`agy` rendert `agy-settings.json` zuerst mit `envsubst` für `${PROJEKTE}`/`${TRUSTED_WORKSPACE}`
+(validiert danach per `jq -e -s 'length==1'`, dass das Ergebnis gültiges JSON mit genau einem
+Dokument ist und kein unersetztes `${` mehr enthält) und mergt das Ergebnis dann wie oben
+beschrieben in `~/.gemini/antigravity-cli/settings.json`. `statusline.py` wird davon unabhängig
+behandelt, nicht nur dann,
 wenn `settings.json` sich ändert, über denselben Codepfad wie der eigenständige Unterbefehl
 `agy-statusline`: Fehlt `~/.gemini/antigravity-cli/statusline.py`, zeigt das Skript den ganzen
 neuen Inhalt als Diff gegen `/dev/null` und fragt trotzdem nach — eine neu zu installierende
@@ -285,20 +304,34 @@ Schlüssel.
   Umgehungen offen, keine davon durch eine Regel in einer der beiden Vorlagen verhindert.
   * `find … -fprintf out %p\n` und `sort -o <ziel>` schreiben Dateien über zwei erlaubte Befehle,
     an jeder `write_file`-Regel vorbei.
-  * `find … -delete` löscht Dateien über einen erlaubten Befehl, an der `command(rm)`-Deny-Regel
-    vorbei.
+  * `command(find -exec)`/`-delete`/`-execdir` (ergänzt in Runde 8) matchen nur, wenn `find` OHNE
+    Pfad-Argument aufgerufen wird (z. B. `find -delete`, sucht implizit in `.`) — das ist selbst
+    ein gültiger, gefährlicher Aufruf und jetzt verweigert, aber die weitaus üblichere Form
+    `find <pfad> -exec …`/`find <pfad> -delete` hat einen Pfad VOR dem Flag und bleibt damit ein
+    Präfix-Bypass wie bei `git push` unten; `command(rm)` und `command(find)` selbst decken diesen
+    Weg ebenfalls nicht ab (`find` ist erlaubt, `-exec`/`-delete` sind nur Ausdrücke davon, keine
+    eigenen Befehle).
   * `command(go run)` ist uneingeschränkt erlaubt: beliebiger Go-Code lässt sich damit ausführen,
     unabhängig von jeder anderen Regel in dieser Datei.
   * `git push +refs/heads/x:y` (die `+`-Syntax für Force-Push) läuft an den wörtlichen
-    `git push --force`/`-f`/`--force-with-lease`/`--mirror`/`-uf`-Deny-Einträgen vorbei — keiner
-    von ihnen ist ein Präfix von `git push +refs/heads/x:y`.
-  * Steht ein anderes Token vor der Force-Flag, z. B. `git push origin main --force` oder
+    `git push --force`/`-f`/`--force-with-lease`/`--mirror`/`-uf`/`--delete`/`-d`-Deny-Einträgen
+    vorbei — keiner von ihnen ist ein Präfix von `git push +refs/heads/x:y`.
+  * Steht ein anderes Token vor der Force-/Delete-Flag, z. B. `git push origin main --force` oder
     `git push origin --force-with-lease=main`, ist keiner der Deny-Einträge oben mehr ein
     wörtlicher Präfix des ganzen Befehls — die Regeln matchen nur `git push --force…` am Anfang,
-    nicht `--force` irgendwo im Befehl (Befund 3, Runde 7: `--mirror`/`-uf` wurden ergänzt, weil
-    sie wie `--force` direkt nach `git push` stehen können, aber dieselbe Lücke bleibt für jede
-    Force-Variante mit einem Flag oder Positional-Argument davor offen — nicht geschlossen, nur
-    dokumentiert, solange `command(...)` kein Glob/Regex unterstützt, siehe oben).
+    nicht `--force` irgendwo im Befehl (Befund 3, Runde 7 und Runde 8: `--mirror`/`-uf`/`--delete`/
+    `-d` wurden ergänzt, weil sie wie `--force` direkt nach `git push` stehen können, aber
+    dieselbe Lücke bleibt für jede Flag-Variante mit einem weiteren Flag oder Positional-Argument
+    davor offen — nicht geschlossen, nur dokumentiert, solange `command(...)` kein Glob/Regex
+    unterstützt, siehe oben).
+  * Ein `agy`-Aufruf schreibt `betrieb/systemd/imprint-oberflaeche.service` selbst nicht (kein
+    `write_file`-Allow-Eintrag auf einen systemd-Unit-Pfad in dieser Vorlage), aber
+    `command(systemctl --user enable --now imprint-oberflaeche.service)`/
+    `restart …` sind erlaubt: ist die Unit-Datei über einen der `write_file`-Allow-Pfade oben
+    (z. B. ein Worktree) schon verändert worden, startet/restartet dieser erlaubte Befehl
+    persistent laufenden Code — bewusst akzeptiert (Nutzerentscheid CL-118, siehe „Anwenden"
+    oben für den `hub_hinweis`-Vorbehalt bei laufenden Prozessen), nicht durch eine Regel in
+    dieser Datei verhindert.
   * In `claude-rechte.json` deckt kein Eintrag Bash allgemein ab (anders als `agy-settings.json`
     mit `command(bash -c)`/`command(sh -c)`); jeder der obigen Wege steht Claude über sein
     Bash-Werkzeug offen, auch wenn `Edit`/`Write` auf die Settings-Dateien selbst verweigert sind.
@@ -314,10 +347,15 @@ Schlüssel.
 
 * `defaultMode: "auto"` aus `~/.claude/settings.json` ist nicht in `claude-rechte.json`
   übernommen — der Auftrag verlangte ausdrücklich nur den `permissions`-Block.
-* Nur `agy-rechte-vorlage` zeigt bei `imprint-dev setup --plan` dauerhaft den Status
-  `abweichend`: die Vorlage trägt die Platzhalter `${PROJEKTE}`/`${TRUSTED_WORKSPACE}`, die
-  `--plan`/`--apply` nicht auflösen (siehe „Platzhalter" oben), und ihre Bytes weichen deshalb
-  immer von der angewendeten Zieldatei ab. `claude-rechte-vorlage` (nur ein Ausschnitt der
-  Zieldatei) und der `copy`-Eintrag `agy-statusline` (keine Platzhalter) zeigen `fehlt`, solange
-  noch nicht angewendet, und nach dem Anwenden `gleich` — gemessen 2026-09-30 gegen
-  `imprint-dev38 setup --plan`, Head `bfc0ecb` (Momentaufnahme, siehe oben).
+* `agy-rechte-vorlage` zeigt bei `imprint-dev setup --plan` dauerhaft den Status `abweichend`:
+  die Vorlage trägt die Platzhalter `${PROJEKTE}`/`${TRUSTED_WORKSPACE}`, die `--plan`/`--apply`
+  nicht auflösen (siehe „Platzhalter" oben), und ihre Bytes weichen deshalb immer von der
+  angewendeten Zieldatei ab. `claude-rechte-vorlage` zeigt `fehlt`, solange noch nicht angewendet,
+  und danach in aller Regel ebenfalls dauerhaft `abweichend`, sobald das Ziel vor dem ersten
+  Anwenden schon eigene allow-/deny-Einträge trug (Runde 8: `--plan`/`--apply` vergleichen exakt,
+  die Vereinigung aus Bestand und Vorlage ist aber im Allgemeinen eine echte Obermenge der
+  Vorlage, siehe „Platzhalter" oben) — das ist erwartet, nicht ein Fehler der Vorlage oder des
+  Merges; #38 müsste dafür eine Teilmengen-Prüfung ergänzen, was dieser PR nicht ändert. Nur der
+  `copy`-Eintrag `agy-statusline` (reines Kopieren, kein Merge, keine Platzhalter) erreicht
+  `fehlt` vor und `gleich` nach dem Anwenden — gemessen 2026-09-30 gegen `imprint-dev38 setup
+  --plan`, Head `bfc0ecb` (Momentaufnahme, siehe oben).

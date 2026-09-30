@@ -20,14 +20,21 @@
 # ${HOME}/.claude/settings.json (ein tiefer Merge; permissions.allow und
 # permissions.deny werden dabei als VEREINIGUNG aus Bestand und Vorlage
 # gebildet — bestehende Einträge zuerst, dann neue aus der Vorlage,
-# doppelte entfernt, Reihenfolge stabil (Nutzerentscheid CL-131: "deep jq
-# merge, rights preserved" — kein bestehendes Recht geht beim Anwenden
-# verloren). permissions.defaultMode und alle anderen Top-Level-Schlüssel —
-# hooks, env, enabledPlugins, sandbox, … — bleiben unverändert, weil die
-# Vorlage nur permissions trägt. Nach dem Merge prüft das Skript, dass jeder
-# bestehende allow-/deny-Eintrag, jeder bestehende Top-Level-Schlüssel und
-# jeder bestehende Schlüssel innerhalb von permissions im Ergebnis noch
-# vorhanden ist — sonst bricht es ohne jede Änderung ab (Befund 1, Runde 7).
+# doppelte entfernt, Reihenfolge stabil (Leitungsentscheid CL-131: Rechte
+# bleiben erhalten — kein bestehendes Recht geht beim Anwenden verloren).
+# permissions.defaultMode und alle anderen Top-Level-Schlüssel — hooks, env,
+# enabledPlugins, sandbox, … — bleiben unverändert, weil die Vorlage nur
+# permissions trägt (die Vorlage darf auch nur genau das tragen — jeder
+# andere Top-Level- oder permissions-Schlüssel in claude-rechte.json bricht
+# den Merge ab, Befund 3 aus Runde 8, gegen eine manipulierte Vorlage, die
+# sonst z. B. defaultMode auf einen unsicheren Wert setzen könnte). Nach dem
+# Merge prüft das Skript, dass jeder bestehende allow-/deny-Eintrag noch
+# vorhanden ist und dass jeder Wert außerhalb von permissions.allow/deny
+# byte-identisch zum Stand vor dem Merge ist (nicht nur, dass der Schlüssel
+# noch existiert — ein reiner Schlüsselvergleich hätte eine Vorlage, die
+# einen bestehenden Wert überschreibt, statt ihn wegzulassen, nicht erkannt,
+# Befund 3 aus Runde 8) — sonst bricht es ohne jede Änderung ab (Befund 1,
+# Runde 7; Befund 3, Runde 8).
 # Direkt beim Merge hält das Skript den sha256sum von
 # ${HOME}/.claude/settings.json fest und prüft ihn nach der Rückfrage
 # erneut, bevor irgendetwas geschrieben wird — ändert sich die Zieldatei
@@ -35,10 +42,17 @@
 # gleichzeitiges "immer erlauben"), bricht das Skript ohne jede Änderung ab,
 # statt eine Sicherung des schon veralteten Standes anzulegen.
 #
-# agy setzt ${HOME}/.gemini/antigravity-cli/settings.json komplett aus
-# setup/vorlagen/agy-settings.json neu (envsubst für ${PROJEKTE} und
-# ${TRUSTED_WORKSPACE}, mit derselben sha256sum-Race-Prüfung wie oben) und
-# behandelt setup/vorlagen/statusline.py (Ziel
+# agy mergt setup/vorlagen/agy-settings.json (envsubst für ${PROJEKTE} und
+# ${TRUSTED_WORKSPACE}) in ${HOME}/.gemini/antigravity-cli/settings.json —
+# seit Runde 8 genau wie claude: permissions.allow/permissions.deny als
+# Vereinigung aus Bestand und Vorlage, alles andere aus der Vorlage
+# (statusLine, trustedWorkspaces) ersetzt den Bestand wie bisher, jeder
+# andere, schon vorhandene Top-Level-Schlüssel bleibt unverändert (Befund 1,
+# Runde 8: ein voller Ersatz hätte eigene deny-Regeln wie "command(make)"
+# stillschweigend gelöscht — mehr Rechte für agy, nicht weniger). Die
+# Vorlage darf dabei nur permissions/statusLine/trustedWorkspaces tragen
+# (sonst bricht der Merge ab), mit derselben sha256sum-Race-Prüfung wie bei
+# claude. Unabhängig davon behandelt agy setup/vorlagen/statusline.py (Ziel
 # ${HOME}/.gemini/antigravity-cli/statusline.py) unabhängig davon, über
 # dieselbe Prüfung/Diff/Rückfrage-Logik wie der eigenständige Unterbefehl
 # agy-statusline (siehe unten): eine Vorlage bestätigt die andere nicht mit.
@@ -139,11 +153,12 @@ statusline_tmp=""
 rueckbau_tmp=""
 diff_json_alt_tmp=""
 diff_json_neu_tmp=""
+agy_rendered_tmp=""
 SICHERN_BAK=""
 
 aufraeumen() {
   rm -f "${tmp:-}" "${statusline_tmp:-}" "${rueckbau_tmp:-}" \
-        "${diff_json_alt_tmp:-}" "${diff_json_neu_tmp:-}"
+        "${diff_json_alt_tmp:-}" "${diff_json_neu_tmp:-}" "${agy_rendered_tmp:-}"
 }
 trap aufraeumen EXIT
 # Zusätzlich zur EXIT-Falle: HUP/INT/TERM räumen explizit auf und beenden
@@ -301,6 +316,42 @@ zeige_diff_json() {
     return 1
   fi
   return 0
+}
+
+# pruefe_vorlage_schluessel <Datei> <erlaubte Top-Level-Schlüssel als JSON-Array> <erlaubte permissions-Schlüssel als JSON-Array>:
+# bricht ab, wenn die Datei einen Top-Level- oder permissions-Schlüssel
+# trägt, der nicht in der jeweils erlaubten Liste steht. Eine manipulierte
+# Vorlage (claude-rechte.json/agy-settings.json) könnte sonst z. B.
+# defaultMode, hooks, model oder dangerouslySkipPermissions einschmuggeln —
+# der Merge vergleicht danach nur noch Schlüssel/Werte innerhalb der hier
+# freigegebenen Felder, ein neuer Schlüssel ausserhalb bricht schon hier ab
+# (Befund 3, Runde 8).
+# JQ_MERGE_UNION: von "jq -s" gegen zwei Dateien (Ziel, Vorlage) verwendetes
+# Programm für claude UND agy — permissions.allow/permissions.deny werden
+# als Vereinigung gebildet (Bestand zuerst, doppelte entfernt, Reihenfolge
+# stabil), alles andere per "*"-Merge wie gewohnt (Vorlage überschreibt
+# gleichnamige Top-Level-Schlüssel, z. B. statusLine/trustedWorkspaces bei
+# agy; Schlüssel, die nur im Bestand stehen, bleiben unverändert). "(...//
+# {})" überall, damit eine Zieldatei ohne permissions-Block keinen jq-Fehler
+# statt einer klaren Meldung auslöst (Befund 2, Runde 8).
+JQ_MERGE_UNION='
+  def uniq_stable: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
+  .[0] as $alt | .[1] as $vorlage |
+  (($alt.permissions // {}).allow // []) as $altallow |
+  (($alt.permissions // {}).deny // []) as $altdeny |
+  (($altallow + (($vorlage.permissions // {}).allow // [])) | uniq_stable) as $allow |
+  (($altdeny + (($vorlage.permissions // {}).deny // [])) | uniq_stable) as $deny |
+  $alt * ($vorlage * {permissions: {allow: $allow, deny: $deny}})
+'
+
+pruefe_vorlage_schluessel() {
+  local datei="$1" top_erlaubt="$2" perm_erlaubt="$3"
+  if ! jq -e --argjson top "$top_erlaubt" --argjson perm "$perm_erlaubt" '
+        ((keys - $top) | length == 0) and
+        ((((.permissions // {}) | keys) - $perm) | length == 0)
+      ' "$datei" >/dev/null 2>&1; then
+    die "Vorlage trägt einen unerwarteten Schlüssel (erlaubt: $top_erlaubt, permissions nur $perm_erlaubt): $datei"
+  fi
 }
 
 bestaetigen_oder_abbrechen() {
@@ -473,6 +524,13 @@ cmd_claude() {
   local resolved
   resolved=$(resolve_ziel "$ziel")
   pruefe_nicht_checkout "$resolved"
+  pruefe_ziel_ok "$resolved"
+
+  # Die Vorlage darf NUR permissions.allow/permissions.deny tragen — eine
+  # manipulierte claude-rechte.json könnte sonst z. B. defaultMode auf
+  # einen unsicheren Wert setzen, ohne dass ein reiner Schlüsselvergleich
+  # danach etwas davon merkt (Befund 3, Runde 8).
+  pruefe_vorlage_schluessel "$vorlage" '["permissions"]' '["allow","deny"]'
 
   tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
 
@@ -487,33 +545,30 @@ cmd_claude() {
   # Vorlage, doppelte entfernt, Reihenfolge stabil) — "jq -s '.[0] * .[1]'"
   # allein würde beide Listen vollständig durch die Vorlage ERSETZEN, weil
   # der "*"-Operator Arrays nie zusammenführt, nur Objekte rekursiv merged
-  # (Befund 1, Runde 7; Nutzerentscheid CL-131). Alles andere — auch
+  # (Befund 1, Runde 7; Leitungsentscheid CL-131). Alles andere — auch
   # permissions.defaultMode und alle anderen Top-Level-Schlüssel — bleibt
-  # über denselben "*"-Merge wie bisher unverändert.
-  local jq_merge='
-    def uniq_stable: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
-    .[0] as $alt | .[1] as $vorlage |
-    (($alt.permissions.allow // []) + ($vorlage.permissions.allow // []) | uniq_stable) as $allow |
-    (($alt.permissions.deny // []) + ($vorlage.permissions.deny // []) | uniq_stable) as $deny |
-    $alt * ($vorlage * {permissions: {allow: $allow, deny: $deny}})
-  '
-  jq -s "$jq_merge" "$resolved" "$vorlage" > "$tmp" || die "jq-Merge fehlgeschlagen"
+  # über denselben "*"-Merge wie bisher unverändert. JQ_MERGE_UNION (oben,
+  # gemeinsam mit agy) schützt mit "(.permissions // {})" überall gegen eine
+  # Zieldatei ohne permissions-Block (Befund 2, Runde 8).
+  jq -s "$JQ_MERGE_UNION" "$resolved" "$vorlage" > "$tmp" || die "jq-Merge fehlgeschlagen"
 
   # Sicherheitsprüfung NACH dem Merge, VOR jeder Anzeige/Rückfrage: jeder
-  # bestehende allow-/deny-Eintrag, jeder bestehende Top-Level-Schlüssel und
-  # jeder bestehende Schlüssel innerhalb von permissions (z. B.
-  # defaultMode) muss im Ergebnis noch vorhanden sein — sonst bricht das
-  # Skript ohne jede Änderung ab, statt eine Rechte-Vorlage zu übernehmen,
-  # die etwas vom Bestand verloren hätte.
+  # bestehende allow-/deny-Eintrag muss im Ergebnis noch vorhanden sein, UND
+  # jeder Wert außerhalb von permissions.allow/permissions.deny muss
+  # byte-identisch zum Stand vor dem Merge sein — ein reiner
+  # Schlüsselvergleich hätte eine Vorlage, die einen bestehenden Wert
+  # (z. B. defaultMode) überschreibt statt ihn wegzulassen, nicht erkannt
+  # (Befund 3, Runde 8). "(.permissions // {})" schützt wieder gegen eine
+  # Zieldatei ohne permissions-Block (Befund 2, Runde 8).
   if ! jq -n -e --slurpfile alt "$resolved" --slurpfile neu "$tmp" '
-        ($alt[0].permissions.allow // []) as $allow |
-        ($alt[0].permissions.deny // []) as $deny |
-        (($allow - ($neu[0].permissions.allow // [])) | length == 0) and
-        (($deny - ($neu[0].permissions.deny // [])) | length == 0) and
-        ((($alt[0] | keys) - ($neu[0] | keys)) | length == 0) and
-        ((($alt[0].permissions | keys) - ($neu[0].permissions | keys)) | length == 0)
+        ($alt[0].permissions // {}) as $altperm |
+        ($neu[0].permissions // {}) as $neuperm |
+        ((($altperm.allow // []) - ($neuperm.allow // [])) | length == 0) and
+        ((($altperm.deny // []) - ($neuperm.deny // [])) | length == 0) and
+        (($alt[0] | del(.permissions)) == ($neu[0] | del(.permissions))) and
+        (($altperm | del(.allow, .deny)) == ($neuperm | del(.allow, .deny)))
       ' >/dev/null 2>&1; then
-    die "Plausibilitätsprüfung fehlgeschlagen: der Merge hat bestehende allow-/deny-Einträge oder Schlüssel verloren"
+    die "Plausibilitätsprüfung fehlgeschlagen: der Merge hat bestehende allow-/deny-Einträge verloren oder einen anderen Wert verändert"
   fi
 
   echo "Merge von $vorlage in $ziel (permissions.allow/permissions.deny als" \
@@ -574,27 +629,64 @@ cmd_agy() {
 
   hub_hinweis
 
-  tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
-
   local vor_sha
   vor_sha=$(sha256sum "$resolved") || die "sha256sum fehlgeschlagen: $resolved"
+
+  agy_rendered_tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
 
   # shellcheck disable=SC2016
   HOME="$HOME" PROJEKTE="$PROJEKTE" TRUSTED_WORKSPACE="$TRUSTED_WORKSPACE" \
     envsubst '${HOME} ${PROJEKTE} ${TRUSTED_WORKSPACE}' \
-    < "$vorlage" > "$tmp" || die "envsubst fehlgeschlagen"
+    < "$vorlage" > "$agy_rendered_tmp" || die "envsubst fehlgeschlagen"
 
-  if ! jq -e -s 'length==1' "$tmp" >/dev/null 2>&1; then
+  if ! jq -e -s 'length==1' "$agy_rendered_tmp" >/dev/null 2>&1; then
     die "envsubst-Ergebnis ist kein gültiges JSON mit genau einem Dokument — PROJEKTE/TRUSTED_WORKSPACE prüfen"
   fi
-  if grep -qF '${' "$tmp"; then
+  if grep -qF '${' "$agy_rendered_tmp"; then
     die "unersetztes \${ im Ergebnis — PROJEKTE/TRUSTED_WORKSPACE prüfen"
+  fi
+
+  # Die Vorlage darf nur permissions/statusLine/trustedWorkspaces tragen —
+  # eine manipulierte agy-settings.json könnte sonst einen fremden
+  # Top-Level-Schlüssel einschmuggeln (Befund 3, Runde 8, analog zu claude).
+  pruefe_vorlage_schluessel "$agy_rendered_tmp" '["permissions","statusLine","trustedWorkspaces"]' '["allow","deny"]'
+
+  # permissions.allow/permissions.deny als Vereinigung aus Bestand und
+  # gerenderter Vorlage (wie bei claude, JQ_MERGE_UNION); statusLine und
+  # trustedWorkspaces (und jeder andere, von der Vorlage getragene
+  # Schlüssel) ersetzen weiterhin den Bestand — das ist beabsichtigt
+  # ("ersetzen" in setup/inventar.json), nur die beiden Regel-Listen werden
+  # zusammengeführt statt ersetzt (Befund 1, Runde 8: ein voller Ersatz hätte
+  # eigene deny-Regeln wie "command(make)" stillschweigend gelöscht — mehr
+  # Rechte für agy, nicht weniger). Top-Level-Schlüssel, die nur im Bestand
+  # stehen (z. B. ein von Hand ergänztes "model"), bleiben unverändert.
+  tmp=$(mktemp "${resolved%/*}/.rechte-anwenden.XXXXXX") || die "mktemp fehlgeschlagen"
+  jq -s "$JQ_MERGE_UNION" "$resolved" "$agy_rendered_tmp" > "$tmp" || die "jq-Merge fehlgeschlagen"
+  rm -f "$agy_rendered_tmp"
+  agy_rendered_tmp=""
+
+  # Sicherheitsprüfung wie bei claude, aber ohne Werte außerhalb von
+  # permissions als unveränderlich zu behandeln — statusLine/
+  # trustedWorkspaces SOLLEN sich ändern ("ersetzen"); geprüft wird nur,
+  # dass kein bestehender allow-/deny-Eintrag und kein bestehender
+  # Top-Level- oder permissions-Schlüssel verloren geht.
+  if ! jq -n -e --slurpfile alt "$resolved" --slurpfile neu "$tmp" '
+        ($alt[0].permissions // {}) as $altperm |
+        ($neu[0].permissions // {}) as $neuperm |
+        ((($altperm.allow // []) - ($neuperm.allow // [])) | length == 0) and
+        ((($altperm.deny // []) - ($neuperm.deny // [])) | length == 0) and
+        ((($alt[0] | keys) - ($neu[0] | keys)) | length == 0) and
+        ((($altperm | keys) - ($neuperm | keys)) | length == 0)
+      ' >/dev/null 2>&1; then
+    die "Plausibilitätsprüfung fehlgeschlagen: der Merge hat bestehende allow-/deny-Einträge oder Schlüssel verloren"
   fi
 
   local settings_frage=0 statusline_frage=0
 
-  echo "Ersetzen von $ziel durch $vorlage (envsubst PROJEKTE/TRUSTED_WORKSPACE):"
-  if zeige_diff "$resolved" "$tmp"; then
+  echo "Merge von $vorlage in $ziel (envsubst PROJEKTE/TRUSTED_WORKSPACE;" \
+       "permissions.allow/permissions.deny als Vereinigung aus Bestand und" \
+       "Vorlage, alles andere aus der Vorlage ersetzt den Bestand):"
+  if zeige_diff_json "$resolved" "$tmp" "$ziel"; then
     settings_frage=1
   fi
 

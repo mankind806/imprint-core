@@ -14,7 +14,7 @@
     "ziel": "${HOME}/.gemini/antigravity-cli/settings.json",
     "rechte": true,
     "anwenden": "ersetzen",
-    "beschreibung": "Rechte-Vorlage für agy (permissions, statusLine, trustedWorkspaces), deckt die ganze Zieldatei ab; nur der Mensch wendet sie an, siehe setup/vorlagen/README.md. ${PROJEKTE} und ${TRUSTED_WORKSPACE} vorher mit envsubst setzen"
+    "beschreibung": "Rechte-Vorlage für agy (permissions als Vereinigung aus Bestand und Vorlage, statusLine/trustedWorkspaces ersetzen den Bestand), deckt die ganze Zieldatei ab; nur der Mensch wendet sie an, siehe setup/vorlagen/README.md. ${PROJEKTE} und ${TRUSTED_WORKSPACE} vorher als Umgebungsvariablen setzen, rechte-anwenden.sh agy setzt sie per envsubst ein"
   },
   {
     "id": "claude-rechte-vorlage",

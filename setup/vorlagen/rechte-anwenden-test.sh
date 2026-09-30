@@ -430,6 +430,117 @@ t12_rueckbau_statusline_nicht_beschreibbar() {
   fi
 }
 
+# --- T13 (Befund 1, Runde 8): agy bildet die Vereinigung aus Bestand und
+# Vorlage für permissions.allow/permissions.deny genau wie claude — eigene,
+# vorher vorhandene Regeln (allow UND deny) und ein zusätzlicher
+# Top-Level-Schlüssel (hier "model") gehen dabei nicht verloren, obwohl
+# agy "ersetzen" ist und statusLine/trustedWorkspaces weiterhin aus der
+# Vorlage übernommen werden. ---
+t13_agy_merge_vereinigung() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.gemini/antigravity-cli"
+  cat >"$h/.gemini/antigravity-cli/settings.json" <<'EOF'
+{"model":"custom-model","permissions":{"allow":["command(make)"],"deny":["command(git reset --hard)"]},"trustedWorkspaces":["/old"]}
+EOF
+  chmod 600 "$h/.gemini/antigravity-cli/settings.json"
+
+  echo j | HOME="$h" PROJEKTE=/nicht-verwendet TRUSTED_WORKSPACE="$h" bash "$skript" agy >/dev/null 2>&1
+  local rc=$?
+  local f="$h/.gemini/antigravity-cli/settings.json"
+
+  local fehlt=""
+  jq -e '.permissions.allow|index("command(make)")!=null' "$f" >/dev/null 2>&1 || fehlt="$fehlt [allow command(make)]"
+  jq -e '.permissions.deny|index("command(git reset --hard)")!=null' "$f" >/dev/null 2>&1 || fehlt="$fehlt [deny command(git reset --hard)]"
+  local model_ok=1
+  jq -e '.model=="custom-model"' "$f" >/dev/null 2>&1 && model_ok=0
+  local trustedws_ok=1
+  jq -e --arg h "$h" '.trustedWorkspaces[0]==$h' "$f" >/dev/null 2>&1 && trustedws_ok=0
+
+  if [ "$rc" -eq 0 ] && [ -z "$fehlt" ] && [ "$model_ok" -eq 0 ] && [ "$trustedws_ok" -eq 0 ]; then
+    report "T13 agy-Merge verliert keine bestehenden Regeln/Schlüssel (Vereinigung)" 0
+  else
+    report "T13 agy-Merge verliert keine bestehenden Regeln/Schlüssel (Vereinigung)" 1 \
+      "rc=$rc, fehlend=[$fehlt], model erhalten=$([ "$model_ok" -eq 0 ] && echo ja || echo nein), trustedWorkspaces aus Vorlage=$([ "$trustedws_ok" -eq 0 ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T14 (Befund 3, Runde 8): eine manipulierte claude-rechte.json mit
+# einem fremden Top-Level-Schlüssel (defaultMode) wird VOR jeder Änderung
+# abgelehnt — läuft gegen eine Kopie von vorlagen/, nie gegen den echten
+# Checkout. ---
+t14_claude_manipulierte_vorlage() {
+  local repo; repo=$(mktemp -d); aufraeumen_dirs+=("$repo")
+  mkdir -p "$repo/setup"
+  cp -r "$vorlagen_dir" "$repo/setup/vorlagen"
+  cat >"$repo/setup/vorlagen/claude-rechte.json" <<'EOF'
+{"permissions":{"allow":["Bash(gh pr merge:*)"],"deny":["x"]},"defaultMode":"bypassPermissions"}
+EOF
+  local kopie_skript="$repo/setup/vorlagen/rechte-anwenden.sh"
+
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  cat >"$h/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":["y"]},"defaultMode":"default"}
+EOF
+  local vor; vor=$(cat "$h/.claude/settings.json")
+
+  echo j | HOME="$h" bash "$kopie_skript" claude >/dev/null 2>&1
+  local rc=$?
+  local nach; nach=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T14 manipulierte claude-rechte.json (fremder Top-Level-Schlüssel) wird abgelehnt" 0
+  else
+    report "T14 manipulierte claude-rechte.json (fremder Top-Level-Schlüssel) wird abgelehnt" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T15 (Befund 4, Runde 8): claude prüft jetzt auch vorab, dass die
+# Zieldatei beschreibbar ist (0444 wird abgelehnt, nichts geschrieben). ---
+t15_claude_ziel_nicht_beschreibbar() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  cat >"$h/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":[],"deny":["x"]}}
+EOF
+  chmod 444 "$h/.claude/settings.json"
+  local vor; vor=$(cat "$h/.claude/settings.json")
+
+  echo j | HOME="$h" bash "$skript" claude >/dev/null 2>&1
+  local rc=$?
+  chmod 644 "$h/.claude/settings.json" 2>/dev/null || true
+  local nach; nach=$(cat "$h/.claude/settings.json")
+
+  if [ "$rc" -ne 0 ] && [ "$vor" = "$nach" ]; then
+    report "T15 claude bricht ab, wenn settings.json nicht beschreibbar ist (0444)" 0
+  else
+    report "T15 claude bricht ab, wenn settings.json nicht beschreibbar ist (0444)" 1 \
+      "rc=$rc, unverändert=$([ "$vor" = "$nach" ] && echo ja || echo nein)"
+  fi
+}
+
+# --- T16 (Befund 2, Runde 8): eine settings.json ohne permissions-Block
+# bricht mit einer klaren Meldung ab (kein jq-Fehler aus "null | keys"),
+# und wendet trotzdem korrekt an (die Vorlage liefert permissions neu). ---
+t16_claude_ohne_permissions_block() {
+  local h; h=$(mktemp -d); aufraeumen_dirs+=("$h")
+  mkdir -p "$h/.claude"
+  echo '{"env":{"FOO":"bar"}}' >"$h/.claude/settings.json"
+
+  local out
+  out=$(echo j | HOME="$h" bash "$skript" claude 2>&1)
+  local rc=$?
+  local f="$h/.claude/settings.json"
+
+  if [ "$rc" -eq 0 ] && jq -e '.permissions.deny|length>0' "$f" >/dev/null 2>&1 \
+     && jq -e '.env.FOO=="bar"' "$f" >/dev/null 2>&1; then
+    report "T16 settings.json ohne permissions-Block wird sauber gemerged" 0
+  else
+    report "T16 settings.json ohne permissions-Block wird sauber gemerged" 1 "rc=$rc, output=[$out]"
+  fi
+}
+
 t1_cp_scheitert
 t2_race_bei_rueckfrage
 t3_signal_raeumt_auf HUP 129
@@ -444,6 +555,10 @@ t9_mehrere_json_dokumente
 t11_claude_merge_vereinigung
 t12_rueckbau_statusline_nicht_beschreibbar
 t10_agy_ziel_kein_teilschreiben
+t13_agy_merge_vereinigung
+t14_claude_manipulierte_vorlage
+t15_claude_ziel_nicht_beschreibbar
+t16_claude_ohne_permissions_block
 
 echo "---"
 echo "$pass PASS, $fail FAIL"
