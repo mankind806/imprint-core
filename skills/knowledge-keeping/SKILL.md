@@ -141,6 +141,12 @@ enforceable and not built; whether a value is one an outside body sets is a beha
 Read `references/ageing.md` before setting a horizon or when the kind of evidence is
 unclear.
 
+## Goals and backlogs
+
+Write a goal as SMART (specific, measurable, achievable, relevant, dated); a global stock
+count is not a goal. Keep a recurring backlog in three states: **open**, **in progress**,
+**decided**.
+
 ## What enforces this, measured
 
 This plugin ships nothing that runs when knowledge is written or read. *First measured

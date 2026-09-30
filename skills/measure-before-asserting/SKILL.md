@@ -126,6 +126,10 @@ be retired out loud, not quietly left standing to be obeyed for no reason.
 
 ## Adjacent habits that come from the same root
 
+**An unknown system is investigated before it is used.** Look at its structure and
+interfaces first (what it exposes, how it answers), then act; guessing at the surface is
+asserting without measuring.
+
 **A named gap without a date becomes a property.** Wherever your text says "not enforced,"
 "unmeasured," or "assumed," put a re-check date next to it. Without one, the gap stops being
 a gap and turns into how the system simply is.

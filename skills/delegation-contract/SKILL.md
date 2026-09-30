@@ -83,6 +83,9 @@ whatever the tool is called:
 - **Read-only unless explicitly ordered otherwise.** The ROLE line names an *effect* here,
   not a path, and names it narrowly. The return carries findings and numbers, not bulk
   foreign material.
+- **A non-interactive advisor runs read-only, checked at the tool.** An advisor called
+  without a person in the loop gets a read-only tool allowlist; a line in the prompt saying
+  "read-only" is not that (see the enforcement table below).
 - **Consent obligations do not travel.** The dispatched agent **prepares** and returns the
   complete plan; the lead shows it and gets the yes from the person; only then does a
   separate execution order go out, scoped to exactly that plan.
@@ -179,6 +182,9 @@ error shows on the bill. After a verifiable failure, **escalate one level** rath
 at the same one, and tie that to a signal outside the model (a failed gate, a red test),
 never to its own stated confidence. The same weights through a different interface are the
 same weights.
+
+A role is a model family, and the family's **newest** model is the one meant; a short alias
+alone may resolve to an older release, so measure which model each role actually ran on.
 
 The roles and their model families are in
 [references/model-roster.md](references/model-roster.md), with the date they were last
