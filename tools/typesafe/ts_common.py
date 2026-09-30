@@ -85,6 +85,8 @@ def post(state, questions, timeout=TIMEOUT):
 DEFAULT_CATEGORIES = ("secret_kw", "email", "address", "name", "opaque", "iban", "phone")
 
 _STREET_SUFFIXES = r"(?:stra[ßs]e|str\b\.?|weg|gasse|platz|allee|ring|damm|ufer|chaussee|zeile|stieg|gässchen|pfad|markt)"
+# The range end is capped at 4 digits so a following 5-digit postcode is never read as a
+# range end (its PLZ+Ort then gets its own match).
 _PAT_STREET = (
     r"\b(?:"
     r"(?:[A-ZÄÖÜ][a-zäöüß]+(?:\s+|-))*"
@@ -92,7 +94,7 @@ _PAT_STREET = (
     r"|"
     r"[a-zäöüß]+(?i:" + _STREET_SUFFIXES + r")"
     r")"
-    r"\s+\d+(?:\s*[a-zA-Z])?(?:\s*[-/]\s*\d+(?:\s*[a-zA-Z])?)?\b"
+    r"\s+\d+(?:\s*[a-zA-Z])?(?:\s*[-/]\s*\d{1,4}(?:\s*[a-zA-Z])?)?\b"
 )
 _PAT_PLZ = (
     r"\b\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+(?:[-/][A-ZÄÖÜ][a-zäöüß]+)*(?:\s+(?:(?:am|an\s+der|im)\s+)?[A-ZÄÖÜ][a-zäöüß]+)?\b"
