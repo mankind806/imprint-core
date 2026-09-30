@@ -42,6 +42,7 @@ func setHermeticPath(t *testing.T) {
 func writePluginManifest(t *testing.T, root string) {
 	t.Helper()
 	writeFiles(t, root, map[string]string{".claude-plugin/plugin.json": `{"name": "imprint"}`})
+	anchorPluginRoot(t, root)
 }
 
 // clearApplyGuardEnv removes every variable the --apply env guard reacts to.
@@ -70,6 +71,7 @@ func newSetupRoot(t *testing.T, inventory string, files map[string]string) strin
 		all[k] = v
 	}
 	writeFiles(t, root, all)
+	anchorPluginRoot(t, root)
 	return root
 }
 
@@ -134,7 +136,7 @@ func TestSetupRejectsIDTraversal(t *testing.T) {
 
 	badIDs := []string{filepath.ToSlash(rel), "../x", "a/b", "A", "-x", "a.b", "a b", "a;b", strings.Repeat("a", 65)}
 	for _, id := range badIDs {
-		inv := `[{"id": "` + id + `", "typ": "rechte-vorlage", "quelle": "t.json", "ziel": "${HOME}/.claude/settings.json", "rechte": true, "beschreibung": "b"}]`
+		inv := `[{"id": "` + id + `", "typ": "rechte-vorlage", "quelle": "t.json", "ziel": "${HOME}/.claude/settings.json", "rechte": true, "anwenden": "ersetzen", "beschreibung": "b"}]`
 		root := newSetupRoot(t, inv, map[string]string{"t.json": "{}"})
 		repo := newSetupRepo(t, inv, map[string]string{"t.json": "{}"})
 		pluginOnly := newSetupRoot(t, `[]`, nil)
@@ -185,7 +187,7 @@ func TestSetupRepoNeverWritesOrLeaks(t *testing.T) {
 		{"id": "ssh-key", "typ": "copy", "quelle": "k", "ziel": "${HOME}/.ssh/id_x", "rechte": false, "beschreibung": "b"},
 		{"id": "allowed-copy", "typ": "copy", "quelle": "c.txt", "ziel": "${XDG_CONFIG_HOME}/imprint/c.txt", "rechte": false, "beschreibung": "b"},
 		{"id": "new-copy", "typ": "copy", "quelle": "c.txt", "ziel": "${XDG_DATA_HOME}/imprint/new.txt", "rechte": false, "beschreibung": "b"},
-		{"id": "repo-rechte", "typ": "rechte-vorlage", "quelle": "a.json", "ziel": "${HOME}/.claude/settings.json", "rechte": true, "beschreibung": "b"},
+		{"id": "repo-rechte", "typ": "rechte-vorlage", "quelle": "a.json", "ziel": "${HOME}/.claude/settings.json", "rechte": true, "anwenden": "ersetzen", "beschreibung": "b"},
 		{"id": "repo-mcp", "typ": "mcp", "quelle": "evil-server", "ziel": "${HOME}/unused", "rechte": false, "beschreibung": "b"},
 		{"id": "repo-market", "typ": "marketplace", "quelle": "evil/market", "ziel": "${HOME}/unused", "rechte": false, "beschreibung": "b"}
 	]`
@@ -278,7 +280,10 @@ func TestSetupPluginInventoryDenyAndAllowList(t *testing.T) {
 		{"id": "ok-unit", "typ": "systemd", "quelle": "s", "ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-ok-unit.timer", "rechte": false, "beschreibung": "b"},
 		{"id": "imprint-ok-shim", "typ": "shim", "quelle": "bin/ok-shim", "ziel": "${HOME}/.local/bin/imprint-ok-shim", "rechte": false, "beschreibung": "b"}
 	]`
-	okRoot := newSetupRoot(t, okInv, map[string]string{"s": "new\n"})
+	okRoot := newSetupRoot(t, okInv, map[string]string{"s": "new\n", "bin/ok-shim": "#!/bin/sh\n"})
+	if err := os.Chmod(filepath.Join(okRoot, "bin", "ok-shim"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if code, stdout, stderr := runCLI(t, "setup", "--apply", "--root", okRoot); code != exitOK {
 		t.Fatalf("allowlisted targets must apply, got %d\n%s\n%s", code, stdout, stderr)
 	}
@@ -402,23 +407,26 @@ func TestSetupSymlinks(t *testing.T) {
 	}
 }
 
-// The rights cache file is id-derived; a symlink planted at its place must not
-// redirect the rendered template.
+// The cache file of a print-only entry is id-derived; a symlink planted at
+// its place must not redirect the rendered content. Since rechte=true needs
+// "anwenden" (script call, no cache), only a systemd unit whose name exists
+// in another unit directory still renders a cache file.
 func TestSetupRechteCacheSymlink(t *testing.T) {
 	home := setupTestHome(t)
 	clearApplyGuardEnv(t)
+	noSystemdTool(t)
 	const canary = "CANARY-cache-redirect"
-	writeFiles(t, home, map[string]string{".ssh/id_x": canary})
-	mustSymlink(t, filepath.Join(home, ".ssh", "id_x"), filepath.Join(home, ".cache", "imprint", "settings-template-settings.json"))
-	inv := `[{"id": "settings-template", "typ": "rechte-vorlage", "quelle": "t.json", "ziel": "${HOME}/.claude/settings.json", "rechte": true, "beschreibung": "b"}]`
-	root := newSetupRoot(t, inv, map[string]string{"t.json": `{"x": 1}`})
+	writeFiles(t, home, map[string]string{".ssh/id_x": canary, ".local/share/systemd/user/imprint-u.service": "vendor\n"})
+	mustSymlink(t, filepath.Join(home, ".ssh", "id_x"), filepath.Join(home, ".cache", "imprint", "u-imprint-u.service"))
+	inv := `[{"id": "u", "typ": "systemd", "quelle": "u.service", "ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-u.service", "rechte": false, "beschreibung": "b"}]`
+	root := newSetupRoot(t, inv, map[string]string{"u.service": "[Service]\n"})
 
 	code, stdout, stderr := runCLI(t, "setup", "--apply", "--root", root)
 	if code != exitViolation {
 		t.Fatalf("expected exit %d, got %d\n%s\n%s", exitViolation, code, stdout, stderr)
 	}
 	if got := mustRead(t, filepath.Join(home, ".ssh", "id_x")); got != canary {
-		t.Fatalf("rendered template was written through the cache symlink: %q", got)
+		t.Fatalf("rendered content was written through the cache symlink: %q", got)
 	}
 	if strings.Contains(stdout, "\ncp ") || strings.HasPrefix(stdout, "cp ") || strings.Contains(stdout, "install ") {
 		t.Fatalf("no command may be printed when the cache file could not be written:\n%s", stdout)
@@ -523,7 +531,7 @@ func TestShellQuoteAndShimContent(t *testing.T) {
 		}
 	}
 	got, err := shimContent("bin/imprint-dev")
-	if err != nil || got != "#!/bin/sh\n"+shimMarker+"\nexec \"$IMPRINT_CORE_ROOT\"/'bin/imprint-dev' \"$@\"\n" || !isSetupShim([]byte(got)) {
+	if err != nil || got != "#!/bin/sh\n"+shimMarker+"\nexec \"${IMPRINT_CORE_ROOT:?}\"/'bin/imprint-dev' \"$@\"\n" || !isSetupShim([]byte(got)) {
 		t.Fatalf("shimContent = %q, %v", got, err)
 	}
 	for _, q := range []string{"bin/$(id)", "bin/`id`", `bin/"x`, "../x", "/abs"} {

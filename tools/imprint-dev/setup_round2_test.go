@@ -128,7 +128,7 @@ func TestSetupSystemdUnitNames(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(unitDir, name)); err == nil {
 			t.Fatalf("%s collides with another unit directory and must only be printed", name)
 		}
-		if !strings.Contains(stdout, " "+filepath.Join(unitDir, name)+"\n") || !strings.Contains(stdout, "install -m 0644 ") {
+		if !strings.Contains(stdout, " "+filepath.Join(unitDir, name)+"\n") || !strings.Contains(stdout, "install -m 0600 ") {
 			t.Fatalf("no printed install command for %s:\n%s", name, stdout)
 		}
 	}
@@ -187,7 +187,10 @@ func TestSetupShimNeverReplacesForeign(t *testing.T) {
 	// A shim the plugin wrote itself (marker line) is replaced, with a .bak.
 	own := "#!/bin/sh\n" + shimMarker + "\nexec old\n"
 	writeFiles(t, home, map[string]string{".local/bin/imprint-own": own})
-	ownRoot := newSetupRoot(t, `[{"id": "imprint-own", "typ": "shim", "quelle": "bin/new", "ziel": "${HOME}/.local/bin/imprint-own", "rechte": false, "beschreibung": "b"}]`, nil)
+	ownRoot := newSetupRoot(t, `[{"id": "imprint-own", "typ": "shim", "quelle": "bin/new", "ziel": "${HOME}/.local/bin/imprint-own", "rechte": false, "beschreibung": "b"}]`, map[string]string{"bin/new": "#!/bin/sh\n"})
+	if err := os.Chmod(filepath.Join(ownRoot, "bin", "new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if code, stdout, stderr := runCLI(t, "setup", "--apply", "--root", ownRoot); code != exitOK {
 		t.Fatalf("own shim must be replaced, got %d\n%s\n%s", code, stdout, stderr)
 	}
@@ -375,7 +378,7 @@ func TestSetupXDGRedirects(t *testing.T) {
 	// An XDG value above $HOME counts as unset: a literal rights path outside
 	// HOME is refused and no command for it is printed.
 	t.Setenv("XDG_CONFIG_HOME", "/")
-	lit := newSetupRoot(t, `[{"id": "r", "typ": "rechte-vorlage", "quelle": "q", "ziel": "/etc/passwd", "rechte": true, "beschreibung": "b"}]`, map[string]string{"q": "q\n"})
+	lit := newSetupRoot(t, `[{"id": "r", "typ": "rechte-vorlage", "quelle": "q", "ziel": "/etc/passwd", "rechte": true, "anwenden": "ersetzen", "beschreibung": "b"}]`, map[string]string{"q": "q\n", "setup/vorlagen/rechte-anwenden.sh": "#!/bin/sh\n"})
 	code, stdout, _ := runCLI(t, "setup", "--apply", "--root", lit)
 	if code != exitViolation || strings.Contains(stdout, "/etc/passwd") {
 		t.Fatalf("XDG_CONFIG_HOME=/ must not allow /etc/passwd, got %d\n%s", code, stdout)
@@ -415,7 +418,7 @@ func TestSetupAnwenden(t *testing.T) {
 	fixture := `[
 		{"id": "agy-rechte-vorlage", "typ": "rechte-vorlage", "quelle": "setup/vorlagen/agy-settings.json", "ziel": "${HOME}/.gemini/antigravity-cli/settings.json", "rechte": true, "anwenden": "ersetzen", "beschreibung": "b"},
 		{"id": "claude-rechte-vorlage", "typ": "rechte-vorlage", "quelle": "setup/vorlagen/claude-rechte.json", "ziel": "${HOME}/.claude/settings.json", "rechte": true, "anwenden": "fragment-merge", "beschreibung": "b"},
-		{"id": "agy-statusline", "typ": "copy", "quelle": "setup/vorlagen/statusline.py", "ziel": "${HOME}/.gemini/antigravity-cli/statusline.py", "rechte": true, "beschreibung": "b"}
+		{"id": "agy-statusline", "typ": "copy", "quelle": "setup/vorlagen/statusline.py", "ziel": "${HOME}/.gemini/antigravity-cli/statusline.py", "rechte": true, "anwenden": "ersetzen", "beschreibung": "b"}
 	]`
 	files := map[string]string{
 		"setup/vorlagen/agy-settings.json":  `{"permissions": {"allow": []}}`,
@@ -445,7 +448,7 @@ func TestSetupAnwenden(t *testing.T) {
 	}
 	assertNoCanary(t, "--apply", stdout+stderr, canary)
 	script, _ := filepath.EvalSymlinks(filepath.Join(root, "setup", "vorlagen", "rechte-anwenden.sh"))
-	for _, want := range []string{shellQuote(script) + " claude\n", shellQuote(script) + " agy\n"} {
+	for _, want := range []string{shellQuote(script) + " claude\n", shellQuote(script) + " agy\n", shellQuote(script) + " agy-statusline\n"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("missing script call %q:\n%s", want, stdout)
 		}
@@ -461,12 +464,8 @@ func TestSetupAnwenden(t *testing.T) {
 			t.Fatalf("no cache file may be rendered for %s: %v", id, matches)
 		}
 	}
-	statusline := filepath.Join(home, ".gemini", "antigravity-cli", "statusline.py")
-	if !strings.Contains(stdout, "install -m 0700 ") || !strings.Contains(stdout, " "+statusline+"\n") {
-		t.Fatalf("statusline.py must be installed with the target's mode plus execute bits (0700):\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "install -m 0600 "+statusline+" "+statusline+".bak\n") {
-		t.Fatalf("the backup must be printed as install with the target's mode:\n%s", stdout)
+	if strings.Contains(stdout, "install ") {
+		t.Fatalf("a rights target is never installed by a printed command:\n%s", stdout)
 	}
 	if got := mustRead(t, settings); !strings.Contains(got, canary) || !strings.Contains(got, `"old"`) {
 		t.Fatalf("--apply changed the rights target: %s", got)
@@ -522,6 +521,7 @@ func TestSetupAnwenden(t *testing.T) {
 		`{"id": "a", "typ": "rechte-vorlage", "quelle": "q", "ziel": "${HOME}/.claude/settings.txt", "rechte": true, "anwenden": "fragment-merge", "beschreibung": "b"}`,
 		`{"id": "imprint-a", "typ": "shim", "quelle": "q", "ziel": "${HOME}/.local/bin/imprint-a.json", "rechte": true, "anwenden": "fragment-merge", "beschreibung": "b"}`,
 		`{"id": "a", "typ": "mcp", "quelle": "q", "ziel": "${HOME}/a.json", "rechte": true, "anwenden": "fragment-merge", "beschreibung": "b"}`,
+		`{"id": "a", "typ": "copy", "quelle": "q", "ziel": "${HOME}/.gemini/a.py", "rechte": true, "beschreibung": "b"}`,
 	} {
 		if _, err := parseInventory([]byte("[" + bad + "]")); err == nil {
 			t.Errorf("inventory must be invalid: %s", bad)
@@ -529,28 +529,38 @@ func TestSetupAnwenden(t *testing.T) {
 	}
 }
 
-// The printed backup of a rights target without "anwenden" must not write
-// through a link planted at its .bak (N4a, by the human's hand): such an entry
-// fails and prints nothing.
+// The printed backup of a print-only systemd unit (its name exists in another
+// unit directory) must not write through a link planted at its .bak (N4a, by
+// the human's hand): such an entry fails and prints nothing. Since round 3 a
+// rights target always has "anwenden" and gets only the script call, so the
+// unit collision is the one entry left that prints install.
 func TestSetupGatedBackupNotFollowed(t *testing.T) {
 	const canary = "GATED-BAK-CANARY"
-	inv := `[{"id": "agy-statusline", "typ": "copy", "quelle": "s.py", "ziel": "${HOME}/.gemini/antigravity-cli/statusline.py", "rechte": true, "beschreibung": "b"}]`
+	inv := `[{"id": "u", "typ": "systemd", "quelle": "u.service", "ziel": "${XDG_CONFIG_HOME}/systemd/user/imprint-u.service", "rechte": false, "beschreibung": "b"}]`
 	for _, kind := range []string{"symlink", "hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			home := setupTestHome(t)
 			clearApplyGuardEnv(t)
-			writeFiles(t, home, map[string]string{".ssh/authorized_keys": canary, ".gemini/antigravity-cli/statusline.py": "old\n"})
-			bak := filepath.Join(home, ".gemini", "antigravity-cli", "statusline.py.bak")
+			noSystemdTool(t)
+			writeFiles(t, home, map[string]string{
+				".ssh/authorized_keys":                        canary,
+				".config/systemd/user/imprint-u.service":      "old\n",
+				".local/share/systemd/user/imprint-u.service": "vendor\n",
+			})
+			bak := filepath.Join(home, ".config", "systemd", "user", "imprint-u.service.bak")
 			key := filepath.Join(home, ".ssh", "authorized_keys")
 			if kind == "symlink" {
 				mustSymlink(t, key, bak)
 			} else if err := os.Link(key, bak); err != nil {
 				t.Skipf("hard links not supported here: %v", err)
 			}
-			root := newSetupRoot(t, inv, map[string]string{"s.py": "print()\n"})
+			root := newSetupRoot(t, inv, map[string]string{"u.service": "[Service]\n"})
 			code, stdout, stderr := runCLI(t, "setup", "--apply", "--root", root)
 			if code != exitViolation || strings.Contains(stdout, "install ") {
 				t.Fatalf("expected exit %d and no printed command, got %d\n%s\n%s", exitViolation, code, stdout, stderr)
+			}
+			if got := mustRead(t, key); got != canary {
+				t.Fatalf("key changed: %q", got)
 			}
 		})
 	}

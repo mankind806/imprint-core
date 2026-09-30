@@ -131,6 +131,8 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 	// Create test files
 	_ = os.WriteFile(filepath.Join(root, "copy_src.txt"), []byte("copy content\n"), 0644)
 	_ = os.WriteFile(filepath.Join(root, "shim_src.txt"), []byte("shim source\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(root, "bin"), 0755)
+	_ = os.WriteFile(filepath.Join(root, "bin", "imprint-dev"), []byte("#!/bin/sh\n"), 0755)
 
 	// Create git repo for githook test
 	cmdInit := exec.Command("git", "init", root)
@@ -181,7 +183,7 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 
 	// Verify shim file
 	shimDstData, err := os.ReadFile(filepath.Join(tempHome, ".local", "bin", "imprint-dev"))
-	expectedShim := "#!/bin/sh\n" + shimMarker + "\nexec \"$IMPRINT_CORE_ROOT\"/'bin/imprint-dev' \"$@\"\n"
+	expectedShim := "#!/bin/sh\n" + shimMarker + "\nexec \"${IMPRINT_CORE_ROOT:?}\"/'bin/imprint-dev' \"$@\"\n"
 	if err != nil || string(shimDstData) != expectedShim {
 		t.Fatalf("shim dst file missing or incorrect: %v, content: %q", err, string(shimDstData))
 	}
@@ -211,6 +213,9 @@ func TestSetupApplyAndCheckFreshHome(t *testing.T) {
 	}
 }
 
+// A rights target is never written by --apply. With "anwenden" (required
+// for rechte=true) --apply prints only the human script's call: no cache
+// file, no install that would replace the whole target.
 func TestSetupApplyRechteTor(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
@@ -223,10 +228,11 @@ func TestSetupApplyRechteTor(t *testing.T) {
 	root := t.TempDir()
 	writePluginManifest(t, root)
 	setupDir := filepath.Join(root, "setup")
-	_ = os.MkdirAll(setupDir, 0755)
+	_ = os.MkdirAll(filepath.Join(setupDir, "vorlagen"), 0755)
 
 	templateContent := `{"home": "${HOME}", "config": "${XDG_CONFIG_HOME}"}`
 	_ = os.WriteFile(filepath.Join(root, "tmpl.json"), []byte(templateContent), 0644)
+	_ = os.WriteFile(filepath.Join(setupDir, "vorlagen", "rechte-anwenden.sh"), []byte("#!/bin/sh\n"), 0755)
 
 	invJSON := `[
 		{
@@ -235,43 +241,27 @@ func TestSetupApplyRechteTor(t *testing.T) {
 			"quelle": "tmpl.json",
 			"ziel": "${HOME}/.claude/settings.json",
 			"rechte": true,
+			"anwenden": "ersetzen",
 			"beschreibung": "Settings template"
 		}
 	]`
 	_ = os.WriteFile(filepath.Join(setupDir, "inventar.json"), []byte(invJSON), 0644)
 
-	// Ensure target file does NOT exist initially
 	targetPath := filepath.Join(tempHome, ".claude", "settings.json")
-	if _, err := os.Stat(targetPath); err == nil {
-		t.Fatalf("target file should not exist before apply")
-	}
-
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup", "--apply", "--root", root}, &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("apply failed with exit code %d. stderr: %s", code, stderr.String())
 	}
-
-	// 1. Target file must STILL NOT exist after apply
 	if _, err := os.Stat(targetPath); err == nil {
 		t.Fatalf("target file at ziel must not be created by apply for rechte=true!")
 	}
-
-	// 2. Cache file must exist and contain rendered values
-	expectedCachePath := filepath.Join(tempHome, ".cache", "imprint", "settings-template-settings.json")
-	cacheData, err := os.ReadFile(expectedCachePath)
-	if err != nil {
-		t.Fatalf("rendered cache file missing at %s: %v", expectedCachePath, err)
+	if _, err := os.Stat(filepath.Join(tempHome, ".cache", "imprint")); err == nil {
+		t.Fatalf("no cache file may be rendered for a rights target with anwenden")
 	}
-
-	expectedRendered := `{"home": "` + tempHome + `", "config": "` + filepath.Join(tempHome, ".config") + `"}`
-	if string(cacheData) != expectedRendered {
-		t.Fatalf("rendered cache file content mismatch: got %q, want %q", string(cacheData), expectedRendered)
-	}
-
-	// 3. Stdout must contain the install command with an explicit mode
-	if !bytes.Contains(stdout.Bytes(), []byte("install -m 0644 "+expectedCachePath)) {
-		t.Fatalf("stdout missing printed install command with cache path, got:\n%s", stdout.String())
+	script, _ := filepath.EvalSymlinks(filepath.Join(setupDir, "vorlagen", "rechte-anwenden.sh"))
+	if !bytes.Contains(stdout.Bytes(), []byte(shellQuote(script)+" settings-template\n")) || bytes.Contains(stdout.Bytes(), []byte("install ")) {
+		t.Fatalf("stdout must hold the script call and no install, got:\n%s", stdout.String())
 	}
 }
 
@@ -477,6 +467,7 @@ func TestSetupPlanRechteGatedNeverLeaksContent(t *testing.T) {
 			"quelle": "tmpl.json",
 			"ziel": "${HOME}/.claude/settings.json",
 			"rechte": true,
+			"anwenden": "ersetzen",
 			"beschreibung": "Settings template"
 		}
 	]`

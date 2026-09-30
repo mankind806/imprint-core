@@ -53,6 +53,7 @@ func TestSetupPlanTreeInvariants(t *testing.T) {
 			"quelle": "src/file_abweichend.txt",
 			"ziel": "${XDG_CONFIG_HOME}/file_abweichend.txt",
 			"rechte": true,
+			"anwenden": "ersetzen",
 			"beschreibung": "Differing file"
 		},
 		{

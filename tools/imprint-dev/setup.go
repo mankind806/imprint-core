@@ -13,9 +13,11 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -28,14 +30,23 @@ import (
 //
 //   - id must match setupIDPattern; quelle and ziel must use a small, shell-inert
 //     character set, so no id or path can traverse or inject.
-//   - --apply needs an explicit --root that carries .claude-plugin/plugin.json
-//     with name "imprint" and is not the --repo directory (checkPluginRoot).
+//   - --apply needs an explicit --root that is the plugin root this binary was
+//     built from (pluginAnchors), carries .claude-plugin/plugin.json with name
+//     "imprint" (no symlink on the way) and is not the --repo directory
+//     (checkPluginRoot).
 //   - --apply writes only the plugin's own inventory (--root), only to the
 //     per-typ allowlist in zielAllowed (shim imprint-*, systemd
 //     imprint-<id>.service|.timer), never to a path on the denylist in
 //     zielDenied, and never through a symlink (target, target directory, .bak
 //     or quelle; checked after filepath.EvalSymlinks and again at open time
-//     through directory file descriptors, see setup_fs_linux.go).
+//     through directory file descriptors, see setup_fs_linux.go). The
+//     allowlist base and every directory between $HOME and the target must
+//     not be a symlink; XDG_*_HOME counts only below $HOME.
+//   - quelle is read the same way as a target: every component from the
+//     resolved inventory root down is opened with openat and O_NOFOLLOW.
+//   - written files get mode 0600, a shim 0755.
+//   - rechte=true needs "anwenden"; --apply then prints only the human
+//     script's call, never an install of the whole target.
 //   - a target or .bak with more than one hard link is never read, shown or
 //     replaced; files are replaced through a temp file and renameat.
 //   - a shim never replaces a file without the shim marker line, nor a name
@@ -140,6 +151,11 @@ func parseInventory(data []byte) ([]setupEntry, error) {
 		if e.Typ == "rechte-vorlage" && !*e.Rechte {
 			return nil, fmt.Errorf("entry %d (%s): typ rechte-vorlage requires rechte=true", i+1, e.ID)
 		}
+		// A rights entry without "anwenden" would get a printed install that
+		// replaces the whole target; only the human script applies it.
+		if *e.Rechte && e.Anwenden == "" {
+			return nil, fmt.Errorf("entry %d (%s): rechte=true requires 'anwenden' (ersetzen or fragment-merge)", i+1, e.ID)
+		}
 		switch e.Anwenden {
 		case "", anwendenErsetzen:
 		case anwendenFragmentMerge:
@@ -190,8 +206,8 @@ func quelleEscapesRoot(quelle string) bool {
 
 // setupEnv holds the base directories setup works with. A value that is empty
 // or not absolute counts as unset (XDG base directory spec), and so does an
-// XDG value above $HOME or a HOME of "/"; without a usable HOME nothing is
-// allowed at all.
+// XDG value that does not lie below $HOME (/etc, say) or a HOME of "/";
+// without a usable HOME nothing is allowed at all.
 type setupEnv struct {
 	home, config, cache, data string
 }
@@ -202,13 +218,13 @@ func currentSetupEnv() setupEnv {
 		env.home = filepath.Clean(h)
 	}
 	pick := func(key, fallback string) string {
-		// A value above $HOME ("/", say) would make every path below it an
-		// allowed root; it counts as unset.
-		if v := os.Getenv(key); filepath.IsAbs(v) && (env.home == "" || !isStrictlyWithin(filepath.Clean(v), env.home)) {
-			return filepath.Clean(v)
-		}
 		if env.home == "" {
 			return ""
+		}
+		// A value outside $HOME ("/" or /etc, say) would make paths there
+		// allowed roots; it counts as unset.
+		if v := os.Getenv(key); filepath.IsAbs(v) && isStrictlyWithin(env.home, filepath.Clean(v)) {
+			return filepath.Clean(v)
 		}
 		return filepath.Join(env.home, fallback)
 	}
@@ -226,6 +242,51 @@ func (env setupEnv) roots() []string {
 		}
 	}
 	return out
+}
+
+// resolvedRoots are the roots with their symlinks resolved, keeping only
+// those that still lie within the resolved $HOME: an XDG directory below
+// $HOME that is a symlink out of it adds no allowed root.
+func (env setupEnv) resolvedRoots() []string {
+	if env.home == "" {
+		return nil
+	}
+	rh, err := resolvePath(env.home)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, r := range resolveAll(env.roots()) {
+		if isWithin(rh, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// symlinkBelowHome returns the first existing component of dir strictly
+// below $HOME that is a symlink, or "". Components are checked from $HOME
+// down and the walk stops at the first one that does not exist.
+func (env setupEnv) symlinkBelowHome(dir string) string {
+	if env.home == "" || !isStrictlyWithin(env.home, dir) {
+		return ""
+	}
+	rel, err := filepath.Rel(env.home, dir)
+	if err != nil {
+		return ""
+	}
+	cur := env.home
+	for _, name := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, name)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return ""
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return cur
+		}
+	}
+	return ""
 }
 
 func (env setupEnv) replacer() *strings.Replacer {
@@ -318,7 +379,7 @@ func zielEscapesErlaubteWurzeln(ziel string) bool {
 	if err != nil {
 		return true
 	}
-	return !withinAnyStrict(resolveAll(env.roots()), resolved)
+	return !withinAnyStrict(env.resolvedRoots(), resolved)
 }
 
 func withinAnyStrict(bases []string, p string) bool {
@@ -475,7 +536,7 @@ func checkZiel(e setupEntry) zielCheck {
 	}
 	zr := filepath.Join(dirRes, filepath.Base(z))
 	res.resolved = zr
-	if !withinAnyStrict(resolveAll(env.roots()), zr) {
+	if !withinAnyStrict(env.resolvedRoots(), zr) {
 		return refuse("verweigert", fmt.Sprintf("ziel %q verlässt nach Symlink-Auflösung die erlaubten Wurzeln", e.Ziel))
 	}
 	if !gated {
@@ -489,50 +550,110 @@ func checkZiel(e setupEntry) zielCheck {
 	if fi, err := os.Lstat(zr); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		return refuse("nicht-prüfbar", fmt.Sprintf("ziel %q ist ein Symlink; setup folgt keinem Symlink", e.Ziel))
 	}
+	if !gated {
+		if l := env.symlinkBelowHome(filepath.Dir(z)); l != "" {
+			return refuse("verweigert", fmt.Sprintf("ziel %q: %s ist ein Symlink; die Allowlist-Basis und ihre Vorfahren unterhalb von $HOME dürfen keine Symlinks sein", e.Ziel, l))
+		}
+	}
 	if !gated && (!zielAllowed(e, z, env, false) || !zielAllowed(e, zr, env, true)) {
 		return refuse("verweigert", fmt.Sprintf("ziel %q liegt nicht in der Allowlist für typ %s", e.Ziel, e.Typ))
 	}
 	return res
 }
 
-// resolveQuelle returns quelle's real path, which must lie inside the
-// inventory root after every symlink is resolved.
-func resolveQuelle(invRoot, quelle string) (string, error) {
+// resolveQuelle returns the resolved inventory root and quelle's real path,
+// which must lie inside that root after every symlink is resolved. The
+// result is only a checked name: read it with openQuelle, which walks it
+// again without following any symlink.
+func resolveQuelle(invRoot, quelle string) (rootRes, qRes string, err error) {
 	if quelleEscapesRoot(quelle) {
-		return "", fmt.Errorf("quelle %q verlässt den Inventar-Root (kein absoluter Pfad oder Traversal erlaubt)", quelle)
+		return "", "", fmt.Errorf("quelle %q verlässt den Inventar-Root (kein absoluter Pfad oder Traversal erlaubt)", quelle)
 	}
-	rootRes, err := filepath.EvalSymlinks(invRoot)
+	rootRes, err = resolveDir(invRoot)
 	if err != nil {
-		return "", fmt.Errorf("Inventar-Root nicht auflösbar: %v", err)
+		return "", "", fmt.Errorf("Inventar-Root nicht auflösbar: %v", err)
 	}
-	qRes, err := filepath.EvalSymlinks(filepath.Join(invRoot, filepath.FromSlash(quelle)))
+	qRes, err = filepath.EvalSymlinks(filepath.Join(rootRes, filepath.FromSlash(quelle)))
 	if err != nil {
-		return "", fmt.Errorf("quelle unlesbar: %v", err)
+		return "", "", fmt.Errorf("quelle unlesbar: %v", err)
 	}
 	if !isStrictlyWithin(rootRes, qRes) {
-		return "", fmt.Errorf("quelle %q liegt nach Symlink-Auflösung außerhalb des Inventar-Roots", quelle)
+		return "", "", fmt.Errorf("quelle %q liegt nach Symlink-Auflösung außerhalb des Inventar-Roots", quelle)
 	}
-	return qRes, nil
+	return rootRes, qRes, nil
 }
 
-// readRegularFile reads path, a file of an inventory root or of --repo, after
-// resolving its directory. The file itself must not be a symlink and must be a
-// regular file with a single link (see openRegularAt).
-func readRegularFile(path string) ([]byte, error) {
-	abs, err := filepath.Abs(path)
+// openQuelle opens the checked quelle qRes below rootRes the way a target is
+// opened: every directory component from rootRes down with openat and
+// O_NOFOLLOW (openDirBeneath), the file itself with O_NOFOLLOW, regular and
+// with a single link (openRegularAt). A component swapped for a symlink
+// after resolveQuelle (into ~/.ssh, say) is not followed.
+func openQuelle(rootRes, qRes string) (*os.File, fs.FileInfo, error) {
+	if !isStrictlyWithin(rootRes, qRes) {
+		return nil, nil, fmt.Errorf("%s liegt nicht unter %s", qRes, rootRes)
+	}
+	d, err := openDirBeneath(rootRes, filepath.Dir(qRes), false, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer d.Close()
+	return openRegularAt(d, filepath.Base(qRes))
+}
+
+// resolveDir returns dir as an absolute path with every symlink resolved.
+func resolveDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+// afterQuelleResolved runs between resolveQuelle and openQuelle. It does
+// nothing; a test replaces it to swap a directory at exactly that moment, the
+// window race3.sh hit by chance.
+var afterQuelleResolved = func(invRoot, quelle string) {}
+
+// readQuelle resolves, checks and reads quelle of an inventory root. The
+// FileInfo is the opened file's (fstat), not a second lookup by name.
+func readQuelle(invRoot, quelle string) ([]byte, fs.FileInfo, error) {
+	rootRes, qRes, err := resolveQuelle(invRoot, quelle)
+	if err != nil {
+		return nil, nil, err
+	}
+	afterQuelleResolved(invRoot, quelle)
+	f, fi, err := openQuelle(rootRes, qRes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("quelle unlesbar: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, nil, fmt.Errorf("quelle unlesbar: %v", err)
+	}
+	return data, fi, nil
+}
+
+// readBeneath reads rel, a file of an inventory root or of --repo (the plugin
+// manifest, an inventory), after resolving only base. Every component below
+// base is opened with O_NOFOLLOW, so neither a directory on the way (such as
+// .claude-plugin/) nor the file may be a symlink; the file must be regular
+// with a single link (openRegularAt).
+func readBeneath(base, rel string) ([]byte, error) {
+	baseRes, err := resolveDir(base)
 	if err != nil {
 		return nil, err
 	}
-	dir, err := filepath.EvalSymlinks(filepath.Dir(abs))
-	if err != nil {
-		return nil, err
+	p := filepath.Join(baseRes, filepath.FromSlash(rel))
+	if !isStrictlyWithin(baseRes, p) {
+		return nil, fmt.Errorf("%s liegt nicht unter %s", rel, base)
 	}
-	d, err := openDirBeneath(dir, dir, false, 0)
+	d, err := openDirBeneath(baseRes, filepath.Dir(p), false, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer d.Close()
-	data, _, err := readAt(d, filepath.Base(abs))
+	data, _, err := readAt(d, filepath.Base(p))
 	return data, err
 }
 
@@ -542,7 +663,7 @@ func readRegularFile(path string) ([]byte, error) {
 // followed (Linux; see setup_fs_linux.go).
 func openTargetDir(dir string, create bool, perm fs.FileMode) (*os.File, error) {
 	base := ""
-	for _, r := range resolveAll(currentSetupEnv().roots()) {
+	for _, r := range currentSetupEnv().resolvedRoots() {
 		if len(r) <= len(base) || !isWithin(r, dir) {
 			continue
 		}
@@ -700,18 +821,29 @@ func installFile(zr string, data []byte, perm, dirPerm fs.FileMode, backup bool,
 	return "geschrieben", nil
 }
 
+// writeMode is the mode of a file setup writes: 0600, except a shim, which
+// must be executable (0755). Nothing in the inventory can widen it.
+func writeMode(typ string) fs.FileMode {
+	if typ == "shim" {
+		return 0o755
+	}
+	return 0o600
+}
+
 // shimMarker is the second line of every shim setup writes. --apply replaces
 // only a file that starts with it; anything else in ~/.local/bin is foreign.
 const shimMarker = "# imprint-shim: erzeugt von imprint-dev setup --apply; setup ersetzt nur Dateien mit dieser Zeile"
 
 // shimContent is the shim a shim entry installs. quelle is placed in single
 // quotes, so nothing in it is expanded; parseInventory already limits it to
-// safePathPattern, and this check repeats that for defence in depth.
+// safePathPattern, and this check repeats that for defence in depth. An
+// unset or empty IMPRINT_CORE_ROOT stops the shim (${...:?}) instead of
+// running /<quelle>.
 func shimContent(quelle string) (string, error) {
 	if !safePathPattern.MatchString(quelle) || quelleEscapesRoot(quelle) {
 		return "", fmt.Errorf("quelle %q ist für einen Shim nicht erlaubt", quelle)
 	}
-	return fmt.Sprintf("#!/bin/sh\n%s\nexec \"$IMPRINT_CORE_ROOT\"/'%s' \"$@\"\n", shimMarker, filepath.ToSlash(filepath.Clean(quelle))), nil
+	return fmt.Sprintf("#!/bin/sh\n%s\nexec \"${IMPRINT_CORE_ROOT:?}\"/'%s' \"$@\"\n", shimMarker, filepath.ToSlash(filepath.Clean(quelle))), nil
 }
 
 // isSetupShim reports whether content is a shim setup wrote (marker line).
@@ -733,6 +865,7 @@ func shimPathConflict(name string) string {
 		}
 	}
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		dir = expandPathTilde(dir, env.home)
 		if !filepath.IsAbs(dir) {
 			continue
 		}
@@ -749,6 +882,34 @@ func shimPathConflict(name string) string {
 		}
 	}
 	return ""
+}
+
+// expandPathTilde expands a leading "~" of a PATH element the way bash does
+// when it searches PATH: "~" and "~/x" become $HOME, "~+" $PWD, "~-" $OLDPWD
+// and "~name" that user's home directory. Anything it cannot expand stays as
+// it is (and is then relative, which bash does not find either).
+func expandPathTilde(dir, home string) string {
+	if !strings.HasPrefix(dir, "~") {
+		return dir
+	}
+	name, rest, _ := strings.Cut(dir[1:], "/")
+	base := ""
+	switch name {
+	case "":
+		base = home
+	case "+":
+		base = os.Getenv("PWD")
+	case "-":
+		base = os.Getenv("OLDPWD")
+	default:
+		if u, err := user.Lookup(name); err == nil {
+			base = u.HomeDir
+		}
+	}
+	if !filepath.IsAbs(base) {
+		return dir
+	}
+	return filepath.Join(base, rest)
 }
 
 // systemdUnitPathsFromTool lists the user unit directories systemd itself
@@ -852,14 +1013,20 @@ func displaySafe(s string) string {
 	return b.String()
 }
 
+// unitLinePrefix starts every shown unit line, so a line in the unit that
+// imitates the end marker cannot end the display early.
+const unitLinePrefix = "│ "
+
 // systemdDisplay is what --apply prints before it writes a unit: units run
 // code once enabled, so the human sees every unit setup copies.
 func systemdDisplay(zr string, data []byte) string {
-	text := displaySafe(string(data))
-	if !strings.HasSuffix(text, "\n") {
-		text += "\n"
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- systemd-Unit %s (setup führt kein systemctl aus) ---\n", zr)
+	for _, line := range strings.Split(strings.TrimSuffix(displaySafe(string(data)), "\n"), "\n") {
+		b.WriteString(unitLinePrefix + line + "\n")
 	}
-	return fmt.Sprintf("--- systemd-Unit %s (setup führt kein systemctl aus) ---\n%s--- Ende %s ---\n", zr, text, filepath.Base(zr))
+	fmt.Fprintf(&b, "--- Ende %s ---\n", filepath.Base(zr))
+	return b.String()
 }
 
 // shellQuote quotes s for a POSIX shell, so a printed command is safe to paste.
@@ -889,12 +1056,45 @@ func checkEnvGuard() bool {
 // pluginName is the name .claude-plugin/plugin.json must carry for --apply.
 const pluginName = "imprint"
 
+// pluginAnchors returns the plugin roots --apply accepts as --root. The
+// anchor is the source tree the running binary was compiled from: the Go
+// compiler records each source file's absolute path (runtime.Caller), and
+// this file lies at <root>/tools/imprint-dev/. That path is fixed at build
+// time, so neither a crafted directory with a copied manifest nor a checkout
+// whose git remote claims mankind806/imprint-core (git remote set-url forges
+// that in one line) can match it. The Claude plugin cache is not an anchor:
+// imprint-dev is not installed from it and the hosts keep it in different,
+// undocumented places. A binary built with -trimpath has no absolute source
+// path and therefore no anchor: --apply then refuses. Tests replace this
+// variable.
+var pluginAnchors = func() []string {
+	if r := binarySourceRoot(); r != "" {
+		return []string{r}
+	}
+	return nil
+}
+
+// binarySourceRoot is the plugin root this binary was compiled from, or "".
+func binarySourceRoot() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok || !filepath.IsAbs(file) {
+		return ""
+	}
+	dir := filepath.Dir(file)
+	if filepath.Base(dir) != "imprint-dev" || filepath.Base(filepath.Dir(dir)) != "tools" {
+		return ""
+	}
+	return filepath.Dir(filepath.Dir(dir))
+}
+
 // checkPluginRoot is the identity check --apply runs on --root: the plugin
-// manifest must be a regular file (no symlink) naming this plugin, and --root
-// must not be the --repo directory, so a foreign checkout is never applied.
+// manifest must be a regular file naming this plugin, reached without any
+// symlink below --root (.claude-plugin/ included); --root must be the plugin
+// root this binary was built from (pluginAnchors) and must not be the --repo
+// directory, so a foreign or crafted checkout is never applied.
 func checkPluginRoot(root, repo string) error {
 	manifest := filepath.Join(root, ".claude-plugin", "plugin.json")
-	data, err := readRegularFile(manifest)
+	data, err := readBeneath(root, ".claude-plugin/plugin.json")
 	if err != nil {
 		return fmt.Errorf("--root %s ist kein imprint-Plugin: %s nicht lesbar (%v)", root, manifest, err)
 	}
@@ -903,6 +1103,23 @@ func checkPluginRoot(root, repo string) error {
 	}
 	if err := json.Unmarshal(data, &m); err != nil || m.Name != pluginName {
 		return fmt.Errorf("--root %s ist kein imprint-Plugin: %s trägt nicht name %q", root, manifest, pluginName)
+	}
+	anchors := pluginAnchors()
+	if len(anchors) == 0 {
+		return fmt.Errorf("dieses imprint-dev trägt keinen Quellpfad (gebaut mit -trimpath?); --apply braucht ein Binary, das aus dem Plugin-Root gebaut ist (go build ohne -trimpath, oder go run ./tools/imprint-dev im Plugin-Root)")
+	}
+	rootFi, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("--root %s nicht lesbar: %v", root, err)
+	}
+	anchored := false
+	for _, a := range anchors {
+		if fi, err := os.Stat(a); err == nil && os.SameFile(rootFi, fi) {
+			anchored = true
+		}
+	}
+	if !anchored {
+		return fmt.Errorf("--root %s ist nicht der Plugin-Root, aus dem dieses imprint-dev gebaut ist (%s); --apply verweigert", root, strings.Join(anchors, ", "))
 	}
 	if repo != "" {
 		rootFi, err1 := os.Stat(root)
@@ -926,7 +1143,7 @@ type processedItem struct {
 // (missing, symlink, unreadable); an invalid one is an error.
 func loadSetupInventory(root, repo string) (items []processedItem, repoNote string, repoUnchecked bool, err error) {
 	rootInvPath := filepath.Join(root, "setup", "inventar.json")
-	rootData, err := os.ReadFile(rootInvPath)
+	rootData, err := readBeneath(root, "setup/inventar.json")
 	if err != nil {
 		return nil, "", false, fmt.Errorf("cannot read %s: %w", rootInvPath, err)
 	}
@@ -942,7 +1159,7 @@ func loadSetupInventory(root, repo string) (items []processedItem, repoNote stri
 
 	if repo != "" {
 		repoInvPath := filepath.Join(repo, ".imprint", "setup.json")
-		repoData, rErr := readRegularFile(repoInvPath)
+		repoData, rErr := readBeneath(repo, ".imprint/setup.json")
 		if rErr != nil {
 			repoNote = fmt.Sprintf("note: repo setup inventory at %s is missing or unreadable (%v)", repoInvPath, rErr)
 			repoUnchecked = true
@@ -1225,13 +1442,9 @@ func inspectItem(item processedItem, withDiff bool) inspectResult {
 		}
 		soll = []byte(content)
 	} else {
-		qPath, err := resolveQuelle(item.invRoot, e.Quelle)
+		data, _, err := readQuelle(item.invRoot, e.Quelle)
 		if err != nil {
 			return inspectResult{status: "nicht-prüfbar", reason: err.Error()}
-		}
-		data, err := readRegularFile(qPath)
-		if err != nil {
-			return inspectResult{status: "nicht-prüfbar", reason: fmt.Sprintf("quelle unlesbar: %v", err)}
 		}
 		soll = data
 		if gated {
@@ -1394,21 +1607,32 @@ func writeRechteCache(e setupEntry, zLexical string, rendered []byte) (string, e
 // merge for fragment-merge). --apply prints only its call for such an entry.
 const rechteAnwendenSkript = "setup/vorlagen/rechte-anwenden.sh"
 
+// checkExecutableQuelle checks that quelle is a regular, executable file
+// inside the inventory root, opened like every quelle (openQuelle), and
+// returns its resolved path.
+func checkExecutableQuelle(invRoot, quelle string) (string, error) {
+	rootRes, qRes, err := resolveQuelle(invRoot, quelle)
+	if err != nil {
+		return "", err
+	}
+	f, fi, err := openQuelle(rootRes, qRes)
+	if err != nil {
+		return "", err
+	}
+	f.Close()
+	if fi.Mode().Perm()&0o100 == 0 {
+		return "", fmt.Errorf("%s ist nicht ausführbar", quelle)
+	}
+	return qRes, nil
+}
+
 // rechteSkriptCall is the printed call of rechteAnwendenSkript for e. The
 // argument is the id without the suffix "-rechte-vorlage" (claude-rechte-vorlage
 // → claude). The script must be an executable regular file inside the root.
 func rechteSkriptCall(invRoot string, e setupEntry) (string, error) {
-	p, err := resolveQuelle(invRoot, rechteAnwendenSkript)
+	abs, err := checkExecutableQuelle(invRoot, rechteAnwendenSkript)
 	if err != nil {
 		return "", fmt.Errorf("anwenden=%s braucht %s im Plugin-Root: %v", e.Anwenden, rechteAnwendenSkript, err)
-	}
-	fi, err := os.Lstat(p)
-	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o100 == 0 {
-		return "", fmt.Errorf("%s ist keine ausführbare reguläre Datei", rechteAnwendenSkript)
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
 	}
 	arg := strings.TrimSuffix(e.ID, "-rechte-vorlage")
 	return shellQuote(abs) + " " + shellQuote(arg), nil
@@ -1419,11 +1643,12 @@ func rechteSkriptCall(invRoot string, e setupEntry) (string, error) {
 // install and an explicit mode. install removes a destination before it
 // writes, so neither command writes through a link planted at the target or
 // its .bak; both are also checked here (no symlink, no second hard link). The
-// mode is the existing target's or 0644, plus execute bits where read bits
-// are set if the quelle is executable, so a copied script stays executable
-// and a 0600 settings file is not widened.
+// mode is the existing target's or writeMode's, plus execute bits where read
+// bits are set if the quelle is executable, so a copied script stays
+// executable and a 0600 file is not widened. Since rechte=true needs
+// "anwenden", only a systemd unit whose name exists elsewhere comes here.
 func printGatedCommands(stdout io.Writer, e setupEntry, zc zielCheck, content []byte, quelleMode fs.FileMode) error {
-	mode := fs.FileMode(0o644)
+	mode := writeMode(e.Typ)
 	exists := false
 	d, err := openTargetDir(filepath.Dir(zc.resolved), false, 0)
 	switch {
@@ -1510,7 +1735,7 @@ func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Wri
 
 			var data []byte
 			var quelleMode fs.FileMode
-			perm := fs.FileMode(0o644)
+			perm := writeMode(e.Typ)
 			if e.Typ == "shim" && !gated {
 				if other := shimPathConflict(filepath.Base(zc.lexical)); other != "" {
 					fail(e, fmt.Sprintf("verweigert: Shim-Name ist schon ein anderes Kommando in PATH (%s)", other))
@@ -1521,21 +1746,22 @@ func runSetupApply(items []processedItem, repoNote string, stdout, stderr io.Wri
 					fail(e, err.Error())
 					continue
 				}
-				data, perm = []byte(content), 0o755
+				// The shim runs $IMPRINT_CORE_ROOT/<quelle>; it must exist in
+				// the root and be executable before a shim points at it.
+				if _, err := checkExecutableQuelle(item.invRoot, e.Quelle); err != nil {
+					fail(e, fmt.Sprintf("Shim-quelle nicht nutzbar: %v", err))
+					continue
+				}
+				data = []byte(content)
 			} else {
-				qPath, err := resolveQuelle(item.invRoot, e.Quelle)
+				var qfi fs.FileInfo
+				var err error
+				data, qfi, err = readQuelle(item.invRoot, e.Quelle)
 				if err != nil {
 					fail(e, err.Error())
 					continue
 				}
-				data, err = readRegularFile(qPath)
-				if err != nil {
-					fail(e, fmt.Sprintf("quelle unlesbar: %v", err))
-					continue
-				}
-				if fi, err := os.Stat(qPath); err == nil {
-					quelleMode = fi.Mode()
-				}
+				quelleMode = qfi.Mode()
 			}
 
 			if e.Typ == "systemd" && !gated {
