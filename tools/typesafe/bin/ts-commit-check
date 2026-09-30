@@ -6,9 +6,15 @@ Validates:
  2. omissions (Noul): Significant changes omitted from the commit message.
  3. conventional (Noul): Compliance with Conventional Commits syntax (feat:, fix:, docs:, etc.).
  4. leak (Noul + Local): Secrets, API keys, or PII in diff or commit message.
-    Local part: a keyword secret (api_key=..., token: ..., Bearer ...) or an email
-    address found by the local masking sets leak_prob to 1.0, with or without a
-    TypeSafe key. leak_prob >= 0.5 is a hard block (exit 1), also in fail-open mode.
+    Local part: a keyword secret (an api_key, token or password assignment, or a
+    Bearer-type Authorization header) or an email
+    address found by the local masking in the ADDED diff lines, the file list or the
+    SUBJECT line sets leak_prob to 1.0, with or without a TypeSafe key. leak_prob >= 0.5 is a hard
+    block (exit 1), also in fail-open mode. The message body is masked and judged by
+    TypeSafe but raises no local alarm: its trailers (Co-Authored-By with an address)
+    would otherwise block every such commit; ts-pr-triage likewise only sees subjects.
+    Removed and context lines raise no alarm either: a commit that deletes a leaked
+    value must not be blocked for it.
 
 Usage:
   ts-commit-check [COMMIT_RANGE]             # e.g. HEAD~1..HEAD (default)
@@ -110,11 +116,16 @@ def check_commit(commit_msg, diff_text, stat_text):
     masked_diff, h2 = tc.mask_detail(diff_text)
     masked_stat, h3 = tc.mask_detail(stat_text)
     hits = tc.add_counts(h1, h2, h3)
+    subject = next((line for line in commit_msg.splitlines() if line.strip()), "")
+    added = "\n".join(line[1:] for line in diff_text.splitlines()
+                      if line.startswith("+") and not line.startswith("+++"))
+    alarm = tc.add_counts(tc.mask_detail(subject)[1], tc.mask_detail(added)[1], h3)
     if len(masked_diff) > 12000:
         masked_diff = masked_diff[:12000] + "\n... [diff truncated for check]"
     # Local part of the leak check, as in ts-pr-triage: only keyword secrets and emails
-    # raise the alarm; opaque strings (hashes, long identifiers) are masked, no alarm.
-    local_leak = bool(hits["secret_kw"] or hits["email"])
+    # in added lines, file list and subject raise the alarm; opaque strings (hashes, long
+    # identifiers) are masked, no alarm.
+    local_leak = bool(alarm["secret_kw"] or alarm["email"])
 
     state = {
         "commit_message": masked_msg,

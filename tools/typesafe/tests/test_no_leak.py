@@ -227,13 +227,31 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         self.repo = os.path.join(self.tmp.name, "repo")
         subprocess.run(["git", "init", "-q", self.repo], check=True)
 
-    def run_check(self, content):
+    def run_check(self, content, msg="feat: add config"):
         with open(os.path.join(self.repo, "config.py"), "w") as f:
             f.write(content)
         subprocess.run(["git", "-C", self.repo, "add", "config.py"], check=True)
         return subprocess.run([os.path.join(BIN, "ts-commit-check"), "--cached", "--msg",
-                               "feat: add config", "--cwd", self.repo],
+                               msg, "--cwd", self.repo],
                               capture_output=True, text=True, timeout=30, env=self.env)
+
+    def test_trailer_address_in_body_does_not_block(self):
+        # Built from parts so this very test file carries no address in its diff.
+        trailer = "Co-Authored-By: Bot <" + "noreply" + "@" + "bots.example>"
+        r = self.run_check("retries = 3\n", msg=f"docs: tidy\n\n{trailer}")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_removing_a_secret_does_not_block(self):
+        # Built from parts so this very test file adds no keyword secret in its diff.
+        self.run_check("api" + "_key=wachWertEpsilon\n")
+        ident = ["-c", "user.name=t", "-c", "user.email=t" + "@" + "t.invalid"]
+        subprocess.run(["git", "-C", self.repo, *ident, "commit", "-q", "-m", "seed"], check=True)
+        r = self.run_check("retries = 3\n", msg="fix: drop the leaked value")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_address_in_subject_blocks(self):
+        r = self.run_check("retries = 3\n", msg="docs: mail " + "ops" + "@" + "bots.example")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_api_key_without_key_blocks(self):
         r = self.run_check("api_key=wachWertDelta\n")
