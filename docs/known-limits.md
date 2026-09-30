@@ -79,6 +79,13 @@ Measured limits:
 - **Runtime budget:** Antigravity's 20,000-token rules budget can demote over-budget rules to file
   references; runtime persistence across extended turns is not verified.
 
+## Cursor and GitHub Copilot CLI
+
+Observed 2026-09-30 on one installation: no imprint plugin is installed for Cursor or
+GitHub Copilot CLI, and the host table lists neither. Whether either host can load
+`rules/AGENTS.md` through its own rules mechanism has not been checked. The plugin was not
+run on either host. Re-check by 2026-12-30.
+
 ## A gap named elsewhere
 
 One further gap is named inside `delegation-contract` rather than here, because it is a
