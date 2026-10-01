@@ -1134,7 +1134,7 @@ func TestPrePushNULOnShapeLine(t *testing.T) {
 
 // 23. A few cases under every shell and awk found on PATH: sh, dash and
 // busybox sh, each with the default awk, mawk, busybox awk and original-awk.
-// The tag and tree cases (24-33 below) run here too, for the seds and greps
+// The tag and tree cases (28-37 below) run here too, for the seds and greps
 // those shells come with.
 // CI runs on Ubuntu, where sh is dash and awk may be mawk; the combinations
 // that ran are logged (go test -v), so the log says which were exercised. A
@@ -1306,31 +1306,210 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantRefused(t, code, out, ", tagger of tag tc-latin1tagger")
 				ppWantChecked(t, out)
 
-				// greperr is not there to be written: a grep before the shape
-				// loop - the one over the declared identities - puts a
-				// directory in its place. In bash and busybox sh the failed
-				// 2> of the first shape grep then returns 1, grep's "no line
-				// matched", and every shape read as clean.
-				shim := t.TempDir()
-				fired := filepath.Join(t.TempDir(), "fired")
-				script := "#!/bin/sh\nfor a; do last=$a; done\n" +
-					"case \"${last:-}\" in */allowed | */committers) : >'" + fired + "'; [ -e \"${last%/*}/greperr\" ] || mkdir \"${last%/*}/greperr\" ;; esac\n" +
-					"exec '" + grepBin + "' \"$@\"\n"
-				if err := os.WriteFile(filepath.Join(shim, "grep"), []byte(script), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				path := shim + string(os.PathListSeparator)
-				if env.pathDir != "" {
-					path += env.pathDir + string(os.PathListSeparator)
-				}
-				code, out = c.hookNewBranch("leak", leakTip, "PATH="+path+os.Getenv("PATH"))
-				ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
-				ppWantChecked(t, out)
-				if _, err := os.Stat(fired); err != nil {
-					t.Logf("%s ran no grep from PATH, so the case of greperr not being there was not exercised", sh.label)
+				// A file a shape grep writes to cannot be opened: a grep
+				// before the shape loops - the one over the declared
+				// identities - puts a directory in its place. In bash and
+				// busybox sh the failed redirection returns 1, grep's "no line
+				// matched", and every shape read as clean. hits.own, hits.c
+				// and greperr are grep_both's grep targets; hits is where sort
+				// merges their lines.
+				for _, f := range []struct{ file, want string }{
+					{"hits.own", "could not run grep for address over the added lines"},
+					{"hits.c", "could not run grep for address over the added lines"},
+					{"greperr", "could not run grep for address over the added lines"},
+					{"hits", "sort could not merge the address hits in the added lines"},
+				} {
+					shim := t.TempDir()
+					fired := filepath.Join(t.TempDir(), "fired")
+					script := "#!/bin/sh\nfor a; do last=$a; done\n" +
+						"case \"${last:-}\" in */allowed | */committers) d=\"${last%/*}\"; [ -d \"$d/" + f.file + "\" ] || { rm -f \"$d/" + f.file + "\" && mkdir \"$d/" + f.file + "\" && : >'" + fired + "'; } ;; esac\n" +
+						"exec '" + grepBin + "' \"$@\"\n"
+					if err := os.WriteFile(filepath.Join(shim, "grep"), []byte(script), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					path := shim + string(os.PathListSeparator)
+					if env.pathDir != "" {
+						path += env.pathDir + string(os.PathListSeparator)
+					}
+					for _, anyway := range []bool{false, true} {
+						e := []string{"PATH=" + path + os.Getenv("PATH")}
+						if anyway {
+							e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+						}
+						if err := os.Remove(fired); err != nil && !errors.Is(err, os.ErrNotExist) {
+							t.Fatal(err)
+						}
+						code, out = c.hookNewBranch("leak", leakTip, e...)
+						if _, err := os.Stat(fired); err != nil {
+							t.Logf("%s ran no grep from PATH, so %s replaced by a directory was not exercised", sh.label, f.file)
+							break
+						}
+						ppWantRefused(t, code, out, "check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it", f.want)
+						if strings.Contains(out, "no findings") {
+							t.Errorf("%s replaced by a directory: hook reports no findings; output:\n%s", f.file, out)
+						}
+					}
 				}
 			})
 		}
+	}
+}
+
+// 24. With POSIXLY_CORRECT set, GNU sort takes an option after a file operand
+// for another file, so `sort -u FILE -o FILE` refused every push. A clean new
+// commit still passes - and only through the tracking refs, since the seed
+// history holds a shape - and an added shape is still refused.
+func TestPrePushPOSIXLYCorrect(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	r.git("checkout", "-q", "-b", "posix")
+	r.write("posix.txt", "a clean line\n")
+	clean := r.commit("posix: one clean commit")
+	code, out := r.hookNewBranch("posix", clean, "POSIXLY_CORRECT=1")
+	ppWantPass(t, code, out)
+	if !strings.Contains(out, "1 new commit(s)") {
+		t.Errorf("hook report lacks %q; output:\n%s", "1 new commit(s)", out)
+	}
+	ppWantAbsent(t, out, ppSeedAddr)
+
+	leak := addr("posixly.correct", "example.invalid")
+	r.git("checkout", "-q", "-b", "posix-leak", "main")
+	r.write("leak.txt", "first line\nwrite to "+leak+"\n")
+	tip := r.commit("posix: add a contact line")
+	code, out = r.hookNewBranch("posix-leak", tip, "POSIXLY_CORRECT=1")
+	ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
+	ppWantChecked(t, out)
+}
+
+// 25. A signal ends the hook half-way. dash and busybox sh run no EXIT trap
+// then, so without a trap of its own the hook would leave its working files
+// behind and exit by the signal; it removes them and exits 1, which refuses
+// the push. The TERM comes during the last git call the hook makes, the one
+// that reads the messages: a trap that removed the files and returned would
+// let the hook run on without them, to whatever exit that happened to reach.
+// And it comes from a grep in a shape loop, which has to run in the shell that
+// holds the trap: a piped loop ran in a subshell that died alone, and the hook
+// reported no findings for the shapes it never ran - here the one shape the
+// added line holds.
+func TestPrePushSignalCleansUp(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	gitBin := ppRealBin(t, "git")
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name    string
+		content string
+		shim    func(t *testing.T) string
+	}{
+		{"a TERM during the last git call", "a clean line\n", func(t *testing.T) string {
+			return ppShimPATH(t, "git", "case \" $* \" in *\" --format=%h|%s%n%b \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+		}},
+		{"a TERM from a grep in a shape loop", "first line\nvisit " + ppPostcode + "\n", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "case \" $* \" in *\"/added \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "sig")
+			r.write("sig.txt", c.content)
+			tip := r.commit("sig: one commit")
+			tmp := t.TempDir()
+			code, out := r.hookNewBranch("sig", tip, c.shim(t), "TMPDIR="+tmp)
+			if code != 1 || strings.Contains(out, "no findings") {
+				t.Errorf("hook exit %d after a TERM, want 1 and no report of no findings; output:\n%s", code, out)
+			}
+			left, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range left {
+				t.Errorf("the hook left %s behind in TMPDIR", e.Name())
+			}
+		})
+	}
+}
+
+// 26. A line of the hook's own report that cannot be written. A grep, at each
+// shape it runs over the commit messages, swaps the findings or the errors file
+// for a link to /dev/full, so every write to it fails as on a full disk. The
+// verdict reads those files, and an empty one means clean: a finding or an
+// error that was never written down let the push through with "no findings".
+// The refusal has to come from the write, not from the check before the
+// verdict that the files are still there, and no override covers it.
+func TestPrePushReportNotWritten(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	if fi, err := os.Stat("/dev/full"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		t.Skip("no /dev/full here to stand in for a full disk")
+	}
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name string
+		file string // the work file the shim swaps for /dev/full
+		then string // what the shim does next at a grep over the messages
+	}{
+		{"a finding in a commit message", "findings", ":"},
+		{"a grep that fails over the commit messages", "errors", "exit 2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "full")
+			r.write("full.txt", "a clean line\n")
+			tip := r.commit("full: write to " + addr("full.disk", "example.invalid"))
+			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
+				"case \"${last:-}\" in */messages) ln -s -f /dev/full \"${last%/messages}/"+c.file+"\"; "+c.then+" ;; esac\n"+
+				"exec '"+grepBin+"' \"$@\"\n")
+			for _, anyway := range []bool{false, true} {
+				e := []string{shim}
+				if anyway {
+					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				}
+				code, out := r.hookNewBranch("full", tip, e...)
+				ppWantRefused(t, code, out, "could not write the hook's report")
+				if strings.Contains(out, "no findings") {
+					t.Errorf("hook reports no findings; output:\n%s", out)
+				}
+			}
+		})
+	}
+}
+
+// 27. The working directory removed half-way - by a grep, at the first shape it
+// runs over the commit messages, the last step before the verdict. The verdict
+// read the files that were gone as empty ones and reported no findings. Which
+// guard meets the gap first differs between shells, so the test names none.
+func TestPrePushWorkGone(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name    string
+		message string
+	}{
+		{"a message with a shape", "gone: write to " + addr("work.gone", "example.invalid")},
+		{"a clean message", "gone: one clean commit"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "gone")
+			r.write("gone.txt", "a clean line\n")
+			tip := r.commit(c.message)
+			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
+				"case \"${last:-}\" in */messages) rm -rf \"${last%/messages}\" ;; esac\n"+
+				"exec '"+grepBin+"' \"$@\"\n")
+			for _, anyway := range []bool{false, true} {
+				e := []string{shim}
+				if anyway {
+					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				}
+				code, out := r.hookNewBranch("gone", tip, e...)
+				ppWantRefused(t, code, out)
+				if strings.Contains(out, "no findings") {
+					t.Errorf("hook reports no findings; output:\n%s", out)
+				}
+			}
+		})
 	}
 }
 
@@ -1363,7 +1542,7 @@ func (r *ppRepo) hookNewTag(name, oid string, extraEnv ...string) (int, string) 
 	return r.hook([]string{"origin", r.origin}, r.tagLine(name, oid), extraEnv...)
 }
 
-// 24. A tag on a commit origin already has adds no commit, and is still
+// 28. A tag on a commit origin already has adds no commit, and is still
 // read: a shape in its message is refused - any of the shapes.
 func TestPrePushTagMessage(t *testing.T) {
 	env := ppSetup(t)
@@ -1385,7 +1564,7 @@ func TestPrePushTagMessage(t *testing.T) {
 	}
 }
 
-// 25. The tagger has to be a declared identity. GitHub's web-flow identity
+// 29. The tagger has to be a declared identity. GitHub's web-flow identity
 // is let in as a merge's committer only, so as a tagger it is undeclared.
 func TestPrePushTagger(t *testing.T) {
 	env := ppSetup(t)
@@ -1400,6 +1579,14 @@ func TestPrePushTagger(t *testing.T) {
 		if !strings.Contains(out, "0 undeclared tagger(s)") {
 			t.Errorf("hook report lacks %q; output:\n%s", "0 undeclared tagger(s)", out)
 		}
+	})
+	t.Run("declared tagger with a Latin-1 name, UTF-8 locale", func(t *testing.T) {
+		r := r.with(t)
+		name := "J\xfcrgen Tester"
+		r.git("config", "--add", "imprint.allowedIdentity", name+" <"+ccTestSomeoneEmail+">")
+		oid := r.tag("by-latin1", pushed, name, ccTestSomeoneEmail, "a clean tag by a declared Latin-1 name")
+		code, out := r.hookNewTag("by-latin1", oid, "LC_ALL=C.UTF-8")
+		ppWantPass(t, code, out)
 	})
 	t.Run("undeclared tagger", func(t *testing.T) {
 		r := r.with(t)
@@ -1417,7 +1604,7 @@ func TestPrePushTagger(t *testing.T) {
 	})
 }
 
-// 26. A nested tag publishes the tags inside it: a shape only in the inner
+// 30. A nested tag publishes the tags inside it: a shape only in the inner
 // tag's message, or a stranger only as the inner tagger, is refused although
 // the outer tag is clean.
 func TestPrePushNestedTag(t *testing.T) {
@@ -1442,7 +1629,7 @@ func TestPrePushNestedTag(t *testing.T) {
 	})
 }
 
-// 27. A clean tag on a pushed commit passes and reads nothing else - not
+// 31. A clean tag on a pushed commit passes and reads nothing else - not
 // the unpushed commit on HEAD that carries a shape in its file and message.
 func TestPrePushCleanTagOnPushedCommit(t *testing.T) {
 	env := ppSetup(t)
@@ -1463,7 +1650,7 @@ func TestPrePushCleanTagOnPushedCommit(t *testing.T) {
 	ppWantAbsent(t, out, local, ppSeedAddr)
 }
 
-// 28. A tag on a commit origin does not have yet brings that commit along,
+// 32. A tag on a commit origin does not have yet brings that commit along,
 // and the commit is checked as on any other ref.
 func TestPrePushTagOnNewCommit(t *testing.T) {
 	env := ppSetup(t)
@@ -1477,7 +1664,7 @@ func TestPrePushTagOnNewCommit(t *testing.T) {
 	ppWantRefused(t, code, out, ":carried.txt:1:", carried, "1 new commit(s), 1 tag object(s)")
 }
 
-// 29. A real git push of a tag hands the hook the tag object's id: a shape in
+// 33. A real git push of a tag hands the hook the tag object's id: a shape in
 // the message stops the push, and origin does not get the tag.
 func TestPrePushTagRealPush(t *testing.T) {
 	env := ppSetup(t)
@@ -1509,7 +1696,7 @@ func TestPrePushTagRealPush(t *testing.T) {
 	}
 }
 
-// 30. IMPRINT_PUSH_ANYWAY waves a tag finding through, as any finding. A tag
+// 34. IMPRINT_PUSH_ANYWAY waves a tag finding through, as any finding. A tag
 // object the hook cannot read - an inner tag missing from the object store, a
 // tagger line it cannot parse - refuses the push, and no override covers it.
 func TestPrePushTagAnywayAndUnreadable(t *testing.T) {
@@ -1558,7 +1745,7 @@ func TestPrePushTagAnywayAndUnreadable(t *testing.T) {
 	})
 }
 
-// 31. A ref that points at a blob or a tree, straight or through a tag, is
+// 35. A ref that points at a blob or a tree, straight or through a tag, is
 // a finding: the hook does not read the content, and rev-list would list
 // nothing for it. IMPRINT_PUSH_ANYWAY with a reason lets it through; a real
 // push of a blob under refs/tags/ is stopped before origin gets it.
@@ -1638,7 +1825,7 @@ func (r *ppRepo) rawObject(kind, content string) string {
 	return strings.TrimSpace(string(got))
 }
 
-// 32. Everything in a tag object outside the tagger's identity is read:
+// 36. Everything in a tag object outside the tagger's identity is read:
 // an extra header line, a tag whose header never ends (git reads no message
 // from it), CRLF line ends, and what follows the identity on the tagger
 // line. A tagger line with no newline after it is still checked, and a tag
@@ -1677,7 +1864,7 @@ func TestPrePushTagObjectOutsideMessage(t *testing.T) {
 	}
 }
 
-// 33. A tag object is raw bytes. A Latin-1 no-break space - not valid UTF-8 -
+// 37. A tag object is raw bytes. A Latin-1 no-break space - not valid UTF-8 -
 // right before a phone number matches no bracket expression under a UTF-8
 // locale, so the shape is matched under C as well. The hook runs here under
 // C.UTF-8; where that locale is missing, grep falls back to C and this case
@@ -1696,158 +1883,109 @@ func TestPrePushTagLatin1Byte(t *testing.T) {
 	}
 }
 
-// 34. With POSIXLY_CORRECT set, GNU sort takes an option after a file operand
-// for another file, so `sort -u FILE -o FILE` refused every push. A clean new
-// commit still passes - and only through the tracking refs, since the seed
-// history holds a shape - and an added shape is still refused.
-func TestPrePushPOSIXLYCorrect(t *testing.T) {
+// 38. The failures of tests 25-27 and of the toolchain test's directory case,
+// and lists the tag check reads changed under it, on a push of a tag alone: no new commit, so the tag check's greps are the
+// only shape greps that run. A TERM from one of them, the findings or the
+// errors file swapped for /dev/full, the working directory removed, a hit
+// file that cannot be opened, and a grep that matches and writes nothing all
+// refuse the push, with and without IMPRINT_PUSH_ANYWAY, and none reports no
+// findings.
+func TestPrePushTagCheckBroken(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
-	r := ppSeed(t, env)
-	r.git("checkout", "-q", "-b", "posix")
-	r.write("posix.txt", "a clean line\n")
-	clean := r.commit("posix: one clean commit")
-	code, out := r.hookNewBranch("posix", clean, "POSIXLY_CORRECT=1")
-	ppWantPass(t, code, out)
-	if !strings.Contains(out, "1 new commit(s)") {
-		t.Errorf("hook report lacks %q; output:\n%s", "1 new commit(s)", out)
-	}
-	ppWantAbsent(t, out, ppSeedAddr)
-
-	leak := addr("posixly.correct", "example.invalid")
-	r.git("checkout", "-q", "-b", "posix-leak", "main")
-	r.write("leak.txt", "first line\nwrite to "+leak+"\n")
-	tip := r.commit("posix: add a contact line")
-	code, out = r.hookNewBranch("posix-leak", tip, "POSIXLY_CORRECT=1")
-	ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
-	ppWantChecked(t, out)
-}
-
-// 35. A signal ends the hook half-way. dash and busybox sh run no EXIT trap
-// then, so without a trap of its own the hook would leave its working files
-// behind and exit by the signal; it removes them and exits 1, which refuses
-// the push. The TERM comes during the last git call the hook makes, the one
-// that reads the messages: a trap that removed the files and returned would
-// let the hook run on without them, to whatever exit that happened to reach.
-// And it comes from a grep in a shape loop, which has to run in the shell that
-// holds the trap: a piped loop ran in a subshell that died alone, and the hook
-// reported no findings for the shapes it never ran - here the one shape the
-// added line holds.
-func TestPrePushSignalCleansUp(t *testing.T) {
-	env := ppSetup(t)
-	t.Parallel()
+	grepBin := ppRealBin(t, "grep")
 	gitBin := ppRealBin(t, "git")
-	grepBin := ppRealBin(t, "grep")
+	full := false
+	if fi, err := os.Stat("/dev/full"); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		full = true
+	}
+	shape := "release notes, write to " + addr("tag.broken", "example.invalid")
+	onTagtext := func(action string) string {
+		return "for a; do last=$a; done\ncase \"${last:-}\" in */tagtext) " + action + " ;; esac\nexec '" + grepBin + "' \"$@\"\n"
+	}
+	// The tagger check is the one grep over */allowed before the tag's shape
+	// greps when no commit is new.
+	onAllowed := func(file string) string {
+		return "for a; do last=$a; done\ncase \"${last:-}\" in */allowed) d=\"${last%/*}\"; rm -f \"$d/" + file + "\" && mkdir \"$d/" + file + "\" ;; esac\nexec '" + grepBin + "' \"$@\"\n"
+	}
+	// While the hook reads imprint.allowedIdentity - after it wrote the ref
+	// lists down, before the tag check reads them - git changes a work file
+	// under the hook's TMPDIR. A list that is gone, empty or a directory reads
+	// like one at its end, with no error.
+	onConfig := func(action string) string {
+		return "case \" $* \" in *\" imprint.allowedIdentity \"*) for d in \"$TMPDIR\"/*/; do " + action + "; done ;; esac\nexec '" + gitBin + "' \"$@\"\n"
+	}
 	for _, c := range []struct {
-		name    string
-		content string
-		shim    func(t *testing.T) string
+		name, message, shim string
+		devFull             bool
+		wants               []string
+		tool                string // the binary the shim stands in for; grep when empty
+		tree                bool   // push a tag on a tree rather than on a commit
 	}{
-		{"a TERM during the last git call", "a clean line\n", func(t *testing.T) string {
-			return ppShimPATH(t, "git", "case \" $* \" in *\" --format=%h|%s%n%b \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
-		}},
-		{"a TERM from a grep in a shape loop", "first line\nvisit " + ppPostcode + "\n", func(t *testing.T) string {
-			return ppShimPATH(t, "grep", "case \" $* \" in *\"/added \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
-		}},
+		{name: "tags list a directory", message: shape, tool: "git",
+			shim: onConfig("rm -f \"${d}tags\" && mkdir \"${d}tags\""), wants: []string{"read back 0 of 1 tag object(s)"}},
+		{name: "tags list emptied", message: shape, tool: "git",
+			shim: onConfig(": >\"${d}tags\""), wants: []string{"read back 0 of 1 tag object(s)"}},
+		{name: "objects list a directory", message: "a clean tag on a tree", tool: "git", tree: true,
+			shim: onConfig("rm -f \"${d}objects\" && mkdir \"${d}objects\""), wants: []string{"read back", "a blob or a tree"}},
+		{name: "objects list removed", message: "a clean tag on a tree", tool: "git", tree: true,
+			shim: onConfig("rm -f \"${d}objects\""), wants: []string{"read back", "a blob or a tree"}},
+		{name: "declared identities a directory", message: "a clean tag", tool: "git",
+			shim: onConfig("rm -f \"${d}allowed\" && mkdir \"${d}allowed\""), wants: []string{"grep could not read the declared identities"}},
+		{"a TERM from a tag grep", shape, onTagtext("kill -TERM \"$PPID\""), false, nil, "", false},
+		{"findings on a full disk", shape, onTagtext("ln -s -f /dev/full \"${last%/tagtext}/findings\""), true,
+			[]string{"could not write the hook's report"}, "", false},
+		{"errors on a full disk", "a clean tag", onTagtext("ln -s -f /dev/full \"${last%/tagtext}/errors\"; exit 2"), true,
+			[]string{"could not write the hook's report"}, "", false},
+		{"work directory removed, shape", shape, onTagtext("rm -rf \"${last%/*}\""), false, nil, "", false},
+		{"work directory removed, clean", "a clean tag", onTagtext("rm -rf \"${last%/*}\""), false, nil, "", false},
+		{"thits.own is a directory", shape, onAllowed("thits.own"), false,
+			[]string{"could not run grep for address over tag"}, "", false},
+		{"thits.C is a directory", shape, onAllowed("thits.C"), false,
+			[]string{"could not run grep for address over tag"}, "", false},
+		{"a grep that matches and writes nothing", shape, onTagtext("exit 0"), false,
+			[]string{"but wrote no hit down"}, "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.devFull && !full {
+				t.Skip("no /dev/full here to stand in for a full disk")
+			}
 			r := ppSeed(t, env)
-			r.git("checkout", "-q", "-b", "sig")
-			r.write("sig.txt", c.content)
-			tip := r.commit("sig: one commit")
-			tmp := t.TempDir()
-			code, out := r.hookNewBranch("sig", tip, c.shim(t), "TMPDIR="+tmp)
-			if code != 1 || strings.Contains(out, "no findings") {
-				t.Errorf("hook exit %d after a TERM, want 1 and no report of no findings; output:\n%s", code, out)
+			target := r.head()
+			if c.tree {
+				target = r.git("rev-parse", "HEAD^{tree}")
 			}
-			left, err := os.ReadDir(tmp)
-			if err != nil {
-				t.Fatal(err)
+			oid := r.tag("broken", target, ppAuthorName, ccTestAuthorEmail, c.message)
+			tool := c.tool
+			if tool == "" {
+				tool = "grep"
 			}
-			for _, e := range left {
-				t.Errorf("the hook left %s behind in TMPDIR", e.Name())
-			}
-		})
-	}
-}
-
-// 36. A line of the hook's own report that cannot be written. A grep, at each
-// shape it runs over the commit messages, swaps the findings or the errors file
-// for a link to /dev/full, so every write to it fails as on a full disk. The
-// verdict reads those files, and an empty one means clean: a finding or an
-// error that was never written down let the push through with "no findings".
-// The refusal has to come from the write, not from the check before the
-// verdict that the files are still there, and no override covers it.
-func TestPrePushReportNotWritten(t *testing.T) {
-	env := ppSetup(t)
-	t.Parallel()
-	if fi, err := os.Stat("/dev/full"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
-		t.Skip("no /dev/full here to stand in for a full disk")
-	}
-	grepBin := ppRealBin(t, "grep")
-	for _, c := range []struct {
-		name string
-		file string // the work file the shim swaps for /dev/full
-		then string // what the shim does next at a grep over the messages
-	}{
-		{"a finding in a commit message", "findings", ":"},
-		{"a grep that fails over the commit messages", "errors", "exit 2"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			r := ppSeed(t, env)
-			r.git("checkout", "-q", "-b", "full")
-			r.write("full.txt", "a clean line\n")
-			tip := r.commit("full: write to " + addr("full.disk", "example.invalid"))
-			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
-				"case \"${last:-}\" in */messages) ln -s -f /dev/full \"${last%/messages}/"+c.file+"\"; "+c.then+" ;; esac\n"+
-				"exec '"+grepBin+"' \"$@\"\n")
+			path := ppShimPATH(t, tool, c.shim)
 			for _, anyway := range []bool{false, true} {
-				e := []string{shim}
+				tmp := t.TempDir()
+				e := []string{path, "TMPDIR=" + tmp}
 				if anyway {
 					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
 				}
-				code, out := r.hookNewBranch("full", tip, e...)
-				ppWantRefused(t, code, out, "could not write the hook's report")
-				if strings.Contains(out, "no findings") {
-					t.Errorf("hook reports no findings; output:\n%s", out)
+				code, out := r.hookNewTag("broken", oid, e...)
+				if strings.HasPrefix(c.name, "a TERM") {
+					// The trap removes the files and exits 1 without a word,
+					// as in test 25.
+					if code != 1 {
+						t.Errorf("hook exit %d after a TERM, want 1; output:\n%s", code, out)
+					}
+				} else {
+					ppWantRefused(t, code, out, c.wants...)
 				}
-			}
-		})
-	}
-}
-
-// 37. The working directory removed half-way - by a grep, at the first shape it
-// runs over the commit messages, the last step before the verdict. The verdict
-// read the files that were gone as empty ones and reported no findings. Which
-// guard meets the gap first differs between shells, so the test names none.
-func TestPrePushWorkGone(t *testing.T) {
-	env := ppSetup(t)
-	t.Parallel()
-	grepBin := ppRealBin(t, "grep")
-	for _, c := range []struct {
-		name    string
-		message string
-	}{
-		{"a message with a shape", "gone: write to " + addr("work.gone", "example.invalid")},
-		{"a clean message", "gone: one clean commit"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			r := ppSeed(t, env)
-			r.git("checkout", "-q", "-b", "gone")
-			r.write("gone.txt", "a clean line\n")
-			tip := r.commit(c.message)
-			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
-				"case \"${last:-}\" in */messages) rm -rf \"${last%/messages}\" ;; esac\n"+
-				"exec '"+grepBin+"' \"$@\"\n")
-			for _, anyway := range []bool{false, true} {
-				e := []string{shim}
-				if anyway {
-					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				if strings.Contains(out, "no findings") || strings.Contains(out, "IMPRINT_PUSH_ANYWAY is set") {
+					t.Errorf("hook let the push through; output:\n%s", out)
 				}
-				code, out := r.hookNewBranch("gone", tip, e...)
-				ppWantRefused(t, code, out)
-				if strings.Contains(out, "no findings") {
-					t.Errorf("hook reports no findings; output:\n%s", out)
+				left, err := os.ReadDir(tmp)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, l := range left {
+					t.Errorf("the hook left %s behind in TMPDIR", l.Name())
 				}
 			}
 		})
@@ -1858,10 +1996,10 @@ func TestPrePushWorkGone(t *testing.T) {
 // without touching the repository's config.
 var ppLatin1Log = []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=i18n.logOutputEncoding", "GIT_CONFIG_VALUE_0=ISO-8859-1"}
 
-// 38. The lines a new commit adds are raw bytes, as the file was written. A
+// 39. The lines a new commit adds are raw bytes, as the file was written. A
 // Latin-1 no-break space right before a phone number matches no bracket
 // expression under a UTF-8 locale, so the added lines are matched under C as
-// well, as a tag object is (33). The hook runs here under C.UTF-8; where that
+// well, as a tag object is (37). The hook runs here under C.UTF-8; where that
 // locale is missing, grep falls back to C and this case proves less.
 func TestPrePushAddedLineLatin1Byte(t *testing.T) {
 	env := ppSetup(t)
@@ -1879,7 +2017,7 @@ func TestPrePushAddedLineLatin1Byte(t *testing.T) {
 	}
 }
 
-// 39. A commit message reaches its check as git log prints it, re-encoded
+// 40. A commit message reaches its check as git log prints it, re-encoded
 // into i18n.logOutputEncoding, or into i18n.commitEncoding when that is unset.
 // In Latin-1, a place that starts with an umlaut matches the pattern under
 // neither locale, so the hook asks git for UTF-8. A message whose bytes are
@@ -1923,7 +2061,7 @@ func TestPrePushCommitMessageEncoding(t *testing.T) {
 	})
 }
 
-// 40. The identities of the new commits reach check 1 re-encoded the same
+// 41. The identities of the new commits reach check 1 re-encoded the same
 // way. A declared name outside ASCII, printed in Latin-1, would no longer
 // equal the UTF-8 name the clone declares, and its own commit would be
 // refused. A stranger with such a name is still undeclared.
@@ -1946,7 +2084,7 @@ func TestPrePushIdentityEncoding(t *testing.T) {
 	ppWantChecked(t, out)
 }
 
-// 41. A commit's encoding header can name an encoding its bytes are not in:
+// 42. A commit's encoding header can name an encoding its bytes are not in:
 // with i18n.commitEncoding set to Latin-1 and UTF-8 typed in, git commit
 // writes UTF-8 under a Latin-1 header. git log converts it anyway, which
 // turns the umlaut of a place into two characters no pattern holds, and a
@@ -2024,7 +2162,7 @@ func TestPrePushMislabelledEncoding(t *testing.T) {
 	}
 }
 
-// 42. A tag object is read under C by sed as well as by grep: in a UTF-8
+// 43. A tag object is read under C by sed as well as by grep: in a UTF-8
 // locale GNU sed's .* stops at a byte that is not valid UTF-8, and a declared
 // tagger whose name is stored in Latin-1 was a check that could not run.
 func TestPrePushTaggerLatin1Name(t *testing.T) {

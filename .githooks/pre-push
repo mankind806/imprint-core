@@ -12,17 +12,17 @@
 # in it - the message above all - may match a shape. A ref that ends in a blob
 # or a tree is refused unread.
 #
-# WHAT IT READS. The new commits, and of their content only the lines they
-# add; and every tag object a pushed ref leads to, all of it. A new commit
-# whose header names an encoding other than UTF-8 is also read as stored.
-# A commit is new unless the remote's old tip for that ref reaches it, or
-# one of this clone's tracking refs for the destination remote does
-# (refs/remotes/<remote>/*, only when the push goes to the URL they are fetched
-# from, and only while no other remote stores refs under that prefix). Those
-# refs are what this clone last fetched, not what the remote holds now: after
-# pointing a remote at another repository, run `git fetch --prune` first. A
-# line already on it was checked on its way there, or predates the hook;
-# reading it again would refuse every push for what is already published.
+# WHAT IT READS. The new commits, and of their content only the lines they add;
+# and every tag object a pushed ref leads to, all of it. A commit is new unless
+# the remote's old tip for that ref reaches it, or one of this clone's tracking
+# refs for the destination remote does (refs/remotes/<remote>/*, only when the
+# push goes to the URL they are fetched from, and only while no other remote
+# stores refs under that prefix). Those refs are what this clone last fetched,
+# not what the remote holds now: after pointing a remote at another repository,
+# run `git fetch --prune` first. A line already on it was checked on its way
+# there, or predates the hook; reading it again would refuse every push for what
+# is already published. A new commit whose header names an encoding other than
+# UTF-8 is also read as stored.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -145,8 +145,11 @@ shared_by() {
       || { shared="the legacy remotes/ folder in the git directory is not empty, and this hook does not read it"; return; }
   fi
   # extensions is read from the repository's own config file, as git reads it,
-  # so that a -c on the command line cannot hide it.
-  sb_wtc="$(git config --file "$sb_common/config" --type=bool --get extensions.worktreeConfig 2>/dev/null)"; sb_rc=$?
+  # so that a -c on the command line cannot hide it. This read and the one of
+  # the fetch refspecs below take exit 1 for "not set", and in bash and busybox
+  # sh a redirection that fails returns 1 as well - so neither sends its errors
+  # to /dev/null. git config says nothing for a key that is not set.
+  sb_wtc="$(git config --file "$sb_common/config" --type=bool --get extensions.worktreeConfig)"; sb_rc=$?
   [ "$sb_rc" -le 1 ] || { shared="git config could not read extensions.worktreeConfig"; return; }
   [ "$sb_wtc" != true ] \
     || { shared="extensions.worktreeConfig is on, and another worktree's config.worktree can define a remote or turn this one's fetch elsewhere"; return; }
@@ -156,7 +159,7 @@ shared_by() {
     case "$sb_r" in
       "$sb_dest"/*) shared="remote $sb_r stores its refs under refs/remotes/$sb_dest/"; return ;;
     esac
-    sb_specs="$(git config --get-all "remote.$sb_r.fetch" 2>/dev/null)"; sb_rc=$?
+    sb_specs="$(git config --get-all "remote.$sb_r.fetch")"; sb_rc=$?
     [ "$sb_rc" -le 1 ] || { shared="git config could not read remote $sb_r's fetch refspecs"; return; }
     while IFS= read -r sb_spec; do
       sb_spec="${sb_spec#+}"
@@ -217,12 +220,13 @@ trap 'rm -rf "$work"' EXIT
 # clean up and still refuse the push.
 trap 'rm -rf "$work"; exit 1' HUP INT TERM
 # hits, hits.own, hits.c and greperr, which the shape greps write to, are made
-# here too: in bash and busybox sh a redirection that fails returns 1, which is
-# also grep's "no line matched". Once they exist, grep's > and 2> only truncate
-# them, which takes neither space nor an inode. true, not ":" - a redirection
-# that fails on a special built-in such as ":" ends the shell before || refuse
-# can say why.
-for f in findings errors ran skipped ranges hits hits.own hits.c greperr; do
+# here too: once they exist, the greps' > and 2> only truncate them, which
+# takes neither space nor an inode. That alone does not settle a grep's result,
+# since a target can still fail to open; the shape loops read it from a file of
+# its own (greprc, in grep_both). true, not ":" - a redirection that fails on a
+# special built-in such as ":" ends the shell before || refuse can say why.
+for f in findings errors ran skipped ranges hits hits.own hits.c greperr \
+  commitrefs tags objects tag.raw taggers.undeclared tagtext thits thits.own thits.C; do
   true >"$work/$f" || refuse "$cannot_write"
 done
 
@@ -289,7 +293,7 @@ new_commits() {
 # to either, it lists nothing and succeeds (measured with git 2.55.0,
 # 2026-10-01), and the push would pass as one with no new commit. So each local
 # oid is typed first, and a tag is peeled one object at a time: every tag object
-# on the way is published with the ref and goes to check 4, an inner tag of a
+# on the way is published with the ref and goes to the tag check, an inner tag of a
 # nested one as much as the outer. A ref that ends in a commit goes on to
 # rev-list with that commit. tags lists each tag object once - "oid N ref",
 # its content, with any NUL turned into \001, in tag.N; objects lists the
@@ -297,11 +301,9 @@ new_commits() {
 # or "tag" - for the finding below.
 # An object this clone cannot type or read stops the push here: what a ref
 # publishes has to be known before anything about it can be checked.
-for f in commitrefs tags objects; do
-  true >"$work/$f" || refuse "$cannot_write"
-done
-n_tags=0
+n_tags=0; n_commitrefs=0; n_objects=0; n_classified=0
 while read -r local_oid remote_oid remote_ref; do
+  n_classified=$((n_classified + 1))
   obj="$local_oid"; via=direct
   type="$(git cat-file -t "$obj" 2>/dev/null </dev/null)" \
     || refuse "could not read the type of $obj, pushed to $remote_ref."
@@ -316,36 +318,52 @@ while read -r local_oid remote_oid remote_ref; do
       # A NUL would end a line early in some seds; it never matches a shape.
       tr '\000' '\001' <"$work/tag.raw" >"$work/tag.$n_tags" \
         || refuse "could not prepare tag object $obj, pushed to $remote_ref, for reading."
-      printf '%s %s %s\n' "$obj" "$n_tags" "$remote_ref" >>"$work/tags"
+      # tr maps byte for byte, so the copy has to be as long as the object.
+      [ "$(wc -c <"$work/tag.raw" | tr -d ' ')" = "$(wc -c <"$work/tag.$n_tags" | tr -d ' ')" ] \
+        || refuse "could not copy tag object $obj, pushed to $remote_ref, whole."
+      note tags '%s %s %s\n' "$obj" "$n_tags" "$remote_ref"
       tagfile="$work/tag.$n_tags"
     else
       tagfile="$work/tag.$(LC_ALL=C sed -n "s/^$obj \\([0-9]*\\) .*/\\1/p" "$work/tags")"
     fi
     obj="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^object //p' "$tagfile")"
+    # A full object id, as git reads it; git would resolve an abbreviation
+    # here that a push cannot send.
     case "$obj" in
       '' | *[!0-9a-f]*) refuse "a tag object pushed to $remote_ref names no object it points at." ;;
     esac
+    [ "${#obj}" = "${#zero}" ] \
+      || refuse "a tag object pushed to $remote_ref names its object by an abbreviated id."
     type="$(git cat-file -t "$obj" 2>/dev/null </dev/null)" \
       || refuse "could not read the type of $obj, which a tag pushed to $remote_ref points at."
   done
   case "$type" in
-    commit) printf '%s %s\n' "$obj" "$remote_oid" >>"$work/commitrefs" ;;
-    blob | tree) printf '%s %s %s %s\n' "$type" "$obj" "$remote_ref" "$via" >>"$work/objects" ;;
+    commit) note commitrefs '%s %s\n' "$obj" "$remote_oid"; n_commitrefs=$((n_commitrefs + 1)) ;;
+    blob | tree) note objects '%s %s %s %s\n' "$type" "$obj" "$remote_ref" "$via"; n_objects=$((n_objects + 1)) ;;
     *) refuse "$remote_ref points at a $type, which this hook does not know how to read." ;;
   esac
 done <"$work/ranges" || refuse "could not read back the ref list."
 # As for the ref list: a line that could not be written down - under a file
-# size limit, say - would leave a ref or a tag object unread.
-n_sorted=$(( $(wc -l <"$work/commitrefs") + $(wc -l <"$work/objects") ))
+# size limit, say - would leave a ref or a tag object unread. And a loop over
+# a list that is gone or is a directory ends as at its last line, with no
+# error, so each loop over these lists counts the lines it read.
+n_cr_written="$(wc -l <"$work/commitrefs" | tr -d ' ')"
+n_ob_written="$(wc -l <"$work/objects" | tr -d ' ')"
 n_tags_written="$(wc -l <"$work/tags" | tr -d ' ')"
-[ "$n_sorted" = "$n_ranges" ] && [ "$n_tags_written" = "$n_tags" ] || refuse \
-  "wrote down $n_sorted of $n_ranges ref(s) and ${n_tags_written:-no} of $n_tags tag object(s) to check."
+[ "$n_classified" = "$n_ranges" ] || refuse \
+  "read back $n_classified of $n_ranges ref line(s) to check."
+[ "$n_cr_written" = "$n_commitrefs" ] && [ "$n_ob_written" = "$n_objects" ] \
+  && [ "$n_tags_written" = "$n_tags" ] || refuse \
+  "wrote down ${n_cr_written:-no} of $n_commitrefs commit ref(s), ${n_ob_written:-no} of $n_objects blob or tree ref(s) and ${n_tags_written:-no} of $n_tags tag object(s) to check."
 
 true >"$work/commits" || refuse "$cannot_write"
+n_read=0
 while read -r local_oid remote_oid; do
+  n_read=$((n_read + 1))
   new_commits "$local_oid" "$remote_oid" >>"$work/commits" </dev/null \
     || refuse "git rev-list failed for $local_oid."
-done <"$work/commitrefs" || refuse "could not read back the refs that end in a commit."
+done <"$work/commitrefs" || refuse "could not read back the commit refs."
+[ "$n_read" = "$n_commitrefs" ] || refuse "read back $n_read of $n_commitrefs commit ref(s)."
 sort -u -o "$work/commits" "$work/commits" || refuse "could not sort the commit list."
 n_commits="$(wc -l <"$work/commits" | tr -d ' ')"
 n_refs="$(wc -l <"$work/ranges" | tr -d ' ')"
@@ -356,6 +374,11 @@ elif [ -n "$untrusted" ]; then
 else
   scope="no configured remote was named, so only commits at the remote's old tip are not re-checked"
 fi
+
+# --- the declared identities, for the tagger check and check 1 ---------------
+printf '%s <%s>\n' "$me_name" "$me_mail" >"$work/allowed" || refuse "$cannot_write"
+git config --get-all imprint.allowedIdentity >>"$work/allowed" 2>/dev/null; rc=$?
+[ "$rc" -le 1 ] || refuse "git config could not read imprint.allowedIdentity."
 
 # --- the shapes --------------------------------------------------------------
 shapes() {
@@ -368,7 +391,7 @@ SHAPES
 }
 n_shapes="$(shapes | wc -l | tr -d ' ')"
 case "$n_shapes" in '' | 0 | *[!0-9]*) refuse "found no shapes to check." ;; esac
-# Every shape loop below reads this file in the main shell, not from a pipe: a
+# Both shape loops below read this file in the main shell, not from a pipe: a
 # piped loop runs in a subshell, which has none of the traps above, and a signal
 # that ended it alone would leave the remaining shapes unrun while the hook went
 # on to report no findings. Each loop counts the shapes it finished, and fewer
@@ -385,58 +408,75 @@ nl='
 # NAME, whose pattern is PATTERN, into hits as "N:line", in the order of N.
 # Returns 0 when there are any and 1 when there are none. A grep or a merge
 # that failed returns 2, and is written to the errors file, naming FILE as
-# WHERE.
+# WHERE. The two checks that read commits use it; the tag check below does the
+# same in its own loop.
 #
-# Each shape is matched twice. Under your own locale, since a pattern holds
-# characters outside ASCII; and under C, since a byte that is not valid in your
+# Each shape is matched twice: under your own locale, since a pattern holds
+# characters outside ASCII, and under C, since a byte that is not valid in your
 # locale's encoding matches no bracket expression there - not even [^0-9]. A
-# Latin-1 no-break space before a phone number hid it from a UTF-8 locale and
-# not from C (measured with GNU grep, 2026-10-01). A line either grep finds is
-# a hit, and sort merges the two lists, each line number once.
+# Latin-1 no-break space before a phone number in an added line hid it from a
+# UTF-8 locale and not from C (measured with GNU grep, 2026-10-01). A line
+# either grep finds is a hit, and sort merges the two lists, each line number
+# once.
+#
+# In bash and busybox sh a redirection that fails returns 1, which is also
+# grep's "no line matched": a hit file or greperr that cannot be opened - the
+# file table full, or a directory in its place - would read as a clean shape.
+# So every redirection sits on a group around grep, which then does not run at
+# all, and grep's own exit status leaves the group through greprc, written
+# only once grep has run. A greprc that is missing or holds anything but one
+# number is a grep that could not run.
 grep_both() {
-  gb_name="$1"; gb_pattern="$2"; gb_file="$3"; gb_where="$4"
-  grep -a -n -E "$gb_pattern" "$gb_file" >"$work/hits.own" 2>"$work/greperr" </dev/null
-  gb_own=$?
-  LC_ALL=C grep -a -n -E "$gb_pattern" "$gb_file" >"$work/hits.c" 2>>"$work/greperr" </dev/null
-  gb_c=$?
-  if [ "$gb_own" -gt 1 ] || [ "$gb_c" -gt 1 ]; then
-    note errors 'grep could not read %s: %s\n' "$gb_where" "$(cat "$work/greperr")"
-    return 2
-  fi
-  # 0 means a line matched, and -n writes at least its number: an empty file
-  # is a write that failed, which busybox grep does not report in its exit.
-  if { [ "$gb_own" -eq 0 ] && [ ! -s "$work/hits.own" ]; } \
-    || { [ "$gb_c" -eq 0 ] && [ ! -s "$work/hits.c" ]; }; then
-    note errors 'grep matched %s in %s but wrote no hit down\n' "$gb_name" "$gb_where"
-    return 2
-  fi
-  [ "$gb_own" -eq 0 ] || [ "$gb_c" -eq 0 ] || return 1
+  gb_name="$1"; gb_pattern="$2"; gb_file="$3"; gb_where="$4"; gb_state=clean
+  for gb_loc in own c; do
+    rm -f "$work/greprc" || refuse "could not clear the file grep's exit status goes to."
+    if [ "$gb_loc" = c ]; then
+      { LC_ALL=C grep -a -n -E "$gb_pattern" "$gb_file"; printf '%s\n' "$?" >"$work/greprc"; } \
+        </dev/null >"$work/hits.c" 2>"$work/greperr"
+    else
+      { grep -a -n -E "$gb_pattern" "$gb_file"; printf '%s\n' "$?" >"$work/greprc"; } \
+        </dev/null >"$work/hits.own" 2>"$work/greperr"
+    fi
+    gb_rc="$(cat "$work/greprc" 2>/dev/null)" || gb_rc=''
+    case "$gb_rc" in '' | *[!0-9]*) gb_rc='' ;; esac
+    if [ -z "$gb_rc" ]; then
+      note errors 'could not run grep for %s over %s\n' "$gb_name" "$gb_where"
+      return 2
+    elif [ "$gb_rc" -gt 1 ]; then
+      note errors 'grep could not read %s: %s\n' "$gb_where" "$(cat "$work/greperr")"
+      return 2
+    elif [ "$gb_rc" -eq 0 ] && [ ! -s "$work/hits.$gb_loc" ]; then
+      # 0 means a line matched, and -n writes at least its number: an empty
+      # file is a write that failed, which busybox grep does not report in
+      # its exit.
+      note errors 'grep matched %s in %s but wrote no hit down\n' "$gb_name" "$gb_where"
+      return 2
+    elif [ "$gb_rc" -eq 0 ]; then
+      gb_state=hit
+    fi
+  done
+  [ "$gb_state" = hit ] || return 1
   if ! LC_ALL=C sort -u -t: -k1,1n "$work/hits.own" "$work/hits.c" >"$work/hits" 2>"$work/greperr"; then
     note errors 'sort could not merge the %s hits in %s: %s\n' "$gb_name" "$gb_where" "$(cat "$work/greperr")"
     return 2
   fi
   # Every line either grep wrote has to be in the merged list, byte for byte;
   # one that is not is a write that failed. grep -v exits 1 when it selects
-  # nothing, which is the one answer that lets the hits through. An empty list
-  # is refused first: busybox grep reads an empty -f file as one empty pattern.
+  # nothing, which is the one answer that lets the hits through, and it runs
+  # with no redirection that could fail into that 1. An empty list is refused
+  # first: busybox grep reads an empty -f file as one empty pattern.
   if [ ! -s "$work/hits" ]; then
     note errors 'sort lost some of the %s hits in %s while merging them\n' "$gb_name" "$gb_where"
     return 2
   fi
   for gb_part in hits.own hits.c; do
-    LC_ALL=C grep -Fxqv -f "$work/hits" "$work/$gb_part" </dev/null
+    LC_ALL=C grep -Fxqv -f "$work/hits" "$work/$gb_part"
     [ "$?" -eq 1 ] && continue
     note errors 'sort lost some of the %s hits in %s while merging them\n' "$gb_name" "$gb_where"
     return 2
   done
   return 0
 }
-
-# The declared identities, written down before the first check that reads
-# them: the tagger of a tag is held to them as much as the author of a commit.
-printf '%s <%s>\n' "$me_name" "$me_mail" >"$work/allowed" || refuse "$cannot_write"
-git config --get-all imprint.allowedIdentity >>"$work/allowed" 2>/dev/null; rc=$?
-[ "$rc" -le 1 ] || refuse "git config could not read imprint.allowedIdentity."
 
 # --- annotated tags: the tagger, and the rest of the object -------------------
 # A tag object is published with the ref that leads to it, and it carries what
@@ -451,60 +491,117 @@ git config --get-all imprint.allowedIdentity >>"$work/allowed" 2>/dev/null; rc=$
 # whatever follows the tagger's identity on its line. The header ends at the
 # first empty line, as git reads it, and a tag that has none is header to its
 # last byte; git then reads no message from it, but the bytes are published all
-# the same. A part this hook skipped would be a place to hide a line in. A tag
-# object is raw bytes that git does not re-encode, which is why grep_both
-# matches it under C as well.
+# the same. A part this hook skipped would be a place to hide a line in.
+#
+# Each shape is matched twice: under your own locale, since a pattern holds
+# characters outside ASCII, and under C, since a tag object is raw bytes that
+# git does not re-encode, and a byte that is not valid in your locale's
+# encoding matches no bracket expression there - not even [^0-9]. A Latin-1
+# no-break space before a phone number hid it from a UTF-8 locale and not from
+# C (measured with GNU grep, 2026-10-01). A line either grep finds is a hit.
+# Both greps run in the group the other shape loops use, for the same reason.
 #
 # A tag object the remote already holds, pushed again under another name or
 # inside a nested tag, is read again: tags have no tracking refs that would say
 # what the remote has.
 if [ "$n_tags" -gt 0 ]; then
-  true >"$work/taggers.undeclared" || refuse "$cannot_write"
-  # Every sed over the object runs under C: in a UTF-8 locale GNU sed's .*
-  # stops at a byte that is not valid UTF-8, and a tagger named in Latin-1
-  # could not be read, nor its identity left out of the shapes (measured with
-  # GNU sed, 2026-10-01).
+  n_tags_read=0
   while read -r t_oid t_n t_ref; do
+    n_tags_read=$((n_tags_read + 1))
     t_file="$work/tag.$t_n"
-    t_name="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^tag //p' "$t_file" | sed -n 1p)"
+    # The tag object's own bytes are read under C: in a UTF-8 locale a byte
+    # that is not valid there - a Latin-1 name, say - matches no `.`, and the
+    # tagger's identity would neither be read nor be cut out of what is
+    # matched below.
+    t_name="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^tag //p' "$t_file" | LC_ALL=C sed -n 1p)"
     [ -n "$t_name" ] || t_name="$t_oid"
-    LC_ALL=C sed -n -e '/^$/q' -e 's/^tagger //p' "$t_file" >"$work/taggers" || {
-      note errors 'sed could not read the tagger of tag %s\n' "$t_name"
-      continue
-    }
-    [ -s "$work/taggers" ] || note findings \
-      'no tagger: tag %s names nobody as its tagger, so no declared identity\n' "$t_name"
-    # The `|| [ -n ... ]` catches a last line with no newline after it, as on
-    # the ref list above: sed keeps a missing final newline as it found it.
-    t_line=''
-    while IFS= read -r t_line || [ -n "$t_line" ]; do
-      t_id="$(printf '%s\n' "$t_line" | LC_ALL=C sed -n 's/^\(.*>\).*$/\1/p')"
-      if [ -z "$t_id" ]; then
-        note errors 'could not read the tagger of tag %s as "Name <address>"\n' "$t_name"
-      elif ! grep -Fxq -- "$t_id" "$work/allowed"; then
-        note findings 'undeclared identity: %s, tagger of tag %s\n' "$t_id" "$t_name"
-        note taggers.undeclared '%s\n' "$t_id"
+    # The tagger lines are held in a variable, not a file: nothing can swap a
+    # variable for a directory between writing and reading it.
+    if t_taggers="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^tagger //p' "$t_file")"; then
+      if [ -z "$t_taggers" ]; then
+        note findings 'no tagger: tag %s names nobody as its tagger, so no declared identity\n' "$t_name"
+      else
+        # A here-document the shell could not make would leave the loop
+        # unrun, so the lines it read are counted against those sed found.
+        t_ntaggers="$(printf '%s\n' "$t_taggers" | wc -l | tr -d ' ')"; n_read=0
+        while IFS= read -r t_line; do
+          n_read=$((n_read + 1))
+          t_id="$(printf '%s\n' "$t_line" | LC_ALL=C sed -n 's/^\(.*>\).*$/\1/p')"
+          if [ -z "$t_id" ]; then
+            note errors 'could not read the tagger of tag %s as "Name <address>"\n' "$t_name"
+            continue
+          fi
+          LC_ALL=C grep -Fxq -- "$t_id" "$work/allowed"; rc=$?
+          if [ "$rc" -eq 1 ]; then
+            note findings 'undeclared identity: %s, tagger of tag %s\n' "$t_id" "$t_name"
+            note taggers.undeclared '%s\n' "$t_id"
+          elif [ "$rc" -gt 1 ]; then
+            note errors 'grep could not read the declared identities for the tagger of tag %s\n' "$t_name"
+          fi
+        done <<TAGGERS
+$t_taggers
+TAGGERS
+        [ "$n_read" = "$t_ntaggers" ] || note errors \
+          'read %s of %s tagger line(s) of tag %s\n' "$n_read" "${t_ntaggers:-?}" "$t_name"
       fi
-      t_line=''
-    done <"$work/taggers" || refuse "could not read back the tagger of tag $t_name."
+    else
+      note errors 'sed could not read the tagger of tag %s\n' "$t_name"
+    fi
     # The object as it is, but for the identity on each tagger line of the
     # header, checked above; line numbers stay those of the object.
-    LC_ALL=C sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext" || {
+    if LC_ALL=C sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext"; then
+      n_done=0
+      while IFS="$tab" read -r name pattern; do
+        t_state=clean
+        for t_loc in own C; do
+          rm -f "$work/greprc" || refuse "could not clear the file grep's exit status goes to."
+          if [ "$t_loc" = C ]; then
+            { LC_ALL=C grep -a -n -E "$pattern" "$work/tagtext"; printf '%s\n' "$?" >"$work/greprc"; } \
+              </dev/null >"$work/thits.C" 2>"$work/greperr"
+          else
+            { grep -a -n -E "$pattern" "$work/tagtext"; printf '%s\n' "$?" >"$work/greprc"; } \
+              </dev/null >"$work/thits.own" 2>"$work/greperr"
+          fi
+          rc="$(cat "$work/greprc" 2>/dev/null)" || rc=''
+          case "$rc" in '' | *[!0-9]*) rc='' ;; esac
+          if [ -z "$rc" ]; then
+            note errors 'could not run grep for %s over tag %s\n' "$name" "$t_name"
+            t_state=error
+          elif [ "$rc" -gt 1 ]; then
+            note errors 'grep could not read tag %s: %s\n' "$t_name" "$(cat "$work/greperr")"
+            t_state=error
+          elif [ "$rc" -eq 0 ] && [ ! -s "$work/thits.$t_loc" ]; then
+            note errors 'grep matched %s in tag %s but wrote no hit down\n' "$name" "$t_name"
+            t_state=error
+          elif [ "$rc" -eq 0 ] && [ "$t_state" = clean ]; then
+            t_state=hit
+          fi
+        done
+        if [ "$t_state" = hit ]; then
+          if ! LC_ALL=C sort -u -t: -k1,1n "$work/thits.own" "$work/thits.C" >"$work/thits"; then
+            note errors 'sort could not merge the %s hits in tag %s\n' "$name" "$t_name"
+          elif [ ! -s "$work/thits" ]; then
+            # Either grep wrote a hit down, so the merge cannot be empty.
+            note errors 'sort merged the %s hits in tag %s into nothing\n' "$name" "$t_name"
+          else
+            n_hits="$(wc -l <"$work/thits" | tr -d ' ')"; n_read=0
+            while IFS= read -r hit; do
+              n_read=$((n_read + 1))
+              note findings '%s in tag %s: %s\n' "$name" "$t_name" "$hit"
+            done <"$work/thits" || refuse "could not read back the hits in tag $t_name."
+            [ "$n_read" = "$n_hits" ] || note errors \
+              'read back %s of %s %s hit(s) in tag %s\n' "$n_read" "${n_hits:-?}" "$name" "$t_name"
+          fi
+        fi
+        n_done=$((n_done + 1))
+      done <"$work/shapes" || refuse "could not read back the shapes."
+      [ "$n_done" = "$n_shapes" ] || note errors \
+        'ran %s of %s shape(s) over tag %s\n' "$n_done" "$n_shapes" "$t_name"
+    else
       note errors 'sed could not read tag %s\n' "$t_name"
-      continue
-    }
-    n_done=0
-    while IFS="$tab" read -r name pattern; do
-      if grep_both "$name" "$pattern" "$work/tagtext" "tag $t_name"; then
-        while IFS= read -r hit; do
-          note findings '%s in tag %s: %s\n' "$name" "$t_name" "$hit"
-        done <"$work/hits" || refuse "could not read back the hits in tag $t_name."
-      fi
-      n_done=$((n_done + 1))
-    done <"$work/shapes"
-    [ "$n_done" = "$n_shapes" ] || note errors \
-      'ran %s of %s shape(s) over tag %s\n' "$n_done" "$n_shapes" "$t_name"
+    fi
   done <"$work/tags" || refuse "could not read back the tag list."
+  [ "$n_tags_read" = "$n_tags" ] || refuse "read back $n_tags_read of $n_tags tag object(s)."
   n_tag_undeclared="$(sort -u "$work/taggers.undeclared" | wc -l | tr -d ' ')"
   note ran 'annotated tags - the tagger, and %s shape(s) over the rest of the object, for %s tag object(s); %s undeclared tagger(s)\n' \
     "$n_shapes" "$n_tags" "$n_tag_undeclared"
@@ -516,13 +613,15 @@ fi
 # A ref may point straight at a blob or a tree, or at a tag that ends in one.
 # A local bare repository took a blob under refs/tags/ and a tree under a
 # namespace of its own, and refused a blob under refs/heads/ (measured with
-# git 2.55.0, 2026-10-01). Its content is not read here: a blob or a
-# tree carries no history to tell new lines from published ones, so every line
-# in it would count as new. Such a ref is a finding instead (the owner's call,
+# git 2.55.0, 2026-10-01). Its content is not read here: a blob or a tree
+# carries no history to tell new lines from published ones, so every line in it
+# would count as new. Such a ref is a finding instead (the owner's call,
 # 2026-10-01): IMPRINT_PUSH_ANYWAY with a reason is the loud way to push one on
 # purpose.
-if [ -s "$work/objects" ]; then
+if [ "$n_objects" -gt 0 ]; then
+  n_read=0
   while read -r o_type o_oid o_ref o_via; do
+    n_read=$((n_read + 1))
     if [ "$o_via" = tag ]; then
       note findings 'unread content: the tag pushed to %s ends in %s %s, and this hook does not read a %s\n' \
         "$o_ref" "$o_type" "$o_oid" "$o_type"
@@ -530,9 +629,9 @@ if [ -s "$work/objects" ]; then
       note findings 'unread content: %s points straight at %s %s, and this hook does not read a %s\n' \
         "$o_ref" "$o_type" "$o_oid" "$o_type"
     fi
-  done <"$work/objects" || refuse "could not read back the refs that end in a blob or a tree."
-  note ran 'refs to a blob or a tree - %s ref(s), each a finding, its content unread\n' \
-    "$(wc -l <"$work/objects" | tr -d ' ')"
+  done <"$work/objects" || refuse "could not read back the refs to a blob or a tree."
+  [ "$n_read" = "$n_objects" ] || refuse "read back $n_read of $n_objects ref(s) to a blob or a tree."
+  note ran 'refs to a blob or a tree - %s ref(s), each a finding, its content unread\n' "$n_objects"
 fi
 
 # report - says what ran, what was skipped and what was found, and ends the
@@ -548,10 +647,9 @@ report() {
   fi
   say "pre-push:   not checked by anything here: whether the prose is abstract."
 
-  # A check that could not run is not a check that passed, and no override
-  # covers it: "I could not look" and "I looked and found nothing" must never
-  # share an exit. The verdict reads a missing file as an empty one, so both
-  # have to be there.
+  # A check that could not run is not a check that passed, and no override covers
+  # it: "I could not look" and "I looked and found nothing" must never share an exit.
+  # The verdict reads a missing file as an empty one, so both have to be there.
   [ -f "$work/errors" ] && [ -f "$work/findings" ] || refuse \
     "the files the checks report into are gone, so the checks could not run."
   if [ -s "$work/errors" ]; then
@@ -588,7 +686,7 @@ report() {
 # git 2.55.0, 2026-10-01). With no tag object and no blob or tree either,
 # nothing at all was read.
 if [ "$n_commits" -eq 0 ]; then
-  if [ "$n_tags" -eq 0 ] && [ ! -s "$work/objects" ]; then
+  if [ "$n_tags" -eq 0 ] && [ "$n_objects" -eq 0 ]; then
     say "pre-push: $n_refs ref(s), 0 new commit(s), 0 tag object(s); $scope."
     say "pre-push: checks that ran: none needed."
     say "pre-push:   skipped: declared identity, tracked content, commit messages - no new commit, so no commit identity, added line or commit message to check"
@@ -618,16 +716,21 @@ n_enc="$(wc -l <"$work/encodings" | tr -d ' ')"
 [ "$n_enc" = "$n_commits" ] || refuse \
   "git log listed encodings for ${n_enc:-none} of $n_commits new commit(s)."
 true >"$work/rawcommits" || refuse "$cannot_write"
-n_raw=0
+n_raw=0; n_read=0
 while read -r e_oid e_short e_enc; do
+  n_read=$((n_read + 1))
   case "$e_enc" in '' | [Uu][Tt][Ff]-8 | [Uu][Tt][Ff]8) continue ;; esac
   n_raw=$((n_raw + 1))
   git cat-file commit "$e_oid" >"$work/raw.tmp" 2>/dev/null </dev/null \
     || refuse "could not read commit $e_oid as stored."
   tr '\000' '\001' <"$work/raw.tmp" >"$work/raw.$n_raw" \
     || refuse "could not prepare commit $e_oid for reading as stored."
+  # tr maps byte for byte, so the copy has to be as long as the object.
+  [ "$(wc -c <"$work/raw.tmp" | tr -d ' ')" = "$(wc -c <"$work/raw.$n_raw" | tr -d ' ')" ] \
+    || refuse "could not copy commit $e_oid whole."
   note rawcommits '%s %s %s\n' "$e_oid" "$n_raw" "$e_short"
 done <"$work/encodings" || refuse "could not read back the encodings of the new commits."
+[ "$n_read" = "$n_commits" ] || refuse "read back $n_read of $n_commits encoding(s)."
 
 # --- check 1: every author and committer is a declared identity --------------
 # A committer may also be GitHub's web-flow identity, which a merge through the
@@ -646,8 +749,8 @@ note committers '%s\n' "$web_flow"
 # i18n.commitEncoding when that is unset (measured with git 2.55.0,
 # 2026-10-01). A declared name outside ASCII, printed in Latin-1, would no
 # longer equal the UTF-8 one in the declared list, so git is asked for UTF-8,
-# which is what git config holds. An identity of a commit read as stored as
-# well (above) is declared when either reading of it is.
+# which is what git config holds. An author or committer of a commit read as
+# stored as well (above) is declared when either reading of it is.
 git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%H A %an <%ae>%n%H C %cn <%ce>' \
   <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
 true >"$work/undeclared" || refuse "$cannot_write"
@@ -910,12 +1013,15 @@ note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
 git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%h|%s%n%b' \
   <"$work/commits" >"$work/messages" \
   || refuse "git log failed reading the messages of the new commits."
+n_read=0
 while read -r r_oid r_n r_short; do
+  n_read=$((n_read + 1))
   note messages '%s as stored|' "$r_short"
   LC_ALL=C sed '1,/^$/d' "$work/raw.$r_n" >>"$work/messages" \
     || refuse "could not write down the message of $r_oid as stored."
   note messages '\n'
 done <"$work/rawcommits" || refuse "could not read back the commits read as stored."
+[ "$n_read" = "$n_raw" ] || refuse "read back $n_read of $n_raw commit(s) read as stored."
 n_done=0
 while IFS="$tab" read -r name pattern; do
   if grep_both "$name" "$pattern" "$work/messages" "the commit messages"; then
