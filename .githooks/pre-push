@@ -608,10 +608,10 @@ fi
 # and the conversion turns each character outside ASCII into two that no
 # pattern and no declared name holds. git log --format converts even under
 # --encoding=none (both measured with git 2.55.0, 2026-10-01), so the object
-# of such a commit is read as well, and checks 1 and 3 read it both ways. A commit with no encoding header, or
-# one that names UTF-8, git prints as stored already. rawcommits lists
-# "oid N short" for each commit read so, and raw.N holds its object, with any
-# NUL turned into \001.
+# of such a commit is read as well, and checks 1 and 3 read it both ways. A
+# commit with no encoding header, or one that names UTF-8, git prints as stored
+# already. rawcommits lists "oid N short" for each commit read so, and raw.N
+# holds its object, with any NUL turned into \001.
 git log --no-walk=unsorted --stdin --format='%H %h %e' <"$work/commits" >"$work/encodings" \
   || refuse "git log failed reading the encodings of the new commits."
 n_enc="$(wc -l <"$work/encodings" | tr -d ' ')"

@@ -37,10 +37,10 @@ whatever encoding a commit's header names, and the header can be wrong. With
 Latin-1 header, and the conversion turns the same umlaut into two characters that neither
 match finds. `git log --format` converts even under `--encoding=none`, so a commit whose header
 names an encoding other than UTF-8 is also read straight from its object: its message is
-matched as stored too, and an identity of it counts as declared when either reading does, as
-long as its header holds one author line and one committer line (*measured with git 2.55.0,
-2026-10-01*). A tag object is read byte for byte throughout, so a tagger whose
-name is stored in Latin-1 is read as written.
+matched as stored too, and its author or committer counts as declared when either reading
+does — the stored one only when the header holds a single line for that role, since git shows
+the last of several (*measured with git 2.55.0, 2026-10-01*). A tag object is read byte for
+byte throughout, so a tagger whose name is stored in Latin-1 is read as written.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
