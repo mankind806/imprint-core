@@ -20,14 +20,17 @@ messages are checked alongside the added lines, since a message is as public as 
 trailers are where addresses ride in. A committer may also be GitHub's web-flow identity, the
 one a merge through the web UI records; as an author it is still undeclared.
 
-An annotated tag is read as well, since it carries what a commit carries. Its tagger has to
-be a declared identity, as an author has to, and its message is checked against the same
-shapes, a signature block included. A pushed ref is followed through every tag object it
-leads to, so the tags inside a nested tag are read as well as the outer one; where the chain
-ends in a commit, that commit's new history is checked as for any branch. A new tag on a
-commit the remote already has adds no commit, and its tag object is still read. Tags have no
-tracking refs, so a tag object the remote already holds is read again when it is pushed under
-another name or inside another tag.
+An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
+a declared identity, as an author has to, and a tag that names no tagger is a finding.
+Everything else in the tag object is checked against the same shapes: the message, a signature
+block, the tag's name, any other header line, and whatever follows the tagger's identity on its
+line. That includes a tag whose header never ends in an empty line, from which git itself reads
+no message although its bytes are published. A pushed ref is followed through every tag object
+it leads to, so the tags inside a nested tag are read as well as the outer one; where the chain
+ends in a commit, that commit's new history is checked as for any branch. A new tag on a commit
+the remote already has adds no commit, and its tag object is still read. Tags have no tracking
+refs, so a tag object the remote already holds is read again when it is pushed under another
+name or inside another tag.
 
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:
@@ -79,15 +82,15 @@ not reach is checked, as for a push to a location.
 
 A ref that points straight at a blob or a tree, or at a tag that ends in one, is refused
 unread, as a finding. Git takes such a ref: a local bare repository accepted a blob under
-`refs/tags/` and a tree under a namespace of its own, and refused a blob only under
-`refs/heads/` (*measured with git 2.55.0, 2026-10-01; what a hosted remote accepts was not
-checked*). A blob or a tree carries no history that would tell its new lines from published
-ones.
+`refs/tags/` and a tree under a namespace of its own, and refused a blob under `refs/heads/`
+(*measured with git 2.55.0, 2026-10-01; what a hosted remote accepts was not checked*). A blob
+or a tree carries no history that would tell its new lines from published ones.
 `IMPRINT_PUSH_ANYWAY` with a reason is the way to push one on purpose (the owner's call,
-2026-10-01). The names of refs are not read at all: a branch or tag name, and the name a tag
-object carries, pass whatever they hold. And the hook diffs lines, with no copy
-detection, so lines copied or moved into another file are reported again even though they are
-already published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
+2026-10-01). The names of refs are not read at all: a branch name, or the name of a tag without
+a tag object, passes whatever it holds; an annotated tag's name is read only as a line of its
+tag object. And the hook diffs lines, with no copy detection, so lines copied or moved into
+another file are reported again even though they are already published; `IMPRINT_PUSH_ANYWAY`
+with a reason is the way past that.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in

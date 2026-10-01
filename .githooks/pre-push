@@ -8,12 +8,12 @@
 # whose new commits add a line, or carry a message, that matches a shape that
 # personal data takes - phone numbers, bank account numbers and postal
 # addresses in the formats the patterns below spell out. An annotated tag is
-# held to the same: its tagger has to be a declared identity, and its message
-# must not match a shape. A ref that ends in a blob or a tree is refused
-# unread.
+# held to the same: its tagger has to be a declared identity, and nothing else
+# in it - the message above all - may match a shape. A ref that ends in a blob
+# or a tree is refused unread.
 #
 # WHAT IT READS. The new commits, and of their content only the lines they
-# add; and every tag object a pushed ref leads to, its tagger and its message.
+# add; and every tag object a pushed ref leads to, all of it.
 # A commit is new unless the remote's old tip for that ref reaches it, or
 # one of this clone's tracking refs for the destination remote does
 # (refs/remotes/<remote>/*, and only that remote's, and only when the push goes
@@ -175,7 +175,7 @@ new_commits() {
 # on the way is published with the ref and goes to check 4, an inner tag of a
 # nested one as much as the outer. A ref that ends in a commit goes on to
 # rev-list with that commit. tags lists each tag object once - "oid N ref",
-# its content in tag.N; objects lists the refs that end in a blob or a tree -
+# its content, with any NUL turned into \001, in tag.N; objects lists the refs that end in a blob or a tree -
 # "type oid ref via", via being "direct" or "tag" - for the finding below.
 # An object this clone cannot type or read stops the push here: what a ref
 # publishes has to be known before anything about it can be checked.
@@ -189,8 +189,11 @@ while read -r local_oid remote_oid remote_ref; do
     via=tag
     if ! grep -q "^$obj " "$work/tags"; then
       n_tags=$((n_tags + 1))
-      git cat-file tag "$obj" >"$work/tag.$n_tags" 2>/dev/null </dev/null \
+      git cat-file tag "$obj" >"$work/tag.raw" 2>/dev/null </dev/null \
         || refuse "could not read tag object $obj, pushed to $remote_ref."
+      # A NUL would end a line early in some seds; it never matches a shape.
+      tr '\000' '\001' <"$work/tag.raw" >"$work/tag.$n_tags" \
+        || refuse "could not prepare tag object $obj, pushed to $remote_ref, for reading."
       printf '%s %s %s\n' "$obj" "$n_tags" "$remote_ref" >>"$work/tags"
       tagfile="$work/tag.$n_tags"
     else
@@ -238,32 +241,40 @@ SHAPES
 n_shapes="$(shapes | wc -l | tr -d ' ')"
 tab="$(printf '\t')"
 
-# --- annotated tags: the tagger and the message ------------------------------
+# --- annotated tags: the tagger, and the rest of the object -------------------
 # A tag object is published with the ref that leads to it, and it carries what
 # a commit carries: an identity and a message. The tagger has to be a declared
 # identity, as an author has to; GitHub's web-flow identity is let in as the
-# committer of a merge and nowhere else. A tagger line that does not end its
-# identity in "<...>" is not guessed at: it is a check that could not run. The
-# message is everything after the first blank line, a signature included - a
-# block this hook skipped would be a place to hide a line in. A tag object the
-# remote already holds, pushed again under another name or inside a nested tag,
-# is read again: tags have no tracking refs that would say what the remote has.
+# committer of a merge and nowhere else. A tag with no tagger names no declared
+# identity, and that is a finding. A tagger line that does not end its identity
+# in "<...>" is not guessed at: it is a check that could not run.
+#
+# Everything else in the object is matched against the shapes, line by line:
+# the message, a signature block, the tag's name, any other header line, and
+# whatever follows the tagger's identity on its line. The header ends at the
+# first empty line, as git reads it, and a tag that has none is header to its
+# last byte; git then reads no message from it, but the bytes are published all
+# the same. A part this hook skipped would be a place to hide a line in.
+#
+# A tag object the remote already holds, pushed again under another name or
+# inside a nested tag, is read again: tags have no tracking refs that would say
+# what the remote has.
 if [ "$n_tags" -gt 0 ]; then
   : >"$work/taggers.undeclared"
   while read -r t_oid t_n t_ref; do
-    t_file="$work/tag.$t_n.t"
-    # A NUL would end a line early in some seds; it never matches a shape.
-    tr '\000' '\001' <"$work/tag.$t_n" >"$t_file" || {
-      printf 'tr could not prepare tag object %s, pushed to %s\n' "$t_oid" "$t_ref" >>"$work/errors"
-      continue
-    }
+    t_file="$work/tag.$t_n"
     t_name="$(sed -n -e '/^$/q' -e 's/^tag //p' "$t_file" | sed -n 1p)"
     [ -n "$t_name" ] || t_name="$t_oid"
     sed -n -e '/^$/q' -e 's/^tagger //p' "$t_file" >"$work/taggers" || {
       printf 'sed could not read the tagger of tag %s\n' "$t_name" >>"$work/errors"
       continue
     }
-    while IFS= read -r t_line; do
+    [ -s "$work/taggers" ] || printf \
+      'no tagger: tag %s names nobody as its tagger, so no declared identity\n' "$t_name" >>"$work/findings"
+    # The `|| [ -n ... ]` catches a last line with no newline after it, as on
+    # the ref list above: sed keeps a missing final newline as it found it.
+    t_line=''
+    while IFS= read -r t_line || [ -n "$t_line" ]; do
       t_id="$(printf '%s\n' "$t_line" | sed -n 's/^\(.*>\).*$/\1/p')"
       if [ -z "$t_id" ]; then
         printf 'could not read the tagger of tag %s as "Name <address>"\n' "$t_name" >>"$work/errors"
@@ -271,25 +282,28 @@ if [ "$n_tags" -gt 0 ]; then
         printf 'undeclared identity: %s, tagger of tag %s\n' "$t_id" "$t_name" >>"$work/findings"
         printf '%s\n' "$t_id" >>"$work/taggers.undeclared"
       fi
+      t_line=''
     done <"$work/taggers"
-    sed '1,/^$/d' "$t_file" >"$work/tagmsg" || {
-      printf 'sed could not read the message of tag %s\n' "$t_name" >>"$work/errors"
+    # The object as it is, but for the identity on each tagger line of the
+    # header, checked above; line numbers stay those of the object.
+    sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext" || {
+      printf 'sed could not read tag %s\n' "$t_name" >>"$work/errors"
       continue
     }
     shapes | while IFS="$tab" read -r name pattern; do
-      grep -a -n -E "$pattern" "$work/tagmsg" >"$work/thits" 2>"$work/greperr"
+      grep -a -n -E "$pattern" "$work/tagtext" >"$work/thits" 2>"$work/greperr"
       rc=$?
       if [ "$rc" -gt 1 ]; then
-        printf 'grep could not read the message of tag %s: %s\n' "$t_name" "$(cat "$work/greperr")" >>"$work/errors"
+        printf 'grep could not read tag %s: %s\n' "$t_name" "$(cat "$work/greperr")" >>"$work/errors"
       elif [ "$rc" -eq 0 ]; then
         while IFS= read -r hit; do
-          printf '%s in the message of tag %s: %s\n' "$name" "$t_name" "$hit" >>"$work/findings"
+          printf '%s in tag %s: %s\n' "$name" "$t_name" "$hit" >>"$work/findings"
         done <"$work/thits"
       fi
     done
   done <"$work/tags"
   n_tag_undeclared="$(sort -u "$work/taggers.undeclared" | wc -l | tr -d ' ')"
-  printf 'annotated tags - the tagger and %s shape(s) in the message, over %s tag object(s), %s undeclared tagger(s)\n' \
+  printf 'annotated tags - the tagger, and %s shape(s) over the rest of the object, for %s tag object(s); %s undeclared tagger(s)\n' \
     "$n_shapes" "$n_tags" "$n_tag_undeclared" >>"$work/ran"
 else
   printf 'annotated tags - no pushed ref leads to a tag object\n' >>"$work/skipped"
@@ -298,8 +312,8 @@ fi
 # --- refs that end in a blob or a tree ---------------------------------------
 # A ref may point straight at a blob or a tree, or at a tag that ends in one.
 # A local bare repository took a blob under refs/tags/ and a tree under a
-# namespace of its own, and refused a blob only under refs/heads/ (measured
-# with git 2.55.0, 2026-10-01). Its content is not read here: a blob or a
+# namespace of its own, and refused a blob under refs/heads/ (measured with
+# git 2.55.0, 2026-10-01). Its content is not read here: a blob or a
 # tree carries no history to tell new lines from published ones, so every line
 # in it would count as new. Such a ref is a finding instead (the owner's call,
 # 2026-10-01): IMPRINT_PUSH_ANYWAY with a reason is the loud way to push one on

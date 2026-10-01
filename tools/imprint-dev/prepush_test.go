@@ -752,7 +752,7 @@ func TestPrePushTagMessage(t *testing.T) {
 			r := r.with(t)
 			oid := r.tag(tc.name, pushed, ppAuthorName, ccTestAuthorEmail, "first line\n\n"+tc.text)
 			code, out := r.hookNewTag(tc.name, oid)
-			ppWantRefused(t, code, out, tc.shape+" in the message of tag "+tc.name+": ", tc.text,
+			ppWantRefused(t, code, out, tc.shape+" in tag "+tc.name+": ", tc.text,
 				"0 new commit(s), 1 tag object(s)")
 			ppWantChecked(t, out)
 		})
@@ -805,7 +805,7 @@ func TestPrePushNestedTag(t *testing.T) {
 		innerOid := r.tag("inner-shape", pushed, ppAuthorName, ccTestAuthorEmail, "inner, contact "+inner)
 		outerOid := r.tag("outer-shape", innerOid, ppAuthorName, ccTestAuthorEmail, "outer, clean")
 		code, out := r.hookNewTag("outer-shape", outerOid)
-		ppWantRefused(t, code, out, "address in the message of tag inner-shape: ", inner, "2 tag object(s)")
+		ppWantRefused(t, code, out, "address in tag inner-shape: ", inner, "2 tag object(s)")
 	})
 	t.Run("stranger as the inner tagger", func(t *testing.T) {
 		r := r.with(t)
@@ -867,7 +867,7 @@ func TestPrePushTagRealPush(t *testing.T) {
 	if err == nil {
 		t.Fatalf("git push succeeded, want the hook to refuse it; output:\n%s", out)
 	}
-	ppWantRefused(t, 1, out, "address in the message of tag leaky: ", leak)
+	ppWantRefused(t, 1, out, "address in tag leaky: ", leak)
 	cmd := exec.Command("git", "-C", r.origin, "rev-parse", "-q", "--verify", "refs/tags/leaky")
 	cmd.Env = ccIsolatedGitEnv()
 	if got, err := cmd.Output(); err == nil {
@@ -982,4 +982,58 @@ func TestPrePushBlobOrTreeRef(t *testing.T) {
 			t.Errorf("origin has refs/tags/blob at %s, want no such ref", strings.TrimSpace(string(got)))
 		}
 	})
+}
+
+// rawTag writes CONTENT as a tag object, as git hash-object --literally takes
+// it, and returns its id: the hook has to read tag objects that no git
+// command would write, since a push carries them all the same.
+func (r *ppRepo) rawTag(content string) string {
+	r.t.Helper()
+	cmd := exec.Command("git", "-C", r.dir, "hash-object", "-t", "tag", "-w", "--literally", "--stdin")
+	cmd.Env = ccIsolatedGitEnv()
+	cmd.Stdin = strings.NewReader(content)
+	got, err := cmd.Output()
+	if err != nil {
+		r.t.Fatalf("git hash-object: %v", err)
+	}
+	return strings.TrimSpace(string(got))
+}
+
+// 23. Everything in a tag object outside the tagger's identity is read:
+// an extra header line, a tag whose header never ends (git reads no message
+// from it), CRLF line ends, and what follows the identity on the tagger
+// line. A tagger line with no newline after it is still checked, and a tag
+// with no tagger at all is a finding.
+func TestPrePushTagObjectOutsideMessage(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	head := "object " + r.head() + "\ntype commit\n"
+	me := ppAuthorName + " <" + ccTestAuthorEmail + ">"
+	stranger := "Someone Else <" + ccTestSomeoneEmail + ">"
+	for _, tc := range []struct {
+		name, body string
+		wants      []string
+	}{
+		{"extra-header", "tagger " + me + " 1767225600 +0000\nx-note mail " + addr("extra.header", "example.invalid") + "\n\na clean message\n",
+			[]string{"address in tag extra-header: 5:", addr("extra.header", "example.invalid")}},
+		{"no-blank-line", "tagger " + me + " 1767225600 +0000\nrelease, mail " + addr("no.blank", "example.invalid") + "\n",
+			[]string{"address in tag no-blank-line: 5:", addr("no.blank", "example.invalid")}},
+		{"crlf", "tagger " + me + " 1767225600 +0000\r\n\r\nrelease, mail " + addr("crlf.lines", "example.invalid") + "\r\n",
+			[]string{"address in tag crlf: 6:", addr("crlf.lines", "example.invalid")}},
+		{"tagger-date", "tagger " + me + " " + ppPostcode + "\n\na clean message\n",
+			[]string{"postcode and place in tag tagger-date: 4:tagger " + ppPostcode}},
+		{"tagger-no-newline", "tagger " + stranger + " 1767225600 +0000",
+			[]string{"undeclared identity: " + stranger + ", tagger of tag tagger-no-newline"}},
+		{"no-tagger", "\na tag that names no tagger\n",
+			[]string{"no tagger: tag no-tagger names nobody"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawTag(head + "tag " + tc.name + "\n" + tc.body)
+			code, out := r.hookNewTag(tc.name, oid)
+			ppWantRefused(t, code, out, tc.wants...)
+			ppWantChecked(t, out)
+		})
+	}
 }
