@@ -591,14 +591,41 @@ func TestPrePushPushURLElsewhere(t *testing.T) {
 	}
 }
 
+// ppRealBin returns the absolute path of name on PATH, for a shim to forward
+// to, and skips the test when there is none.
+func ppRealBin(t *testing.T, name string) string {
+	t.Helper()
+	p, err := exec.LookPath(name)
+	if err != nil {
+		t.Skip("no " + name + " on PATH to forward to: " + err.Error())
+	}
+	if a, err := filepath.Abs(p); err == nil {
+		p = a
+	}
+	return p
+}
+
+// ppShimPATH writes body as a sh script named name into a fresh directory and
+// returns a PATH setting that puts that directory first.
+func ppShimPATH(t *testing.T, name, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return "PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
 // 11d. A check that could not run refuses the push, and IMPRINT_PUSH_ANYWAY
-// does not cover it - here with a blob missing from the object store, and
-// with an awk that fails. The new commit's message holds a shape, so a
-// finding is there for the override to wave through if it wrongly could.
+// does not cover it - here with a blob missing from the object store, with an
+// awk that fails, and with each guard against a diff, a parent list or a work
+// file that is not what the hook expects. The new commit's message holds a
+// shape, so a finding is there for the override to wave through if it wrongly
+// could; each case also names the guard that has to catch it.
 func TestPrePushCheckCouldNotRun(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
-	wantCouldNotRun := func(t *testing.T, r *ppRepo, tip string, extraEnv ...string) {
+	wantCouldNotRun := func(t *testing.T, r *ppRepo, tip string, extraEnv []string, wants ...string) {
 		t.Helper()
 		for _, anyway := range []bool{false, true} {
 			e := extraEnv
@@ -606,8 +633,70 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 				e = append(append([]string{}, extraEnv...), "IMPRINT_PUSH_ANYWAY=only a test")
 			}
 			code, out := r.hookNewBranch("broken", tip, e...)
-			ppWantRefused(t, code, out, "check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it")
+			ppWantRefused(t, code, out, append([]string{"check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it"}, wants...)...)
 		}
+	}
+	// brokenTip seeds a repository with one new commit that adds one clean
+	// line and carries a shape in its message.
+	brokenTip := func(t *testing.T, label string) (*ppRepo, string) {
+		t.Helper()
+		r := ppSeed(t, env)
+		r.git("checkout", "-q", "-b", "broken")
+		r.write("shim.txt", "a clean line the shim gets in the way of\n")
+		return r, r.commit("broken: write to " + addr(label, "example.invalid"))
+	}
+	gitBin := ppRealBin(t, "git")
+	awkBin := ppRealBin(t, "awk")
+	grepBin := ppRealBin(t, "grep")
+	// A git that corrupts one command's output, and passes every other
+	// command through.
+	gitShim := func(t *testing.T, match, run string) string {
+		return ppShimPATH(t, "git", "case \" $* \" in *\" "+match+" \"*) "+run+" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+	}
+	// An awk that runs the real one, then does after - a write that went
+	// missing without awk saying so.
+	awkShim := func(t *testing.T, after string) string {
+		return ppShimPATH(t, "awk", "'"+awkBin+"' \"$@\"; rc=$?\n"+after+"\nexit $rc\n")
+	}
+	for _, c := range []struct {
+		name  string
+		shim  func(t *testing.T) string
+		wants []string
+	}{
+		{"a hunk line that is not +, -, space or backslash", func(t *testing.T) string {
+			return gitShim(t, "diff-tree", "'"+gitBin+"' \"$@\" | '"+awkBin+"' '{ print } /^@@ / { print \"?not a diff line\" }'; exit")
+		}, []string{"into added lines"}},
+		{"git prints Binary files", func(t *testing.T) string {
+			return gitShim(t, "diff-tree", "'"+gitBin+"' \"$@\"; rc=$?; printf 'diff --git a/x.bin b/x.bin\\nBinary files a/x.bin and b/x.bin differ\\n'; exit $rc")
+		}, []string{"could not read x.bin as text"}},
+		{"a commit missing from the parent list", func(t *testing.T) string {
+			return gitShim(t, "--parents", "'"+gitBin+"' \"$@\" | sed '$d'; exit")
+		}, []string{"listed parents for 0 of 1 new commit(s)"}},
+		{"an added-line record missing", func(t *testing.T) string {
+			return awkShim(t, `if [ -n "${IMPRINT_AWKCNT:-}" ]; then n=$(cat "$IMPRINT_AWKCNT"); echo $((n + 1)) >"$IMPRINT_AWKCNT"; fi`)
+		}, []string{"wrote down 1 of 2 line(s)", " adds against "}},
+		{"a line missing from added", func(t *testing.T) string {
+			return awkShim(t, `if [ -n "${IMPRINT_ADDED:-}" ]; then sed '$d' "$IMPRINT_ADDED" >"$IMPRINT_ADDED.cut" && mv "$IMPRINT_ADDED.cut" "$IMPRINT_ADDED"; fi`)
+		}, []string{"wrote down 0 of 1 added line(s) in added"}},
+		// A grep that exits 0 and writes nothing, as busybox grep does when
+		// it cannot write its hits: 0 means a line matched, so the empty
+		// file is a write that failed, not a clean list.
+		{"a grep over the added lines that writes no hit", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */added) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}, []string{" in the added lines but wrote no hit down"}},
+		{"a grep over the commit messages that writes no hit", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */messages) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}, []string{" in the commit messages but wrote no hit down"}},
+		{"a shape loop cut short", func(t *testing.T) string {
+			// A grep that empties the shape list the loops read, while the
+			// first loop is on its first shape.
+			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */added) : >\"${last%/added}/shapes\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}, []string{"ran 1 of ", " shape(s) over the added lines", "ran 0 of ", " shape(s) over the commit messages"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, tip := brokenTip(t, "guard.shim")
+			wantCouldNotRun(t, r, tip, []string{c.shim(t)}, c.wants...)
+		})
 	}
 	t.Run("missing blob", func(t *testing.T) {
 		r := ppSeed(t, env)
@@ -624,18 +713,26 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		if err := os.Remove(filepath.Join(r.dir, "lost.txt")); err != nil {
 			t.Fatal(err)
 		}
-		wantCouldNotRun(t, r, tip)
+		wantCouldNotRun(t, r, tip, nil)
 	})
 	t.Run("awk fails", func(t *testing.T) {
-		r := ppSeed(t, env)
-		shim := t.TempDir()
-		if err := os.WriteFile(filepath.Join(shim, "awk"), []byte("#!/bin/sh\nexit 2\n"), 0o755); err != nil {
-			t.Fatal(err)
+		r, tip := brokenTip(t, "no.awk")
+		wantCouldNotRun(t, r, tip, []string{ppShimPATH(t, "awk", "exit 2\n")})
+	})
+	// The awk that puts each hit back where it came from loses its write, and
+	// exits 0 as busybox awk does when its standard output fails: only the
+	// count of findings before and after can tell. The exit 0 is forced, so
+	// this holds under an awk that would report the failure itself.
+	t.Run("a hit placed but not written", func(t *testing.T) {
+		if fi, err := os.Stat("/dev/full"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+			t.Skip("no /dev/full here to stand in for a full disk")
 		}
+		r := ppSeed(t, env)
 		r.git("checkout", "-q", "-b", "broken")
-		r.write("shim.txt", "a clean line no awk will read\n")
-		tip := r.commit("broken: write to " + addr("no.awk", "example.invalid"))
-		wantCouldNotRun(t, r, tip, "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+		r.write("lost.txt", "first line\nwrite to "+addr("lost.join", "example.invalid")+"\n")
+		tip := r.commit("broken: write to " + addr("lost.message", "example.invalid"))
+		shim := ppShimPATH(t, "awk", "if [ -n \"${IMPRINT_SHAPE:-}\" ]; then '"+awkBin+"' \"$@\" >/dev/full; exit 0; fi\nexec '"+awkBin+"' \"$@\"\n")
+		wantCouldNotRun(t, r, tip, []string{shim}, "findings went from ")
 	})
 }
 
@@ -798,6 +895,89 @@ func TestPrePushTrackingNamespaceShared(t *testing.T) {
 		ppWantRefused(t, code, out, secret, "remote origin/priv stores its refs under refs/remotes/origin/", "not trusted")
 		ppWantChecked(t, out)
 	})
+	// Refspecs on another remote that land in refs/remotes/origin/: an exact
+	// destination, the same without refs/ (git puts it in front of a
+	// destination without a glob that starts with remotes/), and a mirror,
+	// whose glob is broader than refs/remotes/origin/. pushed is the ref the
+	// private remote holds the shape under.
+	for _, c := range []struct{ name, refspec, pushed string }{
+		{"another remote's exact refspec destination", "+refs/heads/secret:refs/remotes/origin/secret", "refs/heads/secret"},
+		{"a refspec destination without refs/", "+refs/heads/secret:remotes/origin/secret", "refs/heads/secret"},
+		{"another remote's mirror refspec", "+refs/*:refs/*", "refs/remotes/origin/secret"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			secret := addr("dest.private", "example.invalid")
+			tip := privateTip(r, secret)
+			priv := r.newBare()
+			r.git("remote", "add", "priv", priv)
+			r.git("config", "--replace-all", "remote.priv.fetch", c.refspec)
+			// To the location, not the name: a push to priv would update its
+			// tracking ref without the refs/ git puts in front on a fetch, and
+			// write a file under the git directory's remotes/ folder.
+			r.pushNoVerify(priv, "secret~1:"+c.pushed)
+			r.git("fetch", "-q", "priv")
+			r.git("rev-parse", "--verify", "refs/remotes/origin/secret")
+			code, out := r.hookNewBranch("feature", tip)
+			ppWantRefused(t, code, out, secret, "remote priv fetches into refs/remotes/origin/", "not trusted")
+			ppWantChecked(t, out)
+		})
+	}
+	t.Run("a remote in the legacy remotes/ folder", func(t *testing.T) {
+		r := ppSeed(t, env)
+		secret := addr("legacy.private", "example.invalid")
+		tip := privateTip(r, secret)
+		priv := r.newBare()
+		r.pushNoVerify(priv, "secret~1:refs/heads/secret")
+		// Neither git remote nor git config shows this remote; git 2.55.0
+		// still fetches by it.
+		if err := os.MkdirAll(filepath.Join(r.dir, ".git", "remotes"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.write(filepath.Join(".git", "remotes", "priv"), "URL: "+priv+"\nPull: +refs/heads/*:refs/remotes/origin/p/*\n")
+		r.git("fetch", "-q", "priv")
+		r.git("rev-parse", "--verify", "refs/remotes/origin/p/secret")
+		code, out := r.hookNewBranch("feature", tip)
+		ppWantRefused(t, code, out, secret, "legacy remotes/ folder", "not trusted")
+		ppWantChecked(t, out)
+	})
+	// With extensions.worktreeConfig on, another worktree's config.worktree
+	// can define a remote, or point origin's own fetch elsewhere, where this
+	// worktree's git remote and git remote get-url do not see it.
+	for _, c := range []struct {
+		name  string
+		setup func(r *ppRepo, wt, priv string)
+	}{
+		{"a remote in another worktree's config.worktree", func(r *ppRepo, wt, priv string) {
+			ccRunGit(r.t, wt, "config", "--worktree", "remote.priv.url", priv)
+			ccRunGit(r.t, wt, "config", "--worktree", "remote.priv.fetch", "+refs/heads/*:refs/remotes/origin/p/*")
+			ccRunGit(r.t, wt, "fetch", "-q", "priv")
+			r.git("rev-parse", "--verify", "refs/remotes/origin/p/secret")
+		}},
+		{"insteadOf in another worktree's config.worktree", func(r *ppRepo, wt, priv string) {
+			ccRunGit(r.t, wt, "config", "--worktree", "url."+priv+".insteadOf", r.origin)
+			ccRunGit(r.t, wt, "fetch", "-q", "origin")
+			r.git("rev-parse", "--verify", "refs/remotes/origin/secret")
+			if got := r.git("remote", "get-url", "origin"); got != r.origin {
+				r.t.Fatalf("this worktree's origin fetches from %q, want %q", got, r.origin)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			secret := addr("worktree.private", "example.invalid")
+			tip := privateTip(r, secret)
+			priv := r.newBare()
+			r.pushNoVerify(priv, "secret~1:refs/heads/secret")
+			r.git("config", "extensions.worktreeConfig", "true")
+			wt := filepath.Join(t.TempDir(), "other")
+			r.git("worktree", "add", "-q", "--detach", wt, "main")
+			c.setup(r, wt, priv)
+			code, out := r.hookNewBranch("feature", tip)
+			ppWantRefused(t, code, out, secret, "extensions.worktreeConfig is on", "not trusted")
+			ppWantChecked(t, out)
+		})
+	}
 }
 
 // 17. A relative TMPDIR whose name holds "=": awk took the working files for
@@ -941,7 +1121,7 @@ func TestPrePushNULOnShapeLine(t *testing.T) {
 
 // 23. A few cases under every shell and awk found on PATH: sh, dash and
 // busybox sh, each with the default awk, mawk, busybox awk and original-awk.
-// The tag and tree cases (24-33 below) run here too, for the seds and greps
+// The tag and tree cases (28-37 below) run here too, for the seds and greps
 // those shells come with.
 // CI runs on Ubuntu, where sh is dash and awk may be mawk; the combinations
 // that ran are logged (go test -v), so the log says which were exercised. A
@@ -989,6 +1169,7 @@ func TestPrePushToolchains(t *testing.T) {
 	if len(shells) == 0 || len(awks) == 0 {
 		t.Skip("no shell or no awk on PATH")
 	}
+	grepBin := ppRealBin(t, "grep")
 
 	r := ppSeed(t, base)
 	other := addr("tc.other", "example.invalid")
@@ -1079,8 +1260,211 @@ func TestPrePushToolchains(t *testing.T) {
 				code, out = c.hookNewTag("tc-latin1", latin1, "LC_ALL=C.UTF-8")
 				ppWantRefused(t, code, out, "phone number in tag tc-latin1: 8:")
 				ppWantChecked(t, out)
+
+				// A file a shape grep writes to cannot be opened: a grep
+				// before the shape loops - the one over the declared
+				// identities - puts a directory in its place. In bash and
+				// busybox sh the failed redirection returns 1, grep's "no line
+				// matched", and every shape read as clean: "no findings" for
+				// hits and greperr, and with mhits the added line's finding
+				// alone, which IMPRINT_PUSH_ANYWAY waved through.
+				for _, f := range []struct{ file, where string }{
+					{"hits", " over the added lines"},
+					{"greperr", " over the added lines"},
+					{"mhits", " over the commit messages"},
+				} {
+					shim := t.TempDir()
+					fired := filepath.Join(t.TempDir(), "fired")
+					script := "#!/bin/sh\nfor a; do last=$a; done\n" +
+						"case \"${last:-}\" in */allowed | */committers) d=\"${last%/*}\"; [ -d \"$d/" + f.file + "\" ] || { rm -f \"$d/" + f.file + "\" && mkdir \"$d/" + f.file + "\" && : >'" + fired + "'; } ;; esac\n" +
+						"exec '" + grepBin + "' \"$@\"\n"
+					if err := os.WriteFile(filepath.Join(shim, "grep"), []byte(script), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					path := shim + string(os.PathListSeparator)
+					if env.pathDir != "" {
+						path += env.pathDir + string(os.PathListSeparator)
+					}
+					for _, anyway := range []bool{false, true} {
+						e := []string{"PATH=" + path + os.Getenv("PATH")}
+						if anyway {
+							e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+						}
+						if err := os.Remove(fired); err != nil && !errors.Is(err, os.ErrNotExist) {
+							t.Fatal(err)
+						}
+						code, out = c.hookNewBranch("leak", leakTip, e...)
+						if _, err := os.Stat(fired); err != nil {
+							t.Logf("%s ran no grep from PATH, so %s replaced by a directory was not exercised", sh.label, f.file)
+							break
+						}
+						ppWantRefused(t, code, out, "check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it",
+							"could not run grep for address"+f.where)
+						if strings.Contains(out, "no findings") {
+							t.Errorf("%s replaced by a directory: hook reports no findings; output:\n%s", f.file, out)
+						}
+					}
+				}
 			})
 		}
+	}
+}
+
+// 24. With POSIXLY_CORRECT set, GNU sort takes an option after a file operand
+// for another file, so `sort -u FILE -o FILE` refused every push. A clean new
+// commit still passes - and only through the tracking refs, since the seed
+// history holds a shape - and an added shape is still refused.
+func TestPrePushPOSIXLYCorrect(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	r.git("checkout", "-q", "-b", "posix")
+	r.write("posix.txt", "a clean line\n")
+	clean := r.commit("posix: one clean commit")
+	code, out := r.hookNewBranch("posix", clean, "POSIXLY_CORRECT=1")
+	ppWantPass(t, code, out)
+	if !strings.Contains(out, "1 new commit(s)") {
+		t.Errorf("hook report lacks %q; output:\n%s", "1 new commit(s)", out)
+	}
+	ppWantAbsent(t, out, ppSeedAddr)
+
+	leak := addr("posixly.correct", "example.invalid")
+	r.git("checkout", "-q", "-b", "posix-leak", "main")
+	r.write("leak.txt", "first line\nwrite to "+leak+"\n")
+	tip := r.commit("posix: add a contact line")
+	code, out = r.hookNewBranch("posix-leak", tip, "POSIXLY_CORRECT=1")
+	ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
+	ppWantChecked(t, out)
+}
+
+// 25. A signal ends the hook half-way. dash and busybox sh run no EXIT trap
+// then, so without a trap of its own the hook would leave its working files
+// behind and exit by the signal; it removes them and exits 1, which refuses
+// the push. The TERM comes during the last git call the hook makes, the one
+// that reads the messages: a trap that removed the files and returned would
+// let the hook run on without them, to whatever exit that happened to reach.
+// And it comes from a grep in a shape loop, which has to run in the shell that
+// holds the trap: a piped loop ran in a subshell that died alone, and the hook
+// reported no findings for the shapes it never ran - here the one shape the
+// added line holds.
+func TestPrePushSignalCleansUp(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	gitBin := ppRealBin(t, "git")
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name    string
+		content string
+		shim    func(t *testing.T) string
+	}{
+		{"a TERM during the last git call", "a clean line\n", func(t *testing.T) string {
+			return ppShimPATH(t, "git", "case \" $* \" in *\" --format=%h|%s%n%b \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+		}},
+		{"a TERM from a grep in a shape loop", "first line\nvisit " + ppPostcode + "\n", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "case \" $* \" in *\"/added \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "sig")
+			r.write("sig.txt", c.content)
+			tip := r.commit("sig: one commit")
+			tmp := t.TempDir()
+			code, out := r.hookNewBranch("sig", tip, c.shim(t), "TMPDIR="+tmp)
+			if code != 1 || strings.Contains(out, "no findings") {
+				t.Errorf("hook exit %d after a TERM, want 1 and no report of no findings; output:\n%s", code, out)
+			}
+			left, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range left {
+				t.Errorf("the hook left %s behind in TMPDIR", e.Name())
+			}
+		})
+	}
+}
+
+// 26. A line of the hook's own report that cannot be written. A grep, at each
+// shape it runs over the commit messages, swaps the findings or the errors file
+// for a link to /dev/full, so every write to it fails as on a full disk. The
+// verdict reads those files, and an empty one means clean: a finding or an
+// error that was never written down let the push through with "no findings".
+// The refusal has to come from the write, not from the check before the
+// verdict that the files are still there, and no override covers it.
+func TestPrePushReportNotWritten(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	if fi, err := os.Stat("/dev/full"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		t.Skip("no /dev/full here to stand in for a full disk")
+	}
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name string
+		file string // the work file the shim swaps for /dev/full
+		then string // what the shim does next at a grep over the messages
+	}{
+		{"a finding in a commit message", "findings", ":"},
+		{"a grep that fails over the commit messages", "errors", "exit 2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "full")
+			r.write("full.txt", "a clean line\n")
+			tip := r.commit("full: write to " + addr("full.disk", "example.invalid"))
+			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
+				"case \"${last:-}\" in */messages) ln -s -f /dev/full \"${last%/messages}/"+c.file+"\"; "+c.then+" ;; esac\n"+
+				"exec '"+grepBin+"' \"$@\"\n")
+			for _, anyway := range []bool{false, true} {
+				e := []string{shim}
+				if anyway {
+					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				}
+				code, out := r.hookNewBranch("full", tip, e...)
+				ppWantRefused(t, code, out, "could not write the hook's report")
+				if strings.Contains(out, "no findings") {
+					t.Errorf("hook reports no findings; output:\n%s", out)
+				}
+			}
+		})
+	}
+}
+
+// 27. The working directory removed half-way - by a grep, at the first shape it
+// runs over the commit messages, the last step before the verdict. The verdict
+// read the files that were gone as empty ones and reported no findings. Which
+// guard meets the gap first differs between shells, so the test names none.
+func TestPrePushWorkGone(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name    string
+		message string
+	}{
+		{"a message with a shape", "gone: write to " + addr("work.gone", "example.invalid")},
+		{"a clean message", "gone: one clean commit"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "gone")
+			r.write("gone.txt", "a clean line\n")
+			tip := r.commit(c.message)
+			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
+				"case \"${last:-}\" in */messages) rm -rf \"${last%/messages}\" ;; esac\n"+
+				"exec '"+grepBin+"' \"$@\"\n")
+			for _, anyway := range []bool{false, true} {
+				e := []string{shim}
+				if anyway {
+					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				}
+				code, out := r.hookNewBranch("gone", tip, e...)
+				ppWantRefused(t, code, out)
+				if strings.Contains(out, "no findings") {
+					t.Errorf("hook reports no findings; output:\n%s", out)
+				}
+			}
+		})
 	}
 }
 
@@ -1113,7 +1497,7 @@ func (r *ppRepo) hookNewTag(name, oid string, extraEnv ...string) (int, string) 
 	return r.hook([]string{"origin", r.origin}, r.tagLine(name, oid), extraEnv...)
 }
 
-// 24. A tag on a commit origin already has adds no commit, and is still
+// 28. A tag on a commit origin already has adds no commit, and is still
 // read: a shape in its message is refused - any of the shapes.
 func TestPrePushTagMessage(t *testing.T) {
 	env := ppSetup(t)
@@ -1135,7 +1519,7 @@ func TestPrePushTagMessage(t *testing.T) {
 	}
 }
 
-// 25. The tagger has to be a declared identity. GitHub's web-flow identity
+// 29. The tagger has to be a declared identity. GitHub's web-flow identity
 // is let in as a merge's committer only, so as a tagger it is undeclared.
 func TestPrePushTagger(t *testing.T) {
 	env := ppSetup(t)
@@ -1167,7 +1551,7 @@ func TestPrePushTagger(t *testing.T) {
 	})
 }
 
-// 26. A nested tag publishes the tags inside it: a shape only in the inner
+// 30. A nested tag publishes the tags inside it: a shape only in the inner
 // tag's message, or a stranger only as the inner tagger, is refused although
 // the outer tag is clean.
 func TestPrePushNestedTag(t *testing.T) {
@@ -1192,7 +1576,7 @@ func TestPrePushNestedTag(t *testing.T) {
 	})
 }
 
-// 27. A clean tag on a pushed commit passes and reads nothing else - not
+// 31. A clean tag on a pushed commit passes and reads nothing else - not
 // the unpushed commit on HEAD that carries a shape in its file and message.
 func TestPrePushCleanTagOnPushedCommit(t *testing.T) {
 	env := ppSetup(t)
@@ -1213,7 +1597,7 @@ func TestPrePushCleanTagOnPushedCommit(t *testing.T) {
 	ppWantAbsent(t, out, local, ppSeedAddr)
 }
 
-// 28. A tag on a commit origin does not have yet brings that commit along,
+// 32. A tag on a commit origin does not have yet brings that commit along,
 // and the commit is checked as on any other ref.
 func TestPrePushTagOnNewCommit(t *testing.T) {
 	env := ppSetup(t)
@@ -1227,7 +1611,7 @@ func TestPrePushTagOnNewCommit(t *testing.T) {
 	ppWantRefused(t, code, out, ":carried.txt:1:", carried, "1 new commit(s), 1 tag object(s)")
 }
 
-// 29. A real git push of a tag hands the hook the tag object's id: a shape in
+// 33. A real git push of a tag hands the hook the tag object's id: a shape in
 // the message stops the push, and origin does not get the tag.
 func TestPrePushTagRealPush(t *testing.T) {
 	env := ppSetup(t)
@@ -1259,7 +1643,7 @@ func TestPrePushTagRealPush(t *testing.T) {
 	}
 }
 
-// 30. IMPRINT_PUSH_ANYWAY waves a tag finding through, as any finding. A tag
+// 34. IMPRINT_PUSH_ANYWAY waves a tag finding through, as any finding. A tag
 // object the hook cannot read - an inner tag missing from the object store, a
 // tagger line it cannot parse - refuses the push, and no override covers it.
 func TestPrePushTagAnywayAndUnreadable(t *testing.T) {
@@ -1308,7 +1692,7 @@ func TestPrePushTagAnywayAndUnreadable(t *testing.T) {
 	})
 }
 
-// 31. A ref that points at a blob or a tree, straight or through a tag, is
+// 35. A ref that points at a blob or a tree, straight or through a tag, is
 // a finding: the hook does not read the content, and rev-list would list
 // nothing for it. IMPRINT_PUSH_ANYWAY with a reason lets it through; a real
 // push of a blob under refs/tags/ is stopped before origin gets it.
@@ -1375,7 +1759,7 @@ func (r *ppRepo) rawTag(content string) string {
 	return strings.TrimSpace(string(got))
 }
 
-// 32. Everything in a tag object outside the tagger's identity is read:
+// 36. Everything in a tag object outside the tagger's identity is read:
 // an extra header line, a tag whose header never ends (git reads no message
 // from it), CRLF line ends, and what follows the identity on the tagger
 // line. A tagger line with no newline after it is still checked, and a tag
@@ -1414,7 +1798,7 @@ func TestPrePushTagObjectOutsideMessage(t *testing.T) {
 	}
 }
 
-// 33. A tag object is raw bytes. A Latin-1 no-break space - not valid UTF-8 -
+// 37. A tag object is raw bytes. A Latin-1 no-break space - not valid UTF-8 -
 // right before a phone number matches no bracket expression under a UTF-8
 // locale, so the shape is matched under C as well. The hook runs here under
 // C.UTF-8; where that locale is missing, grep falls back to C and this case
