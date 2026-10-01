@@ -591,14 +591,41 @@ func TestPrePushPushURLElsewhere(t *testing.T) {
 	}
 }
 
+// ppRealBin returns the absolute path of name on PATH, for a shim to forward
+// to, and skips the test when there is none.
+func ppRealBin(t *testing.T, name string) string {
+	t.Helper()
+	p, err := exec.LookPath(name)
+	if err != nil {
+		t.Skip("no " + name + " on PATH to forward to: " + err.Error())
+	}
+	if a, err := filepath.Abs(p); err == nil {
+		p = a
+	}
+	return p
+}
+
+// ppShimPATH writes body as a sh script named name into a fresh directory and
+// returns a PATH setting that puts that directory first.
+func ppShimPATH(t *testing.T, name, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return "PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
 // 11d. A check that could not run refuses the push, and IMPRINT_PUSH_ANYWAY
-// does not cover it - here with a blob missing from the object store, and
-// with an awk that fails. The new commit's message holds a shape, so a
-// finding is there for the override to wave through if it wrongly could.
+// does not cover it - here with a blob missing from the object store, with an
+// awk that fails, and with each guard against a diff, a parent list or a work
+// file that is not what the hook expects. The new commit's message holds a
+// shape, so a finding is there for the override to wave through if it wrongly
+// could; each case also names the guard that has to catch it.
 func TestPrePushCheckCouldNotRun(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
-	wantCouldNotRun := func(t *testing.T, r *ppRepo, tip string, extraEnv ...string) {
+	wantCouldNotRun := func(t *testing.T, r *ppRepo, tip string, extraEnv []string, wants ...string) {
 		t.Helper()
 		for _, anyway := range []bool{false, true} {
 			e := extraEnv
@@ -606,8 +633,55 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 				e = append(append([]string{}, extraEnv...), "IMPRINT_PUSH_ANYWAY=only a test")
 			}
 			code, out := r.hookNewBranch("broken", tip, e...)
-			ppWantRefused(t, code, out, "check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it")
+			ppWantRefused(t, code, out, append([]string{"check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it"}, wants...)...)
 		}
+	}
+	// brokenTip seeds a repository with one new commit that adds one clean
+	// line and carries a shape in its message.
+	brokenTip := func(t *testing.T, label string) (*ppRepo, string) {
+		t.Helper()
+		r := ppSeed(t, env)
+		r.git("checkout", "-q", "-b", "broken")
+		r.write("shim.txt", "a clean line the shim gets in the way of\n")
+		return r, r.commit("broken: write to " + addr(label, "example.invalid"))
+	}
+	gitBin := ppRealBin(t, "git")
+	awkBin := ppRealBin(t, "awk")
+	// A git that corrupts one command's output, and passes every other
+	// command through.
+	gitShim := func(t *testing.T, match, run string) string {
+		return ppShimPATH(t, "git", "case \" $* \" in *\" "+match+" \"*) "+run+" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+	}
+	// An awk that runs the real one, then does after - a write that went
+	// missing without awk saying so.
+	awkShim := func(t *testing.T, after string) string {
+		return ppShimPATH(t, "awk", "'"+awkBin+"' \"$@\"; rc=$?\n"+after+"\nexit $rc\n")
+	}
+	for _, c := range []struct {
+		name  string
+		shim  func(t *testing.T) string
+		wants []string
+	}{
+		{"a hunk line that is not +, -, space or backslash", func(t *testing.T) string {
+			return gitShim(t, "diff-tree", "'"+gitBin+"' \"$@\" | '"+awkBin+"' '{ print } /^@@ / { print \"?not a diff line\" }'; exit")
+		}, []string{"into added lines"}},
+		{"git prints Binary files", func(t *testing.T) string {
+			return gitShim(t, "diff-tree", "'"+gitBin+"' \"$@\"; rc=$?; printf 'diff --git a/x.bin b/x.bin\\nBinary files a/x.bin and b/x.bin differ\\n'; exit $rc")
+		}, []string{"could not read x.bin as text"}},
+		{"a commit missing from the parent list", func(t *testing.T) string {
+			return gitShim(t, "--parents", "'"+gitBin+"' \"$@\" | sed '$d'; exit")
+		}, []string{"listed parents for 0 of 1 new commit(s)"}},
+		{"an added-line record missing", func(t *testing.T) string {
+			return awkShim(t, `if [ -n "${IMPRINT_AWKCNT:-}" ]; then n=$(cat "$IMPRINT_AWKCNT"); echo $((n + 1)) >"$IMPRINT_AWKCNT"; fi`)
+		}, []string{"wrote down 1 of 2 line(s)", " adds against "}},
+		{"a line missing from added", func(t *testing.T) string {
+			return awkShim(t, `if [ -n "${IMPRINT_ADDED:-}" ]; then sed '$d' "$IMPRINT_ADDED" >"$IMPRINT_ADDED.cut" && mv "$IMPRINT_ADDED.cut" "$IMPRINT_ADDED"; fi`)
+		}, []string{"wrote down 0 of 1 added line(s) in added"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, tip := brokenTip(t, "guard.shim")
+			wantCouldNotRun(t, r, tip, []string{c.shim(t)}, c.wants...)
+		})
 	}
 	t.Run("missing blob", func(t *testing.T) {
 		r := ppSeed(t, env)
@@ -624,18 +698,11 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		if err := os.Remove(filepath.Join(r.dir, "lost.txt")); err != nil {
 			t.Fatal(err)
 		}
-		wantCouldNotRun(t, r, tip)
+		wantCouldNotRun(t, r, tip, nil)
 	})
 	t.Run("awk fails", func(t *testing.T) {
-		r := ppSeed(t, env)
-		shim := t.TempDir()
-		if err := os.WriteFile(filepath.Join(shim, "awk"), []byte("#!/bin/sh\nexit 2\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		r.git("checkout", "-q", "-b", "broken")
-		r.write("shim.txt", "a clean line no awk will read\n")
-		tip := r.commit("broken: write to " + addr("no.awk", "example.invalid"))
-		wantCouldNotRun(t, r, tip, "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+		r, tip := brokenTip(t, "no.awk")
+		wantCouldNotRun(t, r, tip, []string{ppShimPATH(t, "awk", "exit 2\n")})
 	})
 }
 
@@ -798,6 +865,89 @@ func TestPrePushTrackingNamespaceShared(t *testing.T) {
 		ppWantRefused(t, code, out, secret, "remote origin/priv stores its refs under refs/remotes/origin/", "not trusted")
 		ppWantChecked(t, out)
 	})
+	// Refspecs on another remote that land in refs/remotes/origin/: an exact
+	// destination, the same without refs/ (git puts it in front of a
+	// destination without a glob that starts with remotes/), and a mirror,
+	// whose glob is broader than refs/remotes/origin/. pushed is the ref the
+	// private remote holds the shape under.
+	for _, c := range []struct{ name, refspec, pushed string }{
+		{"another remote's exact refspec destination", "+refs/heads/secret:refs/remotes/origin/secret", "refs/heads/secret"},
+		{"a refspec destination without refs/", "+refs/heads/secret:remotes/origin/secret", "refs/heads/secret"},
+		{"another remote's mirror refspec", "+refs/*:refs/*", "refs/remotes/origin/secret"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			secret := addr("dest.private", "example.invalid")
+			tip := privateTip(r, secret)
+			priv := r.newBare()
+			r.git("remote", "add", "priv", priv)
+			r.git("config", "--replace-all", "remote.priv.fetch", c.refspec)
+			// To the location, not the name: a push to priv would update its
+			// tracking ref without the refs/ git puts in front on a fetch, and
+			// write a file under the git directory's remotes/ folder.
+			r.pushNoVerify(priv, "secret~1:"+c.pushed)
+			r.git("fetch", "-q", "priv")
+			r.git("rev-parse", "--verify", "refs/remotes/origin/secret")
+			code, out := r.hookNewBranch("feature", tip)
+			ppWantRefused(t, code, out, secret, "remote priv fetches into refs/remotes/origin/", "not trusted")
+			ppWantChecked(t, out)
+		})
+	}
+	t.Run("a remote in the legacy remotes/ folder", func(t *testing.T) {
+		r := ppSeed(t, env)
+		secret := addr("legacy.private", "example.invalid")
+		tip := privateTip(r, secret)
+		priv := r.newBare()
+		r.pushNoVerify(priv, "secret~1:refs/heads/secret")
+		// Neither git remote nor git config shows this remote; git 2.55.0
+		// still fetches by it.
+		if err := os.MkdirAll(filepath.Join(r.dir, ".git", "remotes"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.write(filepath.Join(".git", "remotes", "priv"), "URL: "+priv+"\nPull: +refs/heads/*:refs/remotes/origin/p/*\n")
+		r.git("fetch", "-q", "priv")
+		r.git("rev-parse", "--verify", "refs/remotes/origin/p/secret")
+		code, out := r.hookNewBranch("feature", tip)
+		ppWantRefused(t, code, out, secret, "legacy remotes/ folder", "not trusted")
+		ppWantChecked(t, out)
+	})
+	// With extensions.worktreeConfig on, another worktree's config.worktree
+	// can define a remote, or point origin's own fetch elsewhere, where this
+	// worktree's git remote and git remote get-url do not see it.
+	for _, c := range []struct {
+		name  string
+		setup func(r *ppRepo, wt, priv string)
+	}{
+		{"a remote in another worktree's config.worktree", func(r *ppRepo, wt, priv string) {
+			ccRunGit(r.t, wt, "config", "--worktree", "remote.priv.url", priv)
+			ccRunGit(r.t, wt, "config", "--worktree", "remote.priv.fetch", "+refs/heads/*:refs/remotes/origin/p/*")
+			ccRunGit(r.t, wt, "fetch", "-q", "priv")
+			r.git("rev-parse", "--verify", "refs/remotes/origin/p/secret")
+		}},
+		{"insteadOf in another worktree's config.worktree", func(r *ppRepo, wt, priv string) {
+			ccRunGit(r.t, wt, "config", "--worktree", "url."+priv+".insteadOf", r.origin)
+			ccRunGit(r.t, wt, "fetch", "-q", "origin")
+			r.git("rev-parse", "--verify", "refs/remotes/origin/secret")
+			if got := r.git("remote", "get-url", "origin"); got != r.origin {
+				r.t.Fatalf("this worktree's origin fetches from %q, want %q", got, r.origin)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			secret := addr("worktree.private", "example.invalid")
+			tip := privateTip(r, secret)
+			priv := r.newBare()
+			r.pushNoVerify(priv, "secret~1:refs/heads/secret")
+			r.git("config", "extensions.worktreeConfig", "true")
+			wt := filepath.Join(t.TempDir(), "other")
+			r.git("worktree", "add", "-q", "--detach", wt, "main")
+			c.setup(r, wt, priv)
+			code, out := r.hookNewBranch("feature", tip)
+			ppWantRefused(t, code, out, secret, "extensions.worktreeConfig is on", "not trusted")
+			ppWantChecked(t, out)
+		})
+	}
 }
 
 // 17. A relative TMPDIR whose name holds "=": awk took the working files for
@@ -1051,5 +1201,59 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantChecked(t, out)
 			})
 		}
+	}
+}
+
+// 24. With POSIXLY_CORRECT set, GNU sort takes an option after a file operand
+// for another file, so `sort -u FILE -o FILE` refused every push. A clean new
+// commit still passes - and only through the tracking refs, since the seed
+// history holds a shape - and an added shape is still refused.
+func TestPrePushPOSIXLYCorrect(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	r.git("checkout", "-q", "-b", "posix")
+	r.write("posix.txt", "a clean line\n")
+	clean := r.commit("posix: one clean commit")
+	code, out := r.hookNewBranch("posix", clean, "POSIXLY_CORRECT=1")
+	ppWantPass(t, code, out)
+	if !strings.Contains(out, "1 new commit(s)") {
+		t.Errorf("hook report lacks %q; output:\n%s", "1 new commit(s)", out)
+	}
+	ppWantAbsent(t, out, ppSeedAddr)
+
+	leak := addr("posixly.correct", "example.invalid")
+	r.git("checkout", "-q", "-b", "posix-leak", "main")
+	r.write("leak.txt", "first line\nwrite to "+leak+"\n")
+	tip := r.commit("posix: add a contact line")
+	code, out = r.hookNewBranch("posix-leak", tip, "POSIXLY_CORRECT=1")
+	ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
+	ppWantChecked(t, out)
+}
+
+// 25. A signal ends the hook half-way - here a TERM that git sends its parent
+// shell while it diffs. dash and busybox sh run no EXIT trap then, so without
+// a trap of its own the hook would leave its working files behind and exit by
+// the signal; it removes them and exits 1, which refuses the push.
+func TestPrePushSignalCleansUp(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	gitBin := ppRealBin(t, "git")
+	r := ppSeed(t, env)
+	r.git("checkout", "-q", "-b", "sig")
+	r.write("sig.txt", "a clean line\n")
+	tip := r.commit("sig: one clean commit")
+	tmp := t.TempDir()
+	path := ppShimPATH(t, "git", "case \" $* \" in *\" diff-tree \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+	code, out := r.hookNewBranch("sig", tip, path, "TMPDIR="+tmp)
+	if code != 1 {
+		t.Errorf("hook exit %d after a TERM, want 1; output:\n%s", code, out)
+	}
+	left, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range left {
+		t.Errorf("the hook left %s behind in TMPDIR", e.Name())
 	}
 }

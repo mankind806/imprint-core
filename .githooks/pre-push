@@ -89,10 +89,21 @@ if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no
 # And only while that remote is the only one writing there. --remotes=<name>
 # reads refs/remotes/<name>/*, and the * crosses a slash: another remote named
 # <name>/<more> stores its refs under that prefix by default, and any remote's
-# fetch refspec can store them there - +refs/heads/*:refs/remotes/<name>/x/*, or
-# a mirror's +refs/*:refs/*. A commit only that other remote holds would then
-# pass as already on the destination, so when another remote's name or fetch
-# refspec reaches under refs/remotes/<name>/, none of those refs is trusted.
+# fetch refspec can store them there - +refs/heads/*:refs/remotes/<name>/x/*,
+# +refs/heads/x:remotes/<name>/x (git puts refs/ in front of a destination
+# without a glob that starts with remotes/), or a mirror's +refs/*:refs/*. A
+# commit only that other remote holds would then pass as already on the
+# destination, so when another remote's name or fetch refspec reaches under
+# refs/remotes/<name>/, none of those refs is trusted.
+#
+# Two places define remotes that `git remote` and `git config` here do not
+# show, and neither is read: a file in the git directory's legacy remotes/
+# folder, whose Pull: lines git still fetches by, and, with
+# extensions.worktreeConfig on, another worktree's config.worktree, which can
+# add a remote or point this one's fetch elsewhere with url.<base>.insteadOf
+# (both measured with git 2.55.0, 2026-10-01). While either is in use, none of
+# the tracking refs is trusted. A conditional include (includeIf) that differs
+# between worktrees is not covered.
 #
 # And only when the push goes where those refs were fetched from. With a
 # remote.<name>.pushurl, a url.<base>.pushInsteadOf or a second
@@ -103,9 +114,23 @@ if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no
 # The location itself is never printed: a URL can carry a credential.
 #
 # shared_by NAME - sets shared to why refs/remotes/NAME/ is not NAME's alone,
-# or to nothing when no other remote writes there.
+# or cannot be told to be, or to nothing when no other remote writes there.
 shared_by() {
   sb_dest="$1"; shared=''
+  sb_common="$(git rev-parse --git-common-dir 2>/dev/null)" && [ -n "$sb_common" ] \
+    || { shared="git rev-parse could not name the git directory"; return; }
+  if [ -e "$sb_common/remotes" ]; then
+    sb_legacy="$(ls -A "$sb_common/remotes" 2>/dev/null)" \
+      || { shared="the git directory's legacy remotes/ folder could not be listed"; return; }
+    [ -z "$sb_legacy" ] \
+      || { shared="a remote is defined in the git directory's legacy remotes/ folder, which this hook does not read"; return; }
+  fi
+  # extensions is read from the repository's own config file, as git reads it,
+  # so that a -c on the command line cannot hide it.
+  sb_wtc="$(git config --file "$sb_common/config" --type=bool --get extensions.worktreeConfig 2>/dev/null)"; sb_rc=$?
+  [ "$sb_rc" -le 1 ] || { shared="git config could not read extensions.worktreeConfig"; return; }
+  [ "$sb_wtc" != true ] \
+    || { shared="extensions.worktreeConfig is on, and another worktree's config.worktree can define a remote or turn this one's fetch elsewhere"; return; }
   sb_remotes="$(git remote 2>/dev/null)" || { shared="git remote failed"; return; }
   while IFS= read -r sb_r; do
     [ -n "$sb_r" ] && [ "$sb_r" != "$sb_dest" ] || continue
@@ -125,7 +150,7 @@ shared_by() {
           case "refs/remotes/$sb_dest/" in "$sb_pre"*) sb_hit=yes ;; esac
           case "$sb_pre" in "refs/remotes/$sb_dest/"*) sb_hit=yes ;; esac
           ;;
-        "refs/remotes/$sb_dest/"*) sb_hit=yes ;;
+        "refs/remotes/$sb_dest/"* | "remotes/$sb_dest/"*) sb_hit=yes ;;
       esac
       [ "$sb_hit" = no ] || { shared="remote $sb_r fetches into refs/remotes/$sb_dest/"; return; }
     done <<EOF
@@ -169,6 +194,9 @@ work="$(mktemp -d 2>/dev/null)" || refuse "could not create a working directory.
 # have the merge check read nothing. A path that starts with a slash is a file.
 case "$work" in /*) ;; *) work="$PWD/$work" ;; esac
 trap 'rm -rf "$work"' EXIT
+# dash and busybox sh do not run the EXIT trap when a signal ends them; these
+# clean up and still refuse the push.
+trap 'rm -rf "$work"; exit 1' HUP INT TERM
 : >"$work/findings"; : >"$work/errors"; : >"$work/ran"; : >"$work/skipped"; : >"$work/ranges"
 
 # --- the identities this clone declares -------------------------------------
@@ -235,7 +263,7 @@ while read -r local_oid remote_oid; do
   new_commits "$local_oid" "${remote_oid:-}" >>"$work/commits" </dev/null \
     || refuse "git rev-list failed for $local_oid."
 done <"$work/ranges"
-sort -u "$work/commits" -o "$work/commits" || refuse "could not sort the commit list."
+sort -u -o "$work/commits" "$work/commits" || refuse "could not sort the commit list."
 n_commits="$(wc -l <"$work/commits" | tr -d ' ')"
 n_refs="$(wc -l <"$work/ranges" | tr -d ' ')"
 if [ -n "$dest_remote" ]; then
@@ -274,7 +302,7 @@ printf '%s\n' "$web_flow" >>"$work/committers"
 
 git log --no-walk=unsorted --stdin --format='A %an <%ae>%nC %cn <%ce>' \
   <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
-sort -u "$work/ids" -o "$work/ids" || refuse "could not sort the identities."
+sort -u -o "$work/ids" "$work/ids" || refuse "could not sort the identities."
 : >"$work/undeclared"
 while IFS= read -r line; do
   role="${line%% *}"; id="${line#? }"
@@ -283,7 +311,7 @@ while IFS= read -r line; do
   grep -Fxq -- "$id" "$list" && continue
   printf '%s\n' "$id" >>"$work/undeclared"
 done <"$work/ids"
-sort -u "$work/undeclared" -o "$work/undeclared" || refuse "could not sort the undeclared identities."
+sort -u -o "$work/undeclared" "$work/undeclared" || refuse "could not sort the undeclared identities."
 while IFS= read -r id; do
   printf 'undeclared identity: %s\n' "$id" >>"$work/findings"
 done <"$work/undeclared"
