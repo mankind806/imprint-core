@@ -1284,3 +1284,86 @@ func TestPrePushSignalCleansUp(t *testing.T) {
 		})
 	}
 }
+
+// 26. A line of the hook's own report that cannot be written. A grep, at each
+// shape it runs over the commit messages, swaps the findings or the errors file
+// for a link to /dev/full, so every write to it fails as on a full disk. The
+// verdict reads those files, and an empty one means clean: a finding or an
+// error that was never written down let the push through with "no findings".
+// The refusal has to come from the write, not from the check before the
+// verdict that the files are still there, and no override covers it.
+func TestPrePushReportNotWritten(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	if fi, err := os.Stat("/dev/full"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		t.Skip("no /dev/full here to stand in for a full disk")
+	}
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name string
+		file string // the work file the shim swaps for /dev/full
+		then string // what the shim does next at a grep over the messages
+	}{
+		{"a finding in a commit message", "findings", ":"},
+		{"a grep that fails over the commit messages", "errors", "exit 2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "full")
+			r.write("full.txt", "a clean line\n")
+			tip := r.commit("full: write to " + addr("full.disk", "example.invalid"))
+			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
+				"case \"${last:-}\" in */messages) ln -s -f /dev/full \"${last%/messages}/"+c.file+"\"; "+c.then+" ;; esac\n"+
+				"exec '"+grepBin+"' \"$@\"\n")
+			for _, anyway := range []bool{false, true} {
+				e := []string{shim}
+				if anyway {
+					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				}
+				code, out := r.hookNewBranch("full", tip, e...)
+				ppWantRefused(t, code, out, "could not write the hook's report")
+				if strings.Contains(out, "no findings") {
+					t.Errorf("hook reports no findings; output:\n%s", out)
+				}
+			}
+		})
+	}
+}
+
+// 27. The working directory removed half-way - by a grep, at the first shape it
+// runs over the commit messages, the last step before the verdict. The verdict
+// read the files that were gone as empty ones and reported no findings. Which
+// guard meets the gap first differs between shells, so the test names none.
+func TestPrePushWorkGone(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name    string
+		message string
+	}{
+		{"a message with a shape", "gone: write to " + addr("work.gone", "example.invalid")},
+		{"a clean message", "gone: one clean commit"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "gone")
+			r.write("gone.txt", "a clean line\n")
+			tip := r.commit(c.message)
+			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
+				"case \"${last:-}\" in */messages) rm -rf \"${last%/messages}\" ;; esac\n"+
+				"exec '"+grepBin+"' \"$@\"\n")
+			for _, anyway := range []bool{false, true} {
+				e := []string{shim}
+				if anyway {
+					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				}
+				code, out := r.hookNewBranch("gone", tip, e...)
+				ppWantRefused(t, code, out)
+				if strings.Contains(out, "no findings") {
+					t.Errorf("hook reports no findings; output:\n%s", out)
+				}
+			}
+		})
+	}
+}

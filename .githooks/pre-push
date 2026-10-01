@@ -55,9 +55,9 @@
 # checks named as skipped.
 #
 # FAIL-CLOSED. Every other way this script can fail to finish - a git command
-# that errors, an unset identity, a temporary file it cannot create - ends in a
-# refused push. A gate that waves you through when it breaks is worse than no
-# gate, because it is indistinguishable from one that checked.
+# that errors, an unset identity, a temporary file it cannot create or write to
+# - ends in a refused push. A gate that waves you through when it breaks is
+# worse than no gate, because it is indistinguishable from one that checked.
 
 set -u
 
@@ -72,6 +72,18 @@ export GIT_NO_REPLACE_OBJECTS=1
 
 say() { printf '%s\n' "$*" >&2; }
 refuse() { say "pre-push: $*"; say "pre-push: refusing the push."; exit 1; }
+
+# note FILE FORMAT [ARG...] - printf FORMAT ARG... onto the end of FILE in the
+# working directory. The verdict reads these files, and an empty one means
+# clean: a line that could not be written - on a full disk, say - would wave the
+# push through with "no findings". So a write that fails refuses the push;
+# refuse writes to standard error only, which still works then.
+cannot_write="could not write the hook's report; refusing rather than reporting a clean push."
+note() {
+  nt_file="$1"; shift
+  # shellcheck disable=SC2059 # every caller passes its format as a literal
+  printf "$@" >>"$work/$nt_file" || refuse "$cannot_write"
+}
 
 # Git calls this hook with exactly two parameters - the name and the location of
 # the destination remote - and pipes the ref list in. Without them, or with a
@@ -199,15 +211,20 @@ trap 'rm -rf "$work"' EXIT
 # dash and busybox sh do not run the EXIT trap when a signal ends them; these
 # clean up and still refuse the push.
 trap 'rm -rf "$work"; exit 1' HUP INT TERM
-: >"$work/findings"; : >"$work/errors"; : >"$work/ran"; : >"$work/skipped"; : >"$work/ranges"
+# hits and mhits are made here too: in bash a redirection that fails returns 1,
+# which is also grep's "no line matched". Once they exist, grep's > only
+# truncates them, which takes neither space nor an inode. true, not ":" - a
+# redirection that fails on a special built-in such as ":" ends the shell
+# before || refuse can say why.
+for f in findings errors ran skipped ranges hits mhits; do
+  true >"$work/$f" || refuse "$cannot_write"
+done
 
 # --- the identities this clone declares -------------------------------------
 me_name="$(git config --get user.name || true)"
 me_mail="$(git config --get user.email || true)"
 [ -n "$me_name" ] && [ -n "$me_mail" ] || refuse \
   "user.name or user.email is unset here, so this hook cannot tell your own commits from a stranger's."
-printf '%s <%s>\n' "$me_name" "$me_mail" >"$work/allowed"
-git config --get-all imprint.allowedIdentity >>"$work/allowed" 2>/dev/null || true
 
 # --- what is being pushed ----------------------------------------------------
 zero="$(git hash-object --stdin </dev/null | sed 's/./0/g')" || refuse "git hash-object failed."
@@ -222,7 +239,7 @@ while read -r local_ref local_oid remote_ref remote_oid || [ -n "${local_ref:-}"
     "could not read this as a ref line from git: \"${local_ref:-}\"."
   lines=$((lines + 1))
   if [ "$local_oid" = "$zero" ]; then
-    printf 'deletion of %s - a deletion carries no new content\n' "${remote_ref:-?}" >>"$work/skipped"
+    note skipped 'deletion of %s - a deletion carries no new content\n' "${remote_ref:-?}"
   else
     printf '%s %s\n' "$local_oid" "${remote_oid:-}" >>"$work/ranges"
     n_ranges=$((n_ranges + 1))
@@ -236,7 +253,7 @@ n_written="$(wc -l <"$work/ranges" | tr -d ' ')"
 if [ "$lines" -eq 0 ]; then
   [ "$git_is_calling" = yes ] || refuse \
     "no refs on standard input, and nothing says git piped them in; a silent empty run is not a pass."
-  printf 'every ref - git listed none to push, so nothing is being published\n' >>"$work/skipped"
+  note skipped 'every ref - git listed none to push, so nothing is being published\n'
 fi
 
 if [ ! -s "$work/ranges" ]; then
@@ -260,11 +277,11 @@ new_commits() {
   git rev-list "$@"
 }
 
-: >"$work/commits"
+true >"$work/commits" || refuse "$cannot_write"
 while read -r local_oid remote_oid; do
   new_commits "$local_oid" "${remote_oid:-}" >>"$work/commits" </dev/null \
     || refuse "git rev-list failed for $local_oid."
-done <"$work/ranges"
+done <"$work/ranges" || refuse "could not read back the ref list."
 sort -u -o "$work/commits" "$work/commits" || refuse "could not sort the commit list."
 n_commits="$(wc -l <"$work/commits" | tr -d ' ')"
 n_refs="$(wc -l <"$work/ranges" | tr -d ' ')"
@@ -299,28 +316,31 @@ web_flow_user='noreply'
 web_flow_domain='github.com'
 at=@
 web_flow="$web_flow_name <$web_flow_user$at$web_flow_domain>"
+printf '%s <%s>\n' "$me_name" "$me_mail" >"$work/allowed" || refuse "$cannot_write"
+git config --get-all imprint.allowedIdentity >>"$work/allowed" 2>/dev/null; rc=$?
+[ "$rc" -le 1 ] || refuse "git config could not read imprint.allowedIdentity."
 cp "$work/allowed" "$work/committers" || refuse "could not copy the declared identities."
-printf '%s\n' "$web_flow" >>"$work/committers"
+note committers '%s\n' "$web_flow"
 
 git log --no-walk=unsorted --stdin --format='A %an <%ae>%nC %cn <%ce>' \
   <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
 sort -u -o "$work/ids" "$work/ids" || refuse "could not sort the identities."
-: >"$work/undeclared"
+true >"$work/undeclared" || refuse "$cannot_write"
 while IFS= read -r line; do
   role="${line%% *}"; id="${line#? }"
   [ -n "$id" ] || continue
   if [ "$role" = C ]; then list="$work/committers"; else list="$work/allowed"; fi
   grep -Fxq -- "$id" "$list" && continue
-  printf '%s\n' "$id" >>"$work/undeclared"
-done <"$work/ids"
+  note undeclared '%s\n' "$id"
+done <"$work/ids" || refuse "could not read back the identities of the new commits."
 sort -u -o "$work/undeclared" "$work/undeclared" || refuse "could not sort the undeclared identities."
 while IFS= read -r id; do
-  printf 'undeclared identity: %s\n' "$id" >>"$work/findings"
-done <"$work/undeclared"
+  note findings 'undeclared identity: %s\n' "$id"
+done <"$work/undeclared" || refuse "could not read back the undeclared identities."
 undeclared="$(wc -l <"$work/undeclared" | tr -d ' ')"
 n_ids="$(sed 's/^. //' "$work/ids" | sort -u | wc -l | tr -d ' ')"
-printf 'declared identity - %s identity/identities over %s new commit(s), %s undeclared\n' \
-  "$n_ids" "$n_commits" "$undeclared" >>"$work/ran"
+note ran 'declared identity - %s identity/identities over %s new commit(s), %s undeclared\n' \
+  "$n_ids" "$n_commits" "$undeclared"
 
 # --- the shapes --------------------------------------------------------------
 shapes() {
@@ -465,26 +485,26 @@ read_added() {
       diff-tree --no-commit-id -r -p -M -U0 --text --no-ext-diff --no-textconv --no-color \
       --root "$ra_commit" >"$work/diff" 2>"$work/differr" </dev/null
   fi || {
-    printf 'git diff-tree could not read %s against %s: %s\n' \
-      "$ra_commit" "$ra_against" "$(cat "$work/differr")" >>"$work/errors"
+    note errors 'git diff-tree could not read %s against %s: %s\n' \
+      "$ra_commit" "$ra_against" "$(cat "$work/differr")"
     return 1
   }
   # A NUL would end an awk record early in some awks; it never matches a shape.
   tr '\000' '\001' <"$work/diff" >"$work/diff.t" || {
-    printf 'tr could not prepare the diff of %s against %s\n' "$ra_commit" "$ra_against" >>"$work/errors"
+    note errors 'tr could not prepare the diff of %s against %s\n' "$ra_commit" "$ra_against"
     return 1
   }
-  : >"$work/awkerr"; : >"$work/awkcnt"
+  true >"$work/awkerr" && true >"$work/awkcnt" || refuse "$cannot_write"
   IMPRINT_COMMIT="$ra_commit" IMPRINT_AWKERR="$work/awkerr" IMPRINT_AWKCNT="$work/awkcnt" \
     LC_ALL=C awk "$classify" <"$work/diff.t" >"$ra_out" || {
-    printf 'awk could not sort the diff of %s against %s into added lines: %s\n' \
-      "$ra_commit" "$ra_against" "$(cat "$work/awkerr")" >>"$work/errors"
+    note errors 'awk could not sort the diff of %s against %s into added lines: %s\n' \
+      "$ra_commit" "$ra_against" "$(cat "$work/awkerr")"
     return 1
   }
   ra_k="$(cat "$work/awkcnt")"; ra_n="$(wc -l <"$ra_out" | tr -d ' ')"
   [ -n "$ra_k" ] && [ "$ra_k" = "$ra_n" ] || {
-    printf 'wrote down %s of %s line(s) %s adds against %s\n' \
-      "$ra_n" "${ra_k:-an unknown number of}" "$ra_commit" "$ra_against" >>"$work/errors"
+    note errors 'wrote down %s of %s line(s) %s adds against %s\n' \
+      "$ra_n" "${ra_k:-an unknown number of}" "$ra_commit" "$ra_against"
     return 1
   }
 }
@@ -499,14 +519,15 @@ intersect_added() {
     LC_ALL=C awk "$intersect" "$@" </dev/null
 }
 
-: >"$work/added"; : >"$work/addedloc"; n_added=0
+true >"$work/added" && true >"$work/addedloc" || refuse "$cannot_write"
+n_added=0
 # One line per new commit: the commit, then its parents.
 if git rev-list --no-walk=unsorted --parents --stdin <"$work/commits" >"$work/parents" 2>"$work/rlerr"; then
   n_parents_lines="$(wc -l <"$work/parents" | tr -d ' ')"
-  [ "$n_parents_lines" = "$n_commits" ] || printf \
-    'git rev-list listed parents for %s of %s new commit(s)\n' "$n_parents_lines" "$n_commits" >>"$work/errors"
+  [ "$n_parents_lines" = "$n_commits" ] || note errors \
+    'git rev-list listed parents for %s of %s new commit(s)\n' "$n_parents_lines" "$n_commits"
 else
-  printf 'git rev-list could not read the parents of the new commits: %s\n' "$(cat "$work/rlerr")" >>"$work/errors"
+  note errors 'git rev-list could not read the parents of the new commits: %s\n' "$(cat "$work/rlerr")"
   : >"$work/parents"
 fi
 while read -r commit parents; do
@@ -524,35 +545,45 @@ while read -r commit parents; do
   [ "$ok" = yes ] || continue
   if k="$(intersect_added "$n")"; then
     case "$k" in
-      '' | *[!0-9]*) printf 'awk reported no count of the added lines of %s\n' "$commit" >>"$work/errors" ;;
+      '' | *[!0-9]*) note errors 'awk reported no count of the added lines of %s\n' "$commit" ;;
       *) n_added=$((n_added + k)) ;;
     esac
   else
-    printf 'awk could not match the added lines of %s across its %s parent(s)\n' "$commit" "$n" >>"$work/errors"
+    note errors 'awk could not match the added lines of %s across its %s parent(s)\n' "$commit" "$n"
   fi
-done <"$work/parents"
+done <"$work/parents" || refuse "could not read back the parents of the new commits."
 for f in added addedloc; do
   n_f="$(wc -l <"$work/$f" | tr -d ' ')"
-  [ "$n_f" = "$n_added" ] || printf \
-    'wrote down %s of %s added line(s) in %s\n' "${n_f:-none}" "$n_added" "$f" >>"$work/errors"
+  [ "$n_f" = "$n_added" ] || note errors \
+    'wrote down %s of %s added line(s) in %s\n' "${n_f:-none}" "$n_added" "$f"
 done
 n_done=0
 while IFS="$tab" read -r name pattern; do
   grep -a -n -E "$pattern" "$work/added" >"$work/hits" 2>"$work/greperr" </dev/null
   rc=$?
   if [ "$rc" -gt 1 ]; then
-    printf 'grep could not read the added lines: %s\n' "$(cat "$work/greperr")" >>"$work/errors"
+    note errors 'grep could not read the added lines: %s\n' "$(cat "$work/greperr")"
   elif [ "$rc" -eq 0 ]; then
-    IMPRINT_SHAPE="$name" IMPRINT_ADDEDLOC="$work/addedloc" \
-      LC_ALL=C awk "$join" <"$work/hits" >>"$work/findings" \
-      || printf 'awk could not place the %s hits\n' "$name" >>"$work/errors"
+    # Every hit is one finding, so findings has to grow by as many lines as
+    # hits holds: an awk that lost a write without saying so is an error.
+    n_hits="$(wc -l <"$work/hits" | tr -d ' ')"
+    n_before="$(wc -l <"$work/findings" | tr -d ' ')"
+    if IMPRINT_SHAPE="$name" IMPRINT_ADDEDLOC="$work/addedloc" \
+      LC_ALL=C awk "$join" <"$work/hits" >>"$work/findings"; then
+      n_after="$(wc -l <"$work/findings" | tr -d ' ')"
+      [ -n "$n_hits" ] && [ -n "$n_before" ] && [ "$n_after" = $((n_before + n_hits)) ] \
+        || note errors 'findings went from %s to %s line(s) for %s %s hit(s)\n' \
+          "${n_before:-?}" "${n_after:-?}" "${n_hits:-?}" "$name"
+    else
+      note errors 'awk could not place the %s hits\n' "$name"
+    fi
   fi
   n_done=$((n_done + 1))
 done <"$work/shapes"
-[ "$n_done" = "$n_shapes" ] || printf \
-  'ran %s of %s shape(s) over the added lines\n' "$n_done" "$n_shapes" >>"$work/errors"
-printf 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
-  "$n_shapes" "$n_commits" >>"$work/ran"
+[ "$n_done" = "$n_shapes" ] || note errors \
+  'ran %s of %s shape(s) over the added lines\n' "$n_done" "$n_shapes"
+note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
+  "$n_shapes" "$n_commits"
 
 # --- check 3: commit messages ------------------------------------------------
 # A message is as public as a blob, and trailers are where addresses ride in.
@@ -563,18 +594,18 @@ while IFS="$tab" read -r name pattern; do
   grep -a -n -E "$pattern" "$work/messages" > "$work/mhits" 2>/dev/null </dev/null
   rc=$?
   if [ "$rc" -gt 1 ]; then
-    printf 'grep could not read the commit messages of this range\n' >>"$work/errors"
+    note errors 'grep could not read the commit messages of this range\n'
   elif [ "$rc" -eq 0 ]; then
     while IFS= read -r hit; do
       [ -n "$hit" ] || continue
-      printf '%s in a commit message: %s\n' "$name" "$hit" >>"$work/findings"
-    done <"$work/mhits"
+      note findings '%s in a commit message: %s\n' "$name" "$hit"
+    done <"$work/mhits" || refuse "could not read back the hits in the commit messages."
   fi
   n_done=$((n_done + 1))
 done <"$work/shapes"
-[ "$n_done" = "$n_shapes" ] || printf \
-  'ran %s of %s shape(s) over the commit messages\n' "$n_done" "$n_shapes" >>"$work/errors"
-printf 'commit messages - %s shape(s) over %s new commit(s)\n' "$n_shapes" "$n_commits" >>"$work/ran"
+[ "$n_done" = "$n_shapes" ] || note errors \
+  'ran %s of %s shape(s) over the commit messages\n' "$n_done" "$n_shapes"
+note ran 'commit messages - %s shape(s) over %s new commit(s)\n' "$n_shapes" "$n_commits"
 
 # --- report ------------------------------------------------------------------
 say "pre-push: $n_refs ref(s), $n_commits new commit(s); $scope."
@@ -589,6 +620,9 @@ say "pre-push:   not checked by anything here: whether the prose is abstract."
 
 # A check that could not run is not a check that passed, and no override covers
 # it: "I could not look" and "I looked and found nothing" must never share an exit.
+# The verdict reads a missing file as an empty one, so both have to be there.
+[ -f "$work/errors" ] && [ -f "$work/findings" ] || refuse \
+  "the files the checks report into are gone, so the checks could not run."
 if [ -s "$work/errors" ]; then
   say ""
   say "pre-push: $(wc -l <"$work/errors" | tr -d ' ') check(s) could not run:"

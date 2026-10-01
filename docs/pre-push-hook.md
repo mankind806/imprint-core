@@ -46,9 +46,9 @@ identity are **enforced**; reading for abstraction stays a **behaviour rule** wi
 behind it. The hook says so itself, in every report it prints.
 
 It fails closed. Every way it can fail to finish — a git command that errors, an identity
-this clone never set, a temporary directory it cannot create — ends in a refused push,
-because a gate that waves you through when it breaks is indistinguishable from one that
-checked. One empty case is not such a failure and took a refused push to find: git runs the
+this clone never set, a temporary directory it cannot create, a line of its own report it
+cannot write down on a full disk — ends in a refused push, because a gate that waves you
+through when it breaks is indistinguishable from one that checked. One empty case is not such a failure and took a refused push to find: git runs the
 hook even when the remote is already up to date, and pipes in an empty ref list. Nothing is
 published in that run, so there is nothing to check, and the hook says so and lets it
 through — but only when git is the one calling, which is a hook invoked with a remote name
