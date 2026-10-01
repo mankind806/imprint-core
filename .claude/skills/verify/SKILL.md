@@ -26,6 +26,7 @@ git status --porcelain --untracked-files=all >"$(git rev-parse --git-dir)/verify
     exit 1
   fi
   go test ./...
+  go test -count=1 -v -run '^TestPrePushToolchains$' .
 )
 ```
 

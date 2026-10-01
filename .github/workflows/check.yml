@@ -42,6 +42,9 @@ jobs:
             exit 1
           fi
           go test ./...
+          # Verbose, so this log names the shells and awks (dash, mawk,
+          # busybox) the pre-push hook ran under on this runner.
+          go test -count=1 -v -run '^TestPrePushToolchains$' .
       - name: Codex arrival test (offline)
         # Fixtures and stub codex/timeout binaries only: no account, no model
         # call. Needs python3 on the runner.
