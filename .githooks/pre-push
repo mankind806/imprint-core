@@ -98,7 +98,9 @@ if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no
 #
 # Two places define remotes that `git remote` and `git config` here do not
 # show, and neither is read: a file in the git directory's legacy remotes/
-# folder, whose Pull: lines git still fetches by, and, with
+# folder, whose Pull: lines git still fetches by (a push by name to a remote
+# that fetches into remotes/<x>/... leaves a plain file there too, which
+# `git remote remove` does not delete), and, with
 # extensions.worktreeConfig on, another worktree's config.worktree, which can
 # add a remote or point this one's fetch elsewhere with url.<base>.insteadOf
 # (both measured with git 2.55.0, 2026-10-01). While either is in use, none of
@@ -123,7 +125,7 @@ shared_by() {
     sb_legacy="$(ls -A "$sb_common/remotes" 2>/dev/null)" \
       || { shared="the git directory's legacy remotes/ folder could not be listed"; return; }
     [ -z "$sb_legacy" ] \
-      || { shared="a remote is defined in the git directory's legacy remotes/ folder, which this hook does not read"; return; }
+      || { shared="the legacy remotes/ folder in the git directory is not empty, and this hook does not read it"; return; }
   fi
   # extensions is read from the repository's own config file, as git reads it,
   # so that a -c on the command line cannot hide it.
@@ -330,6 +332,16 @@ postcode and place	[0-9]{5}[[:space:]]+[A-ZÄÖÜ][a-zäöüß-]{2,}
 SHAPES
 }
 n_shapes="$(shapes | wc -l | tr -d ' ')"
+case "$n_shapes" in '' | 0 | *[!0-9]*) refuse "found no shapes to check." ;; esac
+# Both shape loops below read this file in the main shell, not from a pipe: a
+# piped loop runs in a subshell, which has none of the traps above, and a signal
+# that ended it alone would leave the remaining shapes unrun while the hook went
+# on to report no findings. Each loop counts the shapes it finished, and fewer
+# than there are is an error.
+shapes >"$work/shapes" || refuse "could not write down the shapes."
+n_written="$(wc -l <"$work/shapes" | tr -d ' ')"
+[ "$n_written" = "$n_shapes" ] || refuse \
+  "wrote down ${n_written:-no} of $n_shapes shape(s)."
 tab="$(printf '\t')"
 
 # --- check 2: tracked content, the lines the new commits add -----------------
@@ -524,8 +536,9 @@ for f in added addedloc; do
   [ "$n_f" = "$n_added" ] || printf \
     'wrote down %s of %s added line(s) in %s\n' "${n_f:-none}" "$n_added" "$f" >>"$work/errors"
 done
-shapes | while IFS="$tab" read -r name pattern; do
-  grep -a -n -E "$pattern" "$work/added" >"$work/hits" 2>"$work/greperr"
+n_done=0
+while IFS="$tab" read -r name pattern; do
+  grep -a -n -E "$pattern" "$work/added" >"$work/hits" 2>"$work/greperr" </dev/null
   rc=$?
   if [ "$rc" -gt 1 ]; then
     printf 'grep could not read the added lines: %s\n' "$(cat "$work/greperr")" >>"$work/errors"
@@ -534,7 +547,10 @@ shapes | while IFS="$tab" read -r name pattern; do
       LC_ALL=C awk "$join" <"$work/hits" >>"$work/findings" \
       || printf 'awk could not place the %s hits\n' "$name" >>"$work/errors"
   fi
-done
+  n_done=$((n_done + 1))
+done <"$work/shapes"
+[ "$n_done" = "$n_shapes" ] || printf \
+  'ran %s of %s shape(s) over the added lines\n' "$n_done" "$n_shapes" >>"$work/errors"
 printf 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
   "$n_shapes" "$n_commits" >>"$work/ran"
 
@@ -542,8 +558,9 @@ printf 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
 # A message is as public as a blob, and trailers are where addresses ride in.
 git log --no-walk=unsorted --stdin --format='%h|%s%n%b' <"$work/commits" >"$work/messages" \
   || refuse "git log failed reading the messages of the new commits."
-shapes | while IFS="$tab" read -r name pattern; do
-  grep -a -n -E "$pattern" "$work/messages" > "$work/mhits" 2>/dev/null
+n_done=0
+while IFS="$tab" read -r name pattern; do
+  grep -a -n -E "$pattern" "$work/messages" > "$work/mhits" 2>/dev/null </dev/null
   rc=$?
   if [ "$rc" -gt 1 ]; then
     printf 'grep could not read the commit messages of this range\n' >>"$work/errors"
@@ -553,7 +570,10 @@ shapes | while IFS="$tab" read -r name pattern; do
       printf '%s in a commit message: %s\n' "$name" "$hit" >>"$work/findings"
     done <"$work/mhits"
   fi
-done
+  n_done=$((n_done + 1))
+done <"$work/shapes"
+[ "$n_done" = "$n_shapes" ] || printf \
+  'ran %s of %s shape(s) over the commit messages\n' "$n_done" "$n_shapes" >>"$work/errors"
 printf 'commit messages - %s shape(s) over %s new commit(s)\n' "$n_shapes" "$n_commits" >>"$work/ran"
 
 # --- report ------------------------------------------------------------------

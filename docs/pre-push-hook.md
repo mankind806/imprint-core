@@ -70,7 +70,15 @@ still fetches by, and, with `extensions.worktreeConfig` on, another worktree's
 worktree's fetch store another repository's commits under `refs/remotes/<remote>/`. While
 either is in use, the tracking refs are not trusted at all. A conditional include
 (`includeIf`, on `onbranch:` or `gitdir:`) can do the same between worktrees without the
-extension, and nothing here covers it. *Measured with git 2.55.0, 2026-10-01.
+extension, and nothing here covers it. A push by name to a remote whose fetch refspec stores
+into `remotes/<x>/…` leaves a plain file in the legacy folder as well, which
+`git remote remove` does not delete; to clear such a leftover, look at what the `remotes/`
+folder under `git rev-parse --git-common-dir` holds first. `git clone --sparse` and
+`git sparse-checkout set` turn `extensions.worktreeConfig` on, and `git sparse-checkout
+disable` leaves it on, so such a clone has everything the remote's old tip does not reach
+checked: push with `IMPRINT_PUSH_ANYWAY` and a reason, or, after `git sparse-checkout
+disable`, unset `extensions.worktreeConfig` when no worktree's `config.worktree` holds
+anything but the keys `disable` set to false. *Measured with git 2.55.0, 2026-10-01.
 Re-check by 2027-01-01.* A
 push to a location rather than a configured remote has no tracking refs to trust, and then
 everything the remote's old tip does not reach is checked. And tracking refs are what this

@@ -647,6 +647,7 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 	}
 	gitBin := ppRealBin(t, "git")
 	awkBin := ppRealBin(t, "awk")
+	grepBin := ppRealBin(t, "grep")
 	// A git that corrupts one command's output, and passes every other
 	// command through.
 	gitShim := func(t *testing.T, match, run string) string {
@@ -677,6 +678,11 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		{"a line missing from added", func(t *testing.T) string {
 			return awkShim(t, `if [ -n "${IMPRINT_ADDED:-}" ]; then sed '$d' "$IMPRINT_ADDED" >"$IMPRINT_ADDED.cut" && mv "$IMPRINT_ADDED.cut" "$IMPRINT_ADDED"; fi`)
 		}, []string{"wrote down 0 of 1 added line(s) in added"}},
+		{"a shape loop cut short", func(t *testing.T) string {
+			// A grep that empties the shape list the loops read, while the
+			// first loop is on its first shape.
+			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */added) : >\"${last%/added}/shapes\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}, []string{"ran 1 of ", " shape(s) over the added lines", "ran 0 of ", " shape(s) over the commit messages"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r, tip := brokenTip(t, "guard.shim")
@@ -1231,29 +1237,50 @@ func TestPrePushPOSIXLYCorrect(t *testing.T) {
 	ppWantChecked(t, out)
 }
 
-// 25. A signal ends the hook half-way - here a TERM that git sends its parent
-// shell while it diffs. dash and busybox sh run no EXIT trap then, so without
-// a trap of its own the hook would leave its working files behind and exit by
-// the signal; it removes them and exits 1, which refuses the push.
+// 25. A signal ends the hook half-way. dash and busybox sh run no EXIT trap
+// then, so without a trap of its own the hook would leave its working files
+// behind and exit by the signal; it removes them and exits 1, which refuses
+// the push. The TERM comes during the last git call the hook makes, the one
+// that reads the messages: a trap that removed the files and returned would
+// let the hook run on without them, to whatever exit that happened to reach.
+// And it comes from a grep in a shape loop, which has to run in the shell that
+// holds the trap: a piped loop ran in a subshell that died alone, and the hook
+// reported no findings for the shapes it never ran - here the one shape the
+// added line holds.
 func TestPrePushSignalCleansUp(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
 	gitBin := ppRealBin(t, "git")
-	r := ppSeed(t, env)
-	r.git("checkout", "-q", "-b", "sig")
-	r.write("sig.txt", "a clean line\n")
-	tip := r.commit("sig: one clean commit")
-	tmp := t.TempDir()
-	path := ppShimPATH(t, "git", "case \" $* \" in *\" diff-tree \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
-	code, out := r.hookNewBranch("sig", tip, path, "TMPDIR="+tmp)
-	if code != 1 {
-		t.Errorf("hook exit %d after a TERM, want 1; output:\n%s", code, out)
-	}
-	left, err := os.ReadDir(tmp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range left {
-		t.Errorf("the hook left %s behind in TMPDIR", e.Name())
+	grepBin := ppRealBin(t, "grep")
+	for _, c := range []struct {
+		name    string
+		content string
+		shim    func(t *testing.T) string
+	}{
+		{"a TERM during the last git call", "a clean line\n", func(t *testing.T) string {
+			return ppShimPATH(t, "git", "case \" $* \" in *\" --format=%h|%s%n%b \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+		}},
+		{"a TERM from a grep in a shape loop", "first line\nvisit " + ppPostcode + "\n", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "case \" $* \" in *\"/added \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "sig")
+			r.write("sig.txt", c.content)
+			tip := r.commit("sig: one commit")
+			tmp := t.TempDir()
+			code, out := r.hookNewBranch("sig", tip, c.shim(t), "TMPDIR="+tmp)
+			if code != 1 || strings.Contains(out, "no findings") {
+				t.Errorf("hook exit %d after a TERM, want 1 and no report of no findings; output:\n%s", code, out)
+			}
+			left, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range left {
+				t.Errorf("the hook left %s behind in TMPDIR", e.Name())
+			}
+		})
 	}
 }
