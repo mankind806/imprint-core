@@ -648,6 +648,7 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 	gitBin := ppRealBin(t, "git")
 	awkBin := ppRealBin(t, "awk")
 	grepBin := ppRealBin(t, "grep")
+	sortBin := ppRealBin(t, "sort")
 	// A git that corrupts one command's output, and passes every other
 	// command through.
 	gitShim := func(t *testing.T, match, run string) string {
@@ -687,6 +688,15 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		{"a grep over the commit messages that writes no hit", func(t *testing.T) string {
 			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */messages) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
 		}, []string{" in the commit messages but wrote no hit down"}},
+		// The sort that merges the hits under your locale with those under
+		// C, failing out loud, and losing a line without saying so. The
+		// shape is in the commit message, so that is where it fails.
+		{"a sort that cannot merge the hits", func(t *testing.T) string {
+			return ppShimPATH(t, "sort", "for a; do case \"$a\" in */hits.own) exit 2 ;; esac; done\nexec '"+sortBin+"' \"$@\"\n")
+		}, []string{"sort could not merge the address hits in the commit messages"}},
+		{"a sort that loses a merged hit", func(t *testing.T) string {
+			return ppShimPATH(t, "sort", "for a; do case \"$a\" in */hits.own) '"+sortBin+"' \"$@\" | sed '$d'; exit ;; esac; done\nexec '"+sortBin+"' \"$@\"\n")
+		}, []string{"sort merged 1 and 1 address hit(s) in the commit messages into 0"}},
 		{"a shape loop cut short", func(t *testing.T) string {
 			// A grep that empties the shape list the loops read, while the
 			// first loop is on its first shape.
