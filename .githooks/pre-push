@@ -225,7 +225,7 @@ trap 'rm -rf "$work"; exit 1' HUP INT TERM
 # (greprc, below). true, not ":" - a redirection that fails on a special
 # built-in such as ":" ends the shell before || refuse can say why.
 for f in findings errors ran skipped ranges hits mhits greperr \
-  commitrefs tags objects tag.raw taggers taggers.undeclared tagtext thits thits.own thits.C; do
+  commitrefs tags objects tag.raw taggers.undeclared tagtext thits thits.own thits.C; do
   true >"$work/$f" || refuse "$cannot_write"
 done
 
@@ -292,7 +292,7 @@ new_commits() {
 # to either, it lists nothing and succeeds (measured with git 2.55.0,
 # 2026-10-01), and the push would pass as one with no new commit. So each local
 # oid is typed first, and a tag is peeled one object at a time: every tag object
-# on the way is published with the ref and goes to check 4, an inner tag of a
+# on the way is published with the ref and goes to the tag check, an inner tag of a
 # nested one as much as the outer. A ref that ends in a commit goes on to
 # rev-list with that commit. tags lists each tag object once - "oid N ref",
 # its content, with any NUL turned into \001, in tag.N; objects lists the
@@ -300,8 +300,9 @@ new_commits() {
 # or "tag" - for the finding below.
 # An object this clone cannot type or read stops the push here: what a ref
 # publishes has to be known before anything about it can be checked.
-n_tags=0
+n_tags=0; n_commitrefs=0; n_objects=0; n_classified=0
 while read -r local_oid remote_oid remote_ref; do
+  n_classified=$((n_classified + 1))
   obj="$local_oid"; via=direct
   type="$(git cat-file -t "$obj" 2>/dev/null </dev/null)" \
     || refuse "could not read the type of $obj, pushed to $remote_ref."
@@ -314,36 +315,52 @@ while read -r local_oid remote_oid remote_ref; do
       # A NUL would end a line early in some seds; it never matches a shape.
       tr '\000' '\001' <"$work/tag.raw" >"$work/tag.$n_tags" \
         || refuse "could not prepare tag object $obj, pushed to $remote_ref, for reading."
+      # tr maps byte for byte, so the copy has to be as long as the object.
+      [ "$(wc -c <"$work/tag.raw" | tr -d ' ')" = "$(wc -c <"$work/tag.$n_tags" | tr -d ' ')" ] \
+        || refuse "could not copy tag object $obj, pushed to $remote_ref, whole."
       note tags '%s %s %s\n' "$obj" "$n_tags" "$remote_ref"
       tagfile="$work/tag.$n_tags"
     else
-      tagfile="$work/tag.$(sed -n "s/^$obj \\([0-9]*\\) .*/\\1/p" "$work/tags")"
+      tagfile="$work/tag.$(LC_ALL=C sed -n "s/^$obj \\([0-9]*\\) .*/\\1/p" "$work/tags")"
     fi
-    obj="$(sed -n -e '/^$/q' -e 's/^object //p' "$tagfile")"
+    obj="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^object //p' "$tagfile")"
+    # A full object id, as git reads it; git would resolve an abbreviation
+    # here that a push cannot send.
     case "$obj" in
       '' | *[!0-9a-f]*) refuse "a tag object pushed to $remote_ref names no object it points at." ;;
     esac
+    [ "${#obj}" = "${#zero}" ] \
+      || refuse "a tag object pushed to $remote_ref names its object by an abbreviated id."
     type="$(git cat-file -t "$obj" 2>/dev/null </dev/null)" \
       || refuse "could not read the type of $obj, which a tag pushed to $remote_ref points at."
   done
   case "$type" in
-    commit) note commitrefs '%s %s\n' "$obj" "$remote_oid" ;;
-    blob | tree) note objects '%s %s %s %s\n' "$type" "$obj" "$remote_ref" "$via" ;;
+    commit) note commitrefs '%s %s\n' "$obj" "$remote_oid"; n_commitrefs=$((n_commitrefs + 1)) ;;
+    blob | tree) note objects '%s %s %s %s\n' "$type" "$obj" "$remote_ref" "$via"; n_objects=$((n_objects + 1)) ;;
     *) refuse "$remote_ref points at a $type, which this hook does not know how to read." ;;
   esac
 done <"$work/ranges" || refuse "could not read back the ref list."
 # As for the ref list: a line that could not be written down - under a file
-# size limit, say - would leave a ref or a tag object unread.
-n_sorted=$(( $(wc -l <"$work/commitrefs") + $(wc -l <"$work/objects") ))
+# size limit, say - would leave a ref or a tag object unread. And a loop over
+# a list that is gone or is a directory ends as at its last line, with no
+# error, so each loop over these lists counts the lines it read.
+n_cr_written="$(wc -l <"$work/commitrefs" | tr -d ' ')"
+n_ob_written="$(wc -l <"$work/objects" | tr -d ' ')"
 n_tags_written="$(wc -l <"$work/tags" | tr -d ' ')"
-[ "$n_sorted" = "$n_ranges" ] && [ "$n_tags_written" = "$n_tags" ] || refuse \
-  "wrote down $n_sorted of $n_ranges ref(s) and ${n_tags_written:-no} of $n_tags tag object(s) to check."
+[ "$n_classified" = "$n_ranges" ] || refuse \
+  "read back $n_classified of $n_ranges ref line(s) to check."
+[ "$n_cr_written" = "$n_commitrefs" ] && [ "$n_ob_written" = "$n_objects" ] \
+  && [ "$n_tags_written" = "$n_tags" ] || refuse \
+  "wrote down ${n_cr_written:-no} of $n_commitrefs commit ref(s), ${n_ob_written:-no} of $n_objects blob or tree ref(s) and ${n_tags_written:-no} of $n_tags tag object(s) to check."
 
 true >"$work/commits" || refuse "$cannot_write"
+n_read=0
 while read -r local_oid remote_oid; do
+  n_read=$((n_read + 1))
   new_commits "$local_oid" "$remote_oid" >>"$work/commits" </dev/null \
     || refuse "git rev-list failed for $local_oid."
 done <"$work/commitrefs" || refuse "could not read back the commit refs."
+[ "$n_read" = "$n_commitrefs" ] || refuse "read back $n_read of $n_commitrefs commit ref(s)."
 sort -u -o "$work/commits" "$work/commits" || refuse "could not sort the commit list."
 n_commits="$(wc -l <"$work/commits" | tr -d ' ')"
 n_refs="$(wc -l <"$work/ranges" | tr -d ' ')"
@@ -409,32 +426,51 @@ tab="$(printf '\t')"
 # inside a nested tag, is read again: tags have no tracking refs that would say
 # what the remote has.
 if [ "$n_tags" -gt 0 ]; then
+  n_tags_read=0
   while read -r t_oid t_n t_ref; do
+    n_tags_read=$((n_tags_read + 1))
     t_file="$work/tag.$t_n"
-    t_name="$(sed -n -e '/^$/q' -e 's/^tag //p' "$t_file" | sed -n 1p)"
+    # The tag object's own bytes are read under C: in a UTF-8 locale a byte
+    # that is not valid there - a Latin-1 name, say - matches no `.`, and the
+    # tagger's identity would neither be read nor be cut out of what is
+    # matched below.
+    t_name="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^tag //p' "$t_file" | LC_ALL=C sed -n 1p)"
     [ -n "$t_name" ] || t_name="$t_oid"
-    if sed -n -e '/^$/q' -e 's/^tagger //p' "$t_file" >"$work/taggers"; then
-      [ -s "$work/taggers" ] || note findings \
-        'no tagger: tag %s names nobody as its tagger, so no declared identity\n' "$t_name"
-      # The `|| [ -n ... ]` catches a last line with no newline after it, as
-      # on the ref list above: sed keeps a missing final newline as it found it.
-      t_line=''
-      while IFS= read -r t_line || [ -n "$t_line" ]; do
-        t_id="$(printf '%s\n' "$t_line" | sed -n 's/^\(.*>\).*$/\1/p')"
-        if [ -z "$t_id" ]; then
-          note errors 'could not read the tagger of tag %s as "Name <address>"\n' "$t_name"
-        elif ! grep -Fxq -- "$t_id" "$work/allowed"; then
-          note findings 'undeclared identity: %s, tagger of tag %s\n' "$t_id" "$t_name"
-          note taggers.undeclared '%s\n' "$t_id"
-        fi
-        t_line=''
-      done <"$work/taggers" || refuse "could not read back the taggers of tag $t_name."
+    # The tagger lines are held in a variable, not a file: nothing can swap a
+    # variable for a directory between writing and reading it.
+    if t_taggers="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^tagger //p' "$t_file")"; then
+      if [ -z "$t_taggers" ]; then
+        note findings 'no tagger: tag %s names nobody as its tagger, so no declared identity\n' "$t_name"
+      else
+        # A here-document the shell could not make would leave the loop
+        # unrun, so the lines it read are counted against those sed found.
+        t_ntaggers="$(printf '%s\n' "$t_taggers" | wc -l | tr -d ' ')"; n_read=0
+        while IFS= read -r t_line; do
+          n_read=$((n_read + 1))
+          t_id="$(printf '%s\n' "$t_line" | LC_ALL=C sed -n 's/^\(.*>\).*$/\1/p')"
+          if [ -z "$t_id" ]; then
+            note errors 'could not read the tagger of tag %s as "Name <address>"\n' "$t_name"
+            continue
+          fi
+          LC_ALL=C grep -Fxq -- "$t_id" "$work/allowed"; rc=$?
+          if [ "$rc" -eq 1 ]; then
+            note findings 'undeclared identity: %s, tagger of tag %s\n' "$t_id" "$t_name"
+            note taggers.undeclared '%s\n' "$t_id"
+          elif [ "$rc" -gt 1 ]; then
+            note errors 'grep could not read the declared identities for the tagger of tag %s\n' "$t_name"
+          fi
+        done <<TAGGERS
+$t_taggers
+TAGGERS
+        [ "$n_read" = "$t_ntaggers" ] || note errors \
+          'read %s of %s tagger line(s) of tag %s\n' "$n_read" "${t_ntaggers:-?}" "$t_name"
+      fi
     else
       note errors 'sed could not read the tagger of tag %s\n' "$t_name"
     fi
     # The object as it is, but for the identity on each tagger line of the
     # header, checked above; line numbers stay those of the object.
-    if sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext"; then
+    if LC_ALL=C sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext"; then
       n_done=0
       while IFS="$tab" read -r name pattern; do
         t_state=clean
@@ -463,12 +499,19 @@ if [ "$n_tags" -gt 0 ]; then
           fi
         done
         if [ "$t_state" = hit ]; then
-          if LC_ALL=C sort -u -t: -k1,1n "$work/thits.own" "$work/thits.C" >"$work/thits"; then
+          if ! LC_ALL=C sort -u -t: -k1,1n "$work/thits.own" "$work/thits.C" >"$work/thits"; then
+            note errors 'sort could not merge the %s hits in tag %s\n' "$name" "$t_name"
+          elif [ ! -s "$work/thits" ]; then
+            # Either grep wrote a hit down, so the merge cannot be empty.
+            note errors 'sort merged the %s hits in tag %s into nothing\n' "$name" "$t_name"
+          else
+            n_hits="$(wc -l <"$work/thits" | tr -d ' ')"; n_read=0
             while IFS= read -r hit; do
+              n_read=$((n_read + 1))
               note findings '%s in tag %s: %s\n' "$name" "$t_name" "$hit"
             done <"$work/thits" || refuse "could not read back the hits in tag $t_name."
-          else
-            note errors 'sort could not merge the %s hits in tag %s\n' "$name" "$t_name"
+            [ "$n_read" = "$n_hits" ] || note errors \
+              'read back %s of %s %s hit(s) in tag %s\n' "$n_read" "${n_hits:-?}" "$name" "$t_name"
           fi
         fi
         n_done=$((n_done + 1))
@@ -479,6 +522,7 @@ if [ "$n_tags" -gt 0 ]; then
       note errors 'sed could not read tag %s\n' "$t_name"
     fi
   done <"$work/tags" || refuse "could not read back the tag list."
+  [ "$n_tags_read" = "$n_tags" ] || refuse "read back $n_tags_read of $n_tags tag object(s)."
   n_tag_undeclared="$(sort -u "$work/taggers.undeclared" | wc -l | tr -d ' ')"
   note ran 'annotated tags - the tagger, and %s shape(s) over the rest of the object, for %s tag object(s); %s undeclared tagger(s)\n' \
     "$n_shapes" "$n_tags" "$n_tag_undeclared"
@@ -495,8 +539,10 @@ fi
 # would count as new. Such a ref is a finding instead (the owner's call,
 # 2026-10-01): IMPRINT_PUSH_ANYWAY with a reason is the loud way to push one on
 # purpose.
-if [ -s "$work/objects" ]; then
+if [ "$n_objects" -gt 0 ]; then
+  n_read=0
   while read -r o_type o_oid o_ref o_via; do
+    n_read=$((n_read + 1))
     if [ "$o_via" = tag ]; then
       note findings 'unread content: the tag pushed to %s ends in %s %s, and this hook does not read a %s\n' \
         "$o_ref" "$o_type" "$o_oid" "$o_type"
@@ -505,8 +551,8 @@ if [ -s "$work/objects" ]; then
         "$o_ref" "$o_type" "$o_oid" "$o_type"
     fi
   done <"$work/objects" || refuse "could not read back the refs to a blob or a tree."
-  note ran 'refs to a blob or a tree - %s ref(s), each a finding, its content unread\n' \
-    "$(wc -l <"$work/objects" | tr -d ' ')"
+  [ "$n_read" = "$n_objects" ] || refuse "read back $n_read of $n_objects ref(s) to a blob or a tree."
+  note ran 'refs to a blob or a tree - %s ref(s), each a finding, its content unread\n' "$n_objects"
 fi
 
 # report - says what ran, what was skipped and what was found, and ends the
@@ -561,7 +607,7 @@ report() {
 # git 2.55.0, 2026-10-01). With no tag object and no blob or tree either,
 # nothing at all was read.
 if [ "$n_commits" -eq 0 ]; then
-  if [ "$n_tags" -eq 0 ] && [ ! -s "$work/objects" ]; then
+  if [ "$n_tags" -eq 0 ] && [ "$n_objects" -eq 0 ]; then
     say "pre-push: $n_refs ref(s), 0 new commit(s), 0 tag object(s); $scope."
     say "pre-push: checks that ran: none needed."
     say "pre-push:   skipped: declared identity, tracked content, commit messages - no new commit, so no commit identity, added line or commit message to check"

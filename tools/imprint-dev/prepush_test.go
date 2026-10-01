@@ -1535,6 +1535,14 @@ func TestPrePushTagger(t *testing.T) {
 			t.Errorf("hook report lacks %q; output:\n%s", "0 undeclared tagger(s)", out)
 		}
 	})
+	t.Run("declared tagger with a Latin-1 name, UTF-8 locale", func(t *testing.T) {
+		r := r.with(t)
+		name := "J\xfcrgen Tester"
+		r.git("config", "--add", "imprint.allowedIdentity", name+" <"+ccTestSomeoneEmail+">")
+		oid := r.tag("by-latin1", pushed, name, ccTestSomeoneEmail, "a clean tag by a declared Latin-1 name")
+		code, out := r.hookNewTag("by-latin1", oid, "LC_ALL=C.UTF-8")
+		ppWantPass(t, code, out)
+	})
 	t.Run("undeclared tagger", func(t *testing.T) {
 		r := r.with(t)
 		oid := r.tag("by-stranger", pushed, "Someone Else", ccTestSomeoneEmail, "a clean tag by a stranger")
@@ -1814,5 +1822,114 @@ func TestPrePushTagLatin1Byte(t *testing.T) {
 	ppWantChecked(t, out)
 	if n := strings.Count(out, "phone number in tag latin1"); n != 1 {
 		t.Errorf("the hit is reported %d times, want once; output:\n%s", n, out)
+	}
+}
+
+// 38. The failures of tests 25-27 and of the toolchain test's directory case,
+// and lists the tag check reads changed under it, on a push of a tag alone: no new commit, so the tag check's greps are the
+// only shape greps that run. A TERM from one of them, the findings or the
+// errors file swapped for /dev/full, the working directory removed, a hit
+// file that cannot be opened, and a grep that matches and writes nothing all
+// refuse the push, with and without IMPRINT_PUSH_ANYWAY, and none reports no
+// findings.
+func TestPrePushTagCheckBroken(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	grepBin := ppRealBin(t, "grep")
+	gitBin := ppRealBin(t, "git")
+	full := false
+	if fi, err := os.Stat("/dev/full"); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		full = true
+	}
+	shape := "release notes, write to " + addr("tag.broken", "example.invalid")
+	onTagtext := func(action string) string {
+		return "for a; do last=$a; done\ncase \"${last:-}\" in */tagtext) " + action + " ;; esac\nexec '" + grepBin + "' \"$@\"\n"
+	}
+	// The tagger check is the one grep over */allowed before the tag's shape
+	// greps when no commit is new.
+	onAllowed := func(file string) string {
+		return "for a; do last=$a; done\ncase \"${last:-}\" in */allowed) d=\"${last%/*}\"; rm -f \"$d/" + file + "\" && mkdir \"$d/" + file + "\" ;; esac\nexec '" + grepBin + "' \"$@\"\n"
+	}
+	// While the hook reads imprint.allowedIdentity - after it wrote the ref
+	// lists down, before the tag check reads them - git changes a work file
+	// under the hook's TMPDIR. A list that is gone, empty or a directory reads
+	// like one at its end, with no error.
+	onConfig := func(action string) string {
+		return "case \" $* \" in *\" imprint.allowedIdentity \"*) for d in \"$TMPDIR\"/*/; do " + action + "; done ;; esac\nexec '" + gitBin + "' \"$@\"\n"
+	}
+	for _, c := range []struct {
+		name, message, shim string
+		devFull             bool
+		wants               []string
+		tool                string // the binary the shim stands in for; grep when empty
+		tree                bool   // push a tag on a tree rather than on a commit
+	}{
+		{name: "tags list a directory", message: shape, tool: "git",
+			shim: onConfig("rm -f \"${d}tags\" && mkdir \"${d}tags\""), wants: []string{"read back 0 of 1 tag object(s)"}},
+		{name: "tags list emptied", message: shape, tool: "git",
+			shim: onConfig(": >\"${d}tags\""), wants: []string{"read back 0 of 1 tag object(s)"}},
+		{name: "objects list a directory", message: "a clean tag on a tree", tool: "git", tree: true,
+			shim: onConfig("rm -f \"${d}objects\" && mkdir \"${d}objects\""), wants: []string{"read back", "a blob or a tree"}},
+		{name: "objects list removed", message: "a clean tag on a tree", tool: "git", tree: true,
+			shim: onConfig("rm -f \"${d}objects\""), wants: []string{"read back", "a blob or a tree"}},
+		{name: "declared identities a directory", message: "a clean tag", tool: "git",
+			shim: onConfig("rm -f \"${d}allowed\" && mkdir \"${d}allowed\""), wants: []string{"grep could not read the declared identities"}},
+		{"a TERM from a tag grep", shape, onTagtext("kill -TERM \"$PPID\""), false, nil, "", false},
+		{"findings on a full disk", shape, onTagtext("ln -s -f /dev/full \"${last%/tagtext}/findings\""), true,
+			[]string{"could not write the hook's report"}, "", false},
+		{"errors on a full disk", "a clean tag", onTagtext("ln -s -f /dev/full \"${last%/tagtext}/errors\"; exit 2"), true,
+			[]string{"could not write the hook's report"}, "", false},
+		{"work directory removed, shape", shape, onTagtext("rm -rf \"${last%/*}\""), false, nil, "", false},
+		{"work directory removed, clean", "a clean tag", onTagtext("rm -rf \"${last%/*}\""), false, nil, "", false},
+		{"thits.own is a directory", shape, onAllowed("thits.own"), false,
+			[]string{"could not run grep for address over tag"}, "", false},
+		{"thits.C is a directory", shape, onAllowed("thits.C"), false,
+			[]string{"could not run grep for address over tag"}, "", false},
+		{"a grep that matches and writes nothing", shape, onTagtext("exit 0"), false,
+			[]string{"but wrote no hit down"}, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.devFull && !full {
+				t.Skip("no /dev/full here to stand in for a full disk")
+			}
+			r := ppSeed(t, env)
+			target := r.head()
+			if c.tree {
+				target = r.git("rev-parse", "HEAD^{tree}")
+			}
+			oid := r.tag("broken", target, ppAuthorName, ccTestAuthorEmail, c.message)
+			tool := c.tool
+			if tool == "" {
+				tool = "grep"
+			}
+			path := ppShimPATH(t, tool, c.shim)
+			for _, anyway := range []bool{false, true} {
+				tmp := t.TempDir()
+				e := []string{path, "TMPDIR=" + tmp}
+				if anyway {
+					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+				}
+				code, out := r.hookNewTag("broken", oid, e...)
+				if strings.HasPrefix(c.name, "a TERM") {
+					// The trap removes the files and exits 1 without a word,
+					// as in test 25.
+					if code != 1 {
+						t.Errorf("hook exit %d after a TERM, want 1; output:\n%s", code, out)
+					}
+				} else {
+					ppWantRefused(t, code, out, c.wants...)
+				}
+				if strings.Contains(out, "no findings") || strings.Contains(out, "IMPRINT_PUSH_ANYWAY is set") {
+					t.Errorf("hook let the push through; output:\n%s", out)
+				}
+				left, err := os.ReadDir(tmp)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, l := range left {
+					t.Errorf("the hook left %s behind in TMPDIR", l.Name())
+				}
+			}
+		})
 	}
 }
