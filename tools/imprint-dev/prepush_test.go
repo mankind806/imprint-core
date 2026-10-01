@@ -1229,14 +1229,24 @@ func TestPrePushToolchains(t *testing.T) {
 	tcID := ppAuthorName + " <" + ccTestAuthorEmail + "> 1767225600 +0000"
 	rawMsgTip := r.rawCommit("tree " + tree + "\nparent " + tagged + "\nauthor " + tcID + "\ncommitter " + tcID +
 		"\n\nrawmsg: a Latin-1 byte\n\nTel.:\xa0" + "0" + "30" + " " + "1234567\n")
-	tcPlace := "10115" + " " + "\u00dcbungsstadt"
-	r.git("checkout", "-q", "-b", "encmsg", "main")
+	// The encoding cases here hold with any grep: busybox sh runs busybox's
+	// own grep, which in CI matched no capital umlaut in a place, so the
+	// umlaut cases stay in tests 40 and 42. A declared name outside ASCII
+	// shows git log's --encoding at work, and a mislabelled commit's
+	// address its message read as stored.
+	tcName := "J\u00fcrgen Test"
+	tcDeclared := []string{"GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0=" + tcName + " <" + ccTestSomeoneEmail + ">"}
+	r.git("checkout", "-q", "-b", "encid", "main")
 	r.write("enc.txt", "a clean line\n")
-	encMsgTip := r.commit("encmsg: deliver to " + tcPlace)
+	r.stage()
+	r.git("-c", "user.name="+tcName, "-c", "user.email="+ccTestSomeoneEmail, "commit", "-q", "-m", "encid: a declared name outside ASCII")
+	encIDTip := r.head()
+	tcMislabelAddr := addr("tc.mislabel", "example.invalid")
 	r.git("checkout", "-q", "-b", "mislabel", "main")
 	r.write("mis.txt", "a clean line\n")
 	r.stage()
-	r.git("-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "-m", "mislabel: deliver to "+tcPlace)
+	r.git("-c", "user.name="+tcName, "-c", "user.email="+ccTestSomeoneEmail, "-c", "i18n.commitEncoding=ISO-8859-1",
+		"commit", "-q", "-m", "mislabel: write to "+tcMislabelAddr)
 	mislabelTip := r.head()
 	latin1Tagger := r.rawTag("object " + tagged + "\ntype commit\ntag tc-latin1tagger\ntagger Gr\xfcn Fremd <" +
 		ccTestSomeoneEmail + "> 1767225600 +0000\n\na clean tag\n")
@@ -1296,12 +1306,15 @@ func TestPrePushToolchains(t *testing.T) {
 				code, out = c.hookNewBranch("rawmsg", rawMsgTip, "LC_ALL=C.UTF-8")
 				ppWantRefused(t, code, out, "phone number in a commit message: ")
 				ppWantChecked(t, out)
-				code, out = c.hookNewBranch("encmsg", encMsgTip, append([]string{"LC_ALL=C.UTF-8"}, ppLatin1Log...)...)
-				ppWantRefused(t, code, out, "postcode and place in a commit message: ", tcPlace)
+				code, out = c.hookNewBranch("encid", encIDTip, append([]string{"LC_ALL=C.UTF-8", "GIT_CONFIG_COUNT=2",
+					"GIT_CONFIG_KEY_1=i18n.logOutputEncoding", "GIT_CONFIG_VALUE_1=ISO-8859-1"}, tcDeclared...)...)
+				ppWantPass(t, code, out)
+				code, out = c.hookNewBranch("mislabel", mislabelTip, append([]string{"LC_ALL=C.UTF-8", "GIT_CONFIG_COUNT=1"}, tcDeclared...)...)
+				ppWantRefused(t, code, out, " as stored|mislabel: write to "+tcMislabelAddr)
 				ppWantChecked(t, out)
-				code, out = c.hookNewBranch("mislabel", mislabelTip, "LC_ALL=C.UTF-8")
-				ppWantRefused(t, code, out, " as stored|mislabel: deliver to "+tcPlace)
-				ppWantChecked(t, out)
+				if strings.Contains(out, "undeclared identity") {
+					t.Errorf("the stored reading did not vouch for the declared name; output:\n%s", out)
+				}
 				code, out = c.hookNewTag("tc-latin1tagger", latin1Tagger, "LC_ALL=C.UTF-8")
 				ppWantRefused(t, code, out, ", tagger of tag tc-latin1tagger")
 				ppWantChecked(t, out)
