@@ -175,8 +175,9 @@ new_commits() {
 # on the way is published with the ref and goes to check 4, an inner tag of a
 # nested one as much as the outer. A ref that ends in a commit goes on to
 # rev-list with that commit. tags lists each tag object once - "oid N ref",
-# its content, with any NUL turned into \001, in tag.N; objects lists the refs that end in a blob or a tree -
-# "type oid ref via", via being "direct" or "tag" - for the finding below.
+# its content, with any NUL turned into \001, in tag.N; objects lists the
+# refs that end in a blob or a tree - "type oid ref via", via being "direct"
+# or "tag" - for the finding below.
 # An object this clone cannot type or read stops the push here: what a ref
 # publishes has to be known before anything about it can be checked.
 : >"$work/commitrefs"; : >"$work/tags"; : >"$work/objects"
@@ -290,12 +291,25 @@ if [ "$n_tags" -gt 0 ]; then
       printf 'sed could not read tag %s\n' "$t_name" >>"$work/errors"
       continue
     }
+    # Each shape is matched twice. Under your own locale, since a pattern holds
+    # characters outside ASCII; and under C, since a tag object is raw bytes
+    # that git does not re-encode, and a byte that is not valid in your
+    # locale's encoding matches no bracket expression there - not even
+    # [^0-9]. A Latin-1 no-break space before a phone number hid it from a
+    # UTF-8 locale and not from C (measured with GNU grep, 2026-10-01). A
+    # line either grep finds is a hit.
     shapes | while IFS="$tab" read -r name pattern; do
-      grep -a -n -E "$pattern" "$work/tagtext" >"$work/thits" 2>"$work/greperr"
-      rc=$?
-      if [ "$rc" -gt 1 ]; then
+      grep -a -n -E "$pattern" "$work/tagtext" >"$work/thits.own" 2>"$work/greperr"
+      rc_own=$?
+      LC_ALL=C grep -a -n -E "$pattern" "$work/tagtext" >"$work/thits.c" 2>>"$work/greperr"
+      rc_c=$?
+      if [ "$rc_own" -gt 1 ] || [ "$rc_c" -gt 1 ]; then
         printf 'grep could not read tag %s: %s\n' "$t_name" "$(cat "$work/greperr")" >>"$work/errors"
-      elif [ "$rc" -eq 0 ]; then
+      elif [ "$rc_own" -eq 0 ] || [ "$rc_c" -eq 0 ]; then
+        LC_ALL=C sort -u -t: -k1,1n "$work/thits.own" "$work/thits.c" >"$work/thits" || {
+          printf 'sort could not merge the %s hits in tag %s\n' "$name" "$t_name" >>"$work/errors"
+          continue
+        }
         while IFS= read -r hit; do
           printf '%s in tag %s: %s\n' "$name" "$t_name" "$hit" >>"$work/findings"
         done <"$work/thits"

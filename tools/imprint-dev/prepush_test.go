@@ -1037,3 +1037,22 @@ func TestPrePushTagObjectOutsideMessage(t *testing.T) {
 		})
 	}
 }
+
+// 24. A tag object is raw bytes. A Latin-1 no-break space - not valid UTF-8 -
+// right before a phone number matches no bracket expression under a UTF-8
+// locale, so the shape is matched under C as well. The hook runs here under
+// C.UTF-8; where that locale is missing, grep falls back to C and this case
+// proves less.
+func TestPrePushTagLatin1Byte(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	phone := "0" + "30" + " " + "1234567"
+	oid := r.tag("latin1", r.head(), ppAuthorName, ccTestAuthorEmail, "release\n\nTel.:\xa0"+phone)
+	code, out := r.hookNewTag("latin1", oid, "LC_ALL=C.UTF-8")
+	ppWantRefused(t, code, out, "phone number in tag latin1: 8:")
+	ppWantChecked(t, out)
+	if n := strings.Count(out, "phone number in tag latin1"); n != 1 {
+		t.Errorf("the hit is reported %d times, want once; output:\n%s", n, out)
+	}
+}

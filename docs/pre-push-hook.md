@@ -25,12 +25,15 @@ a declared identity, as an author has to, and a tag that names no tagger is a fi
 Everything else in the tag object is checked against the same shapes: the message, a signature
 block, the tag's name, any other header line, and whatever follows the tagger's identity on its
 line. That includes a tag whose header never ends in an empty line, from which git itself reads
-no message although its bytes are published. A pushed ref is followed through every tag object
-it leads to, so the tags inside a nested tag are read as well as the outer one; where the chain
-ends in a commit, that commit's new history is checked as for any branch. A new tag on a commit
-the remote already has adds no commit, and its tag object is still read. Tags have no tracking
-refs, so a tag object the remote already holds is read again when it is pushed under another
-name or inside another tag.
+no message although its bytes are published. A tag object is raw bytes that git does not
+re-encode, so each shape is matched under your own locale and under `C` as well: a byte that is
+not valid in your locale's encoding, such as a Latin-1 no-break space right before a phone
+number, hides the shape from the first and not from the second (*measured with GNU grep,
+2026-10-01*). A pushed ref is followed through every tag object it leads to, so the tags inside
+a nested tag are read as well as the outer one; where the chain ends in a commit, that commit's
+new history is checked as for any branch. A new tag on a commit the remote already has adds no
+commit, and its tag object is still read. Tags have no tracking refs, so a tag object the
+remote already holds is read again when it is pushed under another name or inside another tag.
 
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:
@@ -88,9 +91,11 @@ or a tree carries no history that would tell its new lines from published ones.
 `IMPRINT_PUSH_ANYWAY` with a reason is the way to push one on purpose (the owner's call,
 2026-10-01). The names of refs are not read at all: a branch name, or the name of a tag without
 a tag object, passes whatever it holds; an annotated tag's name is read only as a line of its
-tag object. And the hook diffs lines, with no copy detection, so lines copied or moved into
-another file are reported again even though they are already published; `IMPRINT_PUSH_ANYWAY`
-with a reason is the way past that.
+tag object. The lines new commits add are matched under your own locale only, so that same
+Latin-1 byte before a phone number hides it there (*measured 2026-10-01*); commit messages are
+not affected, since git re-encodes them. And the hook diffs lines, with no copy detection, so
+lines copied or moved into another file are reported again even though they are already
+published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in
