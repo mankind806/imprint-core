@@ -13,7 +13,9 @@ line removed in a later commit stays reachable by its hash for anyone who clones
 new unless the remote's old tip for that ref reaches it, or one of this clone's tracking refs
 for the destination remote does. Of a new commit it reads only the lines it adds: every other
 line of its tree was added by another new commit or is already on the remote, checked on its
-way there. A merge adds a line only when the line is new against every parent. Commit
+way there. A merge adds a line only when the line is new against every parent: each commit
+is diffed once per parent, as text even where a file holds a NUL byte or is marked binary,
+and a line counts only when every one of those diffs adds it. Commit
 messages are checked alongside the added lines, since a message is as public as a blob and
 trailers are where addresses ride in. A committer may also be GitHub's web-flow identity, the
 one a merge through the web UI records; as an author it is still undeclared.
@@ -61,7 +63,15 @@ push to a location rather than a configured remote has no tracking refs to trust
 everything the remote's old tip does not reach is checked. And tracking refs are what this
 clone last fetched, not what the remote holds now: after `git remote set-url` points a remote
 at a different repository, the old tracking refs still exclude commits the new one never
-received. Run `git fetch --prune` first.
+received. Run `git fetch --prune` first. The tracking refs count only when the push goes to
+the URL they were fetched from: with a `pushurl`, a `pushInsteadOf` or a second `url` on the
+remote, git hands the hook another location, and then everything the remote's old tip does
+not reach is checked, as for a push to a location.
+
+Some of what a push publishes is not read at all: the message and tagger of an annotated tag,
+and a ref that points straight at a blob or a tree. And the hook diffs lines, with no copy
+detection, so lines copied or moved into another file are reported again even though they are
+already published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in

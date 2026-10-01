@@ -197,6 +197,37 @@ func ppWantRefused(t *testing.T, code int, out string, wants ...string) {
 	}
 }
 
+// ppWantChecked fails the test when the hook reports a check that could not
+// run: a shape found only because a check broke is found for the wrong reason.
+func ppWantChecked(t *testing.T, out string) {
+	t.Helper()
+	if strings.Contains(out, "could not run") {
+		t.Errorf("hook reports a check that could not run; output:\n%s", out)
+	}
+}
+
+// installHook makes git itself run the hook on a push from r, through the
+// test's shell.
+func (r *ppRepo) installHook() {
+	r.t.Helper()
+	hooks := r.t.TempDir()
+	wrapper := "#!/bin/sh\nexec '" + r.env.shell + "' '" + r.env.hook + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(hooks, "pre-push"), []byte(wrapper), 0o755); err != nil {
+		r.t.Fatal(err)
+	}
+	r.git("config", "core.hooksPath", hooks)
+}
+
+// realPush runs git push with the installed hook and returns git's error and
+// combined output.
+func (r *ppRepo) realPush(args ...string) (error, string) {
+	r.t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", r.dir, "push"}, args...)...)
+	cmd.Env = ccIsolatedGitEnv("TMPDIR=" + r.t.TempDir())
+	out, err := cmd.CombinedOutput()
+	return err, string(out)
+}
+
 func ppWantAbsent(t *testing.T, out string, unwanted ...string) {
 	t.Helper()
 	for _, u := range unwanted {
@@ -216,20 +247,12 @@ func TestPrePushNewBranchRealPush(t *testing.T) {
 	r.write("feature.txt", "a clean line\n")
 	tip := r.commit("feature: one clean commit")
 
-	hooks := t.TempDir()
-	wrapper := "#!/bin/sh\nexec '" + env.shell + "' '" + env.hook + "' \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(hooks, "pre-push"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r.git("config", "core.hooksPath", hooks)
-
-	cmd := exec.Command("git", "-C", r.dir, "push", "origin", "feature")
-	cmd.Env = ccIsolatedGitEnv("TMPDIR=" + t.TempDir())
-	out, err := cmd.CombinedOutput()
+	r.installHook()
+	err, out := r.realPush("origin", "feature")
 	if err != nil {
 		t.Fatalf("git push: %v, want success; output:\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "1 new commit(s)") {
+	if !strings.Contains(out, "1 new commit(s)") {
 		t.Errorf("hook report lacks %q; output:\n%s", "1 new commit(s)", out)
 	}
 	if got := strings.TrimSpace(ccRunGit(t, r.origin, "rev-parse", "--verify", "refs/heads/feature")); got != tip {
@@ -337,7 +360,8 @@ func TestPrePushRemoteWithoutTrackingRefs(t *testing.T) {
 
 // 7. A new branch at a commit origin already has adds nothing, even while
 // HEAD carries an unpushed commit with a shape (guards a fallback to HEAD
-// when the commit set is empty).
+// when the commit set is empty). The shape is in the message as well: git
+// log's fallback to HEAD shows in identities and messages, not in the diffs.
 func TestPrePushBranchAtPushedCommit(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -345,7 +369,7 @@ func TestPrePushBranchAtPushedCommit(t *testing.T) {
 	pushed := r.head()
 	local := addr("unpushed.head", "example.invalid")
 	r.write("local.txt", "unpushed "+local+"\n")
-	r.commit("local: unpushed commit with a shape")
+	r.commit("local: unpushed commit with a shape, " + local)
 	code, out := r.hookNewBranch("alias", pushed)
 	ppWantPass(t, code, out)
 	if !strings.Contains(out, "0 new commit(s)") {
@@ -394,6 +418,7 @@ func TestPrePushFileWithNULBytes(t *testing.T) {
 	tip := r.commit("binary: add a file with NUL bytes")
 	code, out := r.hookNewBranch("binary", tip)
 	ppWantRefused(t, code, out, "address: ", ":blob.bin:2:", hidden)
+	ppWantChecked(t, out)
 }
 
 // 10. GitHub's web-flow identity is accepted as committer only.
@@ -421,7 +446,9 @@ func TestPrePushWebFlowIdentity(t *testing.T) {
 }
 
 // 11. Merges: lines a merge takes over from a parent are not new; a line
-// that is in neither parent ("evil merge") is.
+// that is in neither parent ("evil merge") is - also in a file that holds a
+// NUL byte, in the merge or in only one parent, or that .gitattributes marks
+// binary, where a combined diff prints no line at all.
 func TestPrePushMerge(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -435,6 +462,11 @@ func TestPrePushMerge(t *testing.T) {
 	r.git("checkout", "-q", "-b", "feature", "main")
 	r.write("feature.txt", "a clean line\n")
 	r.commit("feature: clean commit before the merge")
+	r.git("checkout", "-q", "-b", "nulside", "main")
+	r.write("mixed.txt", "bin\x00ary\nshared line\n")
+	r.commit("nulside: a file with a NUL byte, pushed")
+	r.pushNoVerify("origin", "nulside")
+	r.git("fetch", "-q", "origin")
 
 	t.Run("merge of a pushed branch", func(t *testing.T) {
 		r := r.with(t)
@@ -456,6 +488,140 @@ func TestPrePushMerge(t *testing.T) {
 		r.git("rev-parse", "--verify", "HEAD^2")
 		code, out := r.hookNewBranch("evil", r.head())
 		ppWantRefused(t, code, out, evil)
+	})
+	t.Run("evil merge adds a file with a NUL byte", func(t *testing.T) {
+		r := r.with(t)
+		hidden := addr("evil.nul", "example.invalid")
+		r.git("checkout", "-q", "-b", "evil-nul", "feature")
+		r.git("merge", "-q", "--no-ff", "--no-commit", "origin/other")
+		r.write("n.bin", "bin\x00ary\ncontact "+hidden+"\n")
+		r.git("add", "-A")
+		r.git("commit", "-q", "-m", "merge: origin/other with a NUL file of its own")
+		r.git("rev-parse", "--verify", "HEAD^2")
+		code, out := r.hookNewBranch("evil-nul", r.head())
+		ppWantRefused(t, code, out, "address: ", ":n.bin:2:", hidden)
+		ppWantChecked(t, out)
+	})
+	t.Run("evil merge adds a file marked binary", func(t *testing.T) {
+		r := r.with(t)
+		hidden := addr("evil.attr", "example.invalid")
+		r.git("checkout", "-q", "-b", "evil-attr", "feature")
+		r.git("merge", "-q", "--no-ff", "--no-commit", "origin/other")
+		r.write(".gitattributes", "*.dat binary\n")
+		r.write("z.dat", "plain text\ncontact "+hidden+"\n")
+		r.git("add", "-A")
+		r.git("commit", "-q", "-m", "merge: origin/other with a binary-marked file")
+		r.git("rev-parse", "--verify", "HEAD^2")
+		code, out := r.hookNewBranch("evil-attr", r.head())
+		ppWantRefused(t, code, out, "address: ", ":z.dat:2:", hidden)
+		ppWantChecked(t, out)
+	})
+	t.Run("merge where one parent's version holds a NUL", func(t *testing.T) {
+		r := r.with(t)
+		hidden := addr("one.parent", "example.invalid")
+		r.git("checkout", "-q", "-b", "one-nul", "feature")
+		r.write("mixed.txt", "shared line\n")
+		r.commit("one-nul: the text version of mixed.txt")
+		r.git("merge", "-q", "--no-ff", "--no-commit", "-s", "ours", "origin/nulside")
+		r.write("mixed.txt", "shared line\ncontact "+hidden+"\n")
+		r.git("add", "-A")
+		r.git("commit", "-q", "-m", "merge: origin/nulside, keeping the text version plus a line")
+		r.git("rev-parse", "--verify", "HEAD^2")
+		code, out := r.hookNewBranch("one-nul", r.head())
+		ppWantRefused(t, code, out, "address: ", ":mixed.txt:2:", hidden)
+		ppWantChecked(t, out)
+	})
+}
+
+// 11b. The remote's old tip alone - a location for the remote name, so no
+// tracking refs - keeps the history it reaches out of the check.
+func TestPrePushOldTipOnly(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pushed := r.head()
+	r.write("ontop.txt", "a clean line on top of the pushed tip\n")
+	tip := r.commit("ontop: one clean commit")
+	code, out := r.hook([]string{r.origin, r.origin}, refLine("main", tip, pushed))
+	ppWantPass(t, code, out)
+	if !strings.Contains(out, "1 new commit(s)") {
+		t.Errorf("hook report lacks %q; output:\n%s", "1 new commit(s)", out)
+	}
+	ppWantAbsent(t, out, ppSeedAddr)
+}
+
+// 11c. A push that goes to remote.origin.pushurl rather than to the URL the
+// tracking refs were fetched from does not trust them: a commit only the
+// fetch repository holds is checked, and its shape refuses a real push.
+func TestPrePushPushURLElsewhere(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pub := r.newBare()
+	r.git("config", "remote.origin.pushurl", pub)
+	r.git("checkout", "-q", "-b", "feature")
+	r.write("feature.txt", "a clean line for the push repository\n")
+	r.commit("feature: clean commit on top of the fetch repository")
+
+	r.installHook()
+	err, out := r.realPush("origin", "feature")
+	if err == nil {
+		t.Fatalf("git push succeeded, want the hook to refuse it; output:\n%s", out)
+	}
+	ppWantRefused(t, 1, out, ppSeedAddr, "not trusted")
+	ppWantChecked(t, out)
+	cmd := exec.Command("git", "-C", pub, "rev-parse", "-q", "--verify", "refs/heads/feature")
+	cmd.Env = ccIsolatedGitEnv()
+	if got, err := cmd.Output(); err == nil {
+		t.Errorf("the push repository has feature at %s, want no such ref", strings.TrimSpace(string(got)))
+	}
+}
+
+// 11d. A check that could not run refuses the push, and IMPRINT_PUSH_ANYWAY
+// does not cover it - here with a blob missing from the object store, and
+// with an awk that fails. The new commit's message holds a shape, so a
+// finding is there for the override to wave through if it wrongly could.
+func TestPrePushCheckCouldNotRun(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	wantCouldNotRun := func(t *testing.T, r *ppRepo, tip string, extraEnv ...string) {
+		t.Helper()
+		for _, anyway := range []bool{false, true} {
+			e := extraEnv
+			if anyway {
+				e = append(append([]string{}, extraEnv...), "IMPRINT_PUSH_ANYWAY=only a test")
+			}
+			code, out := r.hookNewBranch("broken", tip, e...)
+			ppWantRefused(t, code, out, "check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it")
+		}
+	}
+	t.Run("missing blob", func(t *testing.T) {
+		r := ppSeed(t, env)
+		r.git("checkout", "-q", "-b", "broken")
+		r.write("lost.txt", "a line whose blob goes missing\n")
+		tip := r.commit("broken: write to " + addr("lost.blob", "example.invalid"))
+		blob := r.git("rev-parse", tip+":lost.txt")
+		loose := filepath.Join(r.dir, ".git", "objects", blob[:2], blob[2:])
+		if err := os.Remove(loose); err != nil {
+			t.Fatalf("removing the loose object: %v", err)
+		}
+		// git diff reads an unchanged checked-out file in place of its blob,
+		// so the copy in the working tree has to go as well.
+		if err := os.Remove(filepath.Join(r.dir, "lost.txt")); err != nil {
+			t.Fatal(err)
+		}
+		wantCouldNotRun(t, r, tip)
+	})
+	t.Run("awk fails", func(t *testing.T) {
+		r := ppSeed(t, env)
+		shim := t.TempDir()
+		if err := os.WriteFile(filepath.Join(shim, "awk"), []byte("#!/bin/sh\nexit 2\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.git("checkout", "-q", "-b", "broken")
+		r.write("shim.txt", "a clean line no awk will read\n")
+		tip := r.commit("broken: write to " + addr("no.awk", "example.invalid"))
+		wantCouldNotRun(t, r, tip, "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"))
 	})
 }
 

@@ -12,11 +12,12 @@
 # WHAT IT READS. The new commits, and of their content only the lines they
 # add. A commit is new unless the remote's old tip for that ref reaches it, or
 # one of this clone's tracking refs for the destination remote does
-# (refs/remotes/<remote>/*, and only that remote's). Those refs are what this
-# clone last fetched, not what the remote holds now: after pointing a remote at
-# another repository, run `git fetch --prune` first. A line already on it was
-# checked on its way there, or predates the hook; reading it again would refuse
-# every push for what is already published.
+# (refs/remotes/<remote>/*, and only that remote's, and only when the push goes
+# to the URL they are fetched from). Those refs are what this clone last
+# fetched, not what the remote holds now: after pointing a remote at another
+# repository, run `git fetch --prune` first. A line already on it was checked
+# on its way there, or predates the hook; reading it again would refuse every
+# push for what is already published.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -75,11 +76,32 @@ if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no
 # commit the remote's old tip does not reach counts as new. A name holding a
 # glob character would widen --remotes=, so it is treated the same way: that
 # checks more, never less.
+#
+# And only when the push goes where those refs were fetched from. With a
+# remote.<name>.pushurl, a url.<base>.pushInsteadOf or a second
+# remote.<name>.url, git hands this hook a location other than the fetch URL,
+# and commits that only the fetch repository holds would pass as published.
+# The location has to equal `git remote get-url <name>` - the fetch URL, with
+# insteadOf applied, as git applies it - or the tracking refs are not trusted.
+# The location itself is never printed: a URL can carry a credential.
 dest_remote=''
+untrusted=''
 if [ "$#" -eq 2 ] && [ -n "$1" ]; then
   case "$1" in
     *'*'* | *'?'* | *'['*) ;;
-    *) git config --get "remote.$1.url" >/dev/null 2>&1 && dest_remote="$1" ;;
+    *)
+      if git config --get "remote.$1.url" >/dev/null 2>&1; then
+        if fetch_url="$(git remote get-url "$1" 2>/dev/null)"; then
+          if [ "$fetch_url" = "$2" ]; then
+            dest_remote="$1"
+          else
+            untrusted="the push location is not remote $1's fetch URL, so refs/remotes/$1/* are not trusted"
+          fi
+        else
+          untrusted="git remote get-url $1 failed, so refs/remotes/$1/* are not trusted"
+        fi
+      fi
+      ;;
   esac
 fi
 
@@ -150,17 +172,20 @@ n_commits="$(wc -l <"$work/commits" | tr -d ' ')"
 n_refs="$(wc -l <"$work/ranges" | tr -d ' ')"
 if [ -n "$dest_remote" ]; then
   scope="commits already on refs/remotes/$dest_remote/* or at the remote's old tip are not re-checked"
+elif [ -n "$untrusted" ]; then
+  scope="$untrusted; only commits at the remote's old tip are not re-checked"
 else
   scope="no configured remote was named, so only commits at the remote's old tip are not re-checked"
 fi
 
-# No new commit, nothing unchecked is published. This exit has to come before
-# any `git log --stdin`: handed an empty list, git log falls back to HEAD and
-# would check a commit nobody is pushing (measured with git 2.55.0, 2026-10-01).
+# No new commit, so no commit identity, added line or commit message to check.
+# This exit has to come before any `git log --stdin`: handed an empty list, git
+# log falls back to HEAD and would check a commit nobody is pushing (measured
+# with git 2.55.0, 2026-10-01).
 if [ "$n_commits" -eq 0 ]; then
   say "pre-push: $n_refs ref(s), 0 new commit(s); $scope."
   say "pre-push: checks that ran: none needed."
-  say "pre-push:   skipped: declared identity, tracked content, commit messages - no new commit, so nothing unchecked is published"
+  say "pre-push:   skipped: declared identity, tracked content, commit messages - no new commit, so no commit identity, added line or commit message to check"
   while read -r s; do say "pre-push:   skipped: $s"; done <"$work/skipped"
   say "pre-push:   not checked by anything here: whether the prose is abstract."
   exit 0
@@ -215,19 +240,37 @@ tab="$(printf '\t')"
 # Every new commit, not just the tip: a push publishes them all, and a line
 # removed in a later commit stays reachable by its hash for anyone who clones.
 # The added lines are enough, because every line of a new commit's tree was
-# either added by some new commit or is already on the remote. A merge adds a
-# line only when the line is new against every parent - a line from either
-# parent was checked at that parent or is already published - and -c is what
-# makes diff-tree print a merge at all. --text is not decoration - without it a
-# file holding a NUL byte becomes "Binary files differ", and none of its lines
-# would be read, which looks exactly like a clean diff.
+# either added by some new commit or is already on the remote.
 #
-# The awk only sorts lines; the shapes are matched by grep below, under your own
-# locale, since a pattern holds characters outside ASCII. It appends one record
-# per added line to two parallel files: line N of addedloc says where line N of
-# added comes from (commit:path:line), and added holds the bare content.
+# A merge adds a line only when the line is new against every parent - a line
+# from either parent was checked at that parent or is already published. Each
+# commit is therefore diffed once per parent (a root commit once, against
+# nothing), and a line counts as added only when every one of those diffs adds
+# it at the same place: same path, same line number in the commit's own tree,
+# same content. All the diffs number lines in that one tree, so the match is
+# exact. A combined diff (-c) is not used, because it ignores --text: a file
+# that holds a NUL byte in the merge or in any parent, or that .gitattributes
+# marks binary, comes out as "Binary files differ" with no line in it (measured
+# with git 2.55.0, 2026-10-01). On a plain diff --text is not decoration either
+# - without it the same files would read as nothing, which looks exactly like a
+# clean diff - and should git print "Binary files" anyway, that is an error.
+#
+# The awks only sort lines; the shapes are matched by grep below, under your
+# own locale, since a pattern holds characters outside ASCII. classify turns
+# one diff into one record per added line, "commit:path:line<TAB>content" -
+# git quotes a path that holds a control character, so the location has no raw
+# TAB. intersect keeps the records every parent's diff has and appends them to
+# two parallel files: line N of addedloc says where line N of added comes from
+# (commit:path:line), and added holds the bare content.
 classify='
-BEGIN { st = 0; c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_ADDEDLOC"]; add = ENVIRON["IMPRINT_ADDED"] }
+BEGIN { st = 0; c = ENVIRON["IMPRINT_COMMIT"]; errf = ENVIRON["IMPRINT_AWKERR"] }
+/^Binary files / {
+  p = substr($0, 14); sub(/ differ$/, "", p)
+  i = index(p, " and "); if (i) p = substr(p, i + 5)
+  if (substr(p, 1, 2) == "b/") p = substr(p, 3)
+  print "could not read " p " as text" > errf
+  exit 4
+}
 /^diff / { st = 1; path = ""; next }
 st == 1 && /^\+\+\+ / {
   path = substr($0, 5)
@@ -236,26 +279,40 @@ st == 1 && /^\+\+\+ / {
   next
 }
 /^@/ {
-  np = 0
-  while (substr($0, np + 1, 1) == "@") np++
-  np--
-  plus = ""
-  for (i = 0; i < np; i++) plus = plus "+"
+  if (substr($0, 1, 3) != "@@ ") exit 3
   split($0, f, " ")
-  ln = f[np + 2]
-  sub(/^\+/, "", ln); sub(/,.*/, "", ln)
-  if (np < 1 || ln !~ /^[0-9]+$/) exit 3
+  ln = f[3]
+  if (substr(ln, 1, 1) != "+") exit 3
+  ln = substr(ln, 2); sub(/,.*/, "", ln)
+  if (ln !~ /^[0-9]+$/) exit 3
   ln = ln + 0
   st = 2
   next
 }
 st == 2 {
   ch = substr($0, 1, 1)
-  if (ch != " " && ch != "+" && ch != "-") next
-  pre = substr($0, 1, np)
-  if (index(pre, "-")) next
-  if (pre == plus) { print c ":" path ":" ln >> loc; print substr($0, np + 1) >> add }
-  ln++
+  if (ch == "+") { print c ":" path ":" ln "\t" substr($0, 2); ln++ }
+  else if (ch == " ") ln++
+}
+'
+intersect='
+BEGIN { n = ARGC - 1; loc = ENVIRON["IMPRINT_ADDEDLOC"]; add = ENVIRON["IMPRINT_ADDED"]; fi = 0; m = 0 }
+FNR == 1 { fi++ }
+{
+  if ((fi, $0) in seen) next
+  seen[fi, $0] = 1
+  cnt[$0]++
+  if (fi == 1) order[++m] = $0
+}
+END {
+  for (i = 1; i <= m; i++) {
+    r = order[i]
+    if (cnt[r] != n) continue
+    t = index(r, "\t")
+    if (t < 2) exit 3
+    print substr(r, 1, t - 1) >> loc
+    print substr(r, t + 1) >> add
+  }
 }
 '
 # join puts a grep hit back where it came from: "N:content" becomes
@@ -273,22 +330,75 @@ BEGIN {
   print name ": " loc[k] ":" substr($0, i + 1)
 }
 '
-: >"$work/added"; : >"$work/addedloc"
-while read -r commit; do
-  if ! git diff-tree --no-commit-id -r -p -c -M -U0 --text --root --no-ext-diff --no-textconv \
-      --no-color "$commit" >"$work/diff" 2>"$work/differr" </dev/null; then
-    printf 'git diff-tree could not read %s: %s\n' "$commit" "$(cat "$work/differr")" >>"$work/errors"
-    continue
-  fi
+
+# read_added BASE COMMIT OUT - the records of the lines COMMIT adds against
+# BASE, or against nothing when BASE is empty, into OUT. Any step that fails
+# goes to the errors file, and the caller drops the commit's records.
+read_added() {
+  ra_base="$1"; ra_commit="$2"; ra_out="$3"
+  if [ -n "$ra_base" ]; then
+    ra_against="$ra_base"
+    git diff-tree --no-commit-id -r -p -M -U0 --text --no-ext-diff --no-textconv --no-color \
+      "$ra_base" "$ra_commit" >"$work/diff" 2>"$work/differr" </dev/null
+  else
+    ra_against="nothing (a root commit)"
+    git diff-tree --no-commit-id -r -p -M -U0 --text --no-ext-diff --no-textconv --no-color \
+      --root "$ra_commit" >"$work/diff" 2>"$work/differr" </dev/null
+  fi || {
+    printf 'git diff-tree could not read %s against %s: %s\n' \
+      "$ra_commit" "$ra_against" "$(cat "$work/differr")" >>"$work/errors"
+    return 1
+  }
   # A NUL would end an awk record early in some awks; it never matches a shape.
-  if ! tr '\000' '\001' <"$work/diff" >"$work/diff.t"; then
-    printf 'tr could not prepare the diff of %s\n' "$commit" >>"$work/errors"
-    continue
+  tr '\000' '\001' <"$work/diff" >"$work/diff.t" || {
+    printf 'tr could not prepare the diff of %s against %s\n' "$ra_commit" "$ra_against" >>"$work/errors"
+    return 1
+  }
+  : >"$work/awkerr"
+  IMPRINT_COMMIT="$ra_commit" IMPRINT_AWKERR="$work/awkerr" \
+    LC_ALL=C awk "$classify" <"$work/diff.t" >"$ra_out" || {
+    printf 'awk could not sort the diff of %s against %s into added lines: %s\n' \
+      "$ra_commit" "$ra_against" "$(cat "$work/awkerr")" >>"$work/errors"
+    return 1
+  }
+}
+
+# intersect_added N - appends to added and addedloc the records that all of
+# rec.1 .. rec.N hold.
+intersect_added() {
+  ia_n="$1"; ia_i=1
+  set --
+  while [ "$ia_i" -le "$ia_n" ]; do set -- "$@" "$work/rec.$ia_i"; ia_i=$((ia_i + 1)); done
+  IMPRINT_ADDED="$work/added" IMPRINT_ADDEDLOC="$work/addedloc" \
+    LC_ALL=C awk "$intersect" "$@" </dev/null
+}
+
+: >"$work/added"; : >"$work/addedloc"
+# One line per new commit: the commit, then its parents.
+if git rev-list --no-walk=unsorted --parents --stdin <"$work/commits" >"$work/parents" 2>"$work/rlerr"; then
+  n_parents_lines="$(wc -l <"$work/parents" | tr -d ' ')"
+  [ "$n_parents_lines" = "$n_commits" ] || printf \
+    'git rev-list listed parents for %s of %s new commit(s)\n' "$n_parents_lines" "$n_commits" >>"$work/errors"
+else
+  printf 'git rev-list could not read the parents of the new commits: %s\n' "$(cat "$work/rlerr")" >>"$work/errors"
+  : >"$work/parents"
+fi
+while read -r commit parents; do
+  [ -n "$commit" ] || continue
+  n=0; ok=yes
+  if [ -z "$parents" ]; then
+    n=1
+    read_added '' "$commit" "$work/rec.1" || ok=no
+  else
+    for parent in $parents; do
+      n=$((n + 1))
+      read_added "$parent" "$commit" "$work/rec.$n" || { ok=no; break; }
+    done
   fi
-  IMPRINT_COMMIT="$commit" IMPRINT_ADDED="$work/added" IMPRINT_ADDEDLOC="$work/addedloc" \
-    LC_ALL=C awk "$classify" <"$work/diff.t" \
-    || printf 'awk could not sort the diff of %s into added lines\n' "$commit" >>"$work/errors"
-done <"$work/commits"
+  [ "$ok" = yes ] || continue
+  intersect_added "$n" \
+    || printf 'awk could not match the added lines of %s across its %s parent(s)\n' "$commit" "$n" >>"$work/errors"
+done <"$work/parents"
 shapes | while IFS="$tab" read -r name pattern; do
   grep -a -n -E "$pattern" "$work/added" >"$work/hits" 2>"$work/greperr"
   rc=$?
