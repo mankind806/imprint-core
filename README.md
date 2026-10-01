@@ -144,6 +144,7 @@ the states are four and not three: [docs/skills.md](docs/skills.md#the-four-stat
 
 Each skill, the agent and the two layers in full: [docs/skills.md](docs/skills.md).
 How one lead session, local agent CLIs and cloud agents share one journal, in German: [docs/vertrag.md](docs/vertrag.md).
+Google OAuth client documentation and privacy policy: [docs/google-app/README.md](docs/google-app/README.md).
 
 *Measured 2026-09-13 on Claude Code 2.1.269 through `--plugin-dir`, at session scope: the
 agent gets exactly `Read`, `Grep` and `Glob`; a subagent dispatch and the filtering of MCP
