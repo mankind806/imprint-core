@@ -211,12 +211,13 @@ trap 'rm -rf "$work"' EXIT
 # dash and busybox sh do not run the EXIT trap when a signal ends them; these
 # clean up and still refuse the push.
 trap 'rm -rf "$work"; exit 1' HUP INT TERM
-# hits and mhits are made here too: in bash a redirection that fails returns 1,
-# which is also grep's "no line matched". Once they exist, grep's > only
-# truncates them, which takes neither space nor an inode. true, not ":" - a
-# redirection that fails on a special built-in such as ":" ends the shell
-# before || refuse can say why.
-for f in findings errors ran skipped ranges hits mhits; do
+# hits, mhits and greperr, which the shape greps write to, are made here too:
+# in bash and busybox sh a redirection that fails returns 1, which is also
+# grep's "no line matched". Once they exist, grep's > and 2> only truncate
+# them, which takes neither space nor an inode. true, not ":" - a redirection
+# that fails on a special built-in such as ":" ends the shell before || refuse
+# can say why.
+for f in findings errors ran skipped ranges hits mhits greperr; do
   true >"$work/$f" || refuse "$cannot_write"
 done
 
@@ -528,7 +529,7 @@ if git rev-list --no-walk=unsorted --parents --stdin <"$work/commits" >"$work/pa
     'git rev-list listed parents for %s of %s new commit(s)\n' "$n_parents_lines" "$n_commits"
 else
   note errors 'git rev-list could not read the parents of the new commits: %s\n' "$(cat "$work/rlerr")"
-  : >"$work/parents"
+  true >"$work/parents" || refuse "$cannot_write"
 fi
 while read -r commit parents; do
   [ -n "$commit" ] || continue
@@ -563,6 +564,10 @@ while IFS="$tab" read -r name pattern; do
   rc=$?
   if [ "$rc" -gt 1 ]; then
     note errors 'grep could not read the added lines: %s\n' "$(cat "$work/greperr")"
+  elif [ "$rc" -eq 0 ] && [ ! -s "$work/hits" ]; then
+    # 0 means a line matched, and -n writes at least its number: an empty file
+    # is a write that failed, which busybox grep does not report in its exit.
+    note errors 'grep matched %s in the added lines but wrote no hit down\n' "$name"
   elif [ "$rc" -eq 0 ]; then
     # Every hit is one finding, so findings has to grow by as many lines as
     # hits holds: an awk that lost a write without saying so is an error.
@@ -595,6 +600,8 @@ while IFS="$tab" read -r name pattern; do
   rc=$?
   if [ "$rc" -gt 1 ]; then
     note errors 'grep could not read the commit messages of this range\n'
+  elif [ "$rc" -eq 0 ] && [ ! -s "$work/mhits" ]; then
+    note errors 'grep matched %s in the commit messages but wrote no hit down\n' "$name"
   elif [ "$rc" -eq 0 ]; then
     while IFS= read -r hit; do
       [ -n "$hit" ] || continue

@@ -678,6 +678,15 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		{"a line missing from added", func(t *testing.T) string {
 			return awkShim(t, `if [ -n "${IMPRINT_ADDED:-}" ]; then sed '$d' "$IMPRINT_ADDED" >"$IMPRINT_ADDED.cut" && mv "$IMPRINT_ADDED.cut" "$IMPRINT_ADDED"; fi`)
 		}, []string{"wrote down 0 of 1 added line(s) in added"}},
+		// A grep that exits 0 and writes nothing, as busybox grep does when
+		// it cannot write its hits: 0 means a line matched, so the empty
+		// file is a write that failed, not a clean list.
+		{"a grep over the added lines that writes no hit", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */added) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}, []string{" in the added lines but wrote no hit down"}},
+		{"a grep over the commit messages that writes no hit", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */messages) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}, []string{" in the commit messages but wrote no hit down"}},
 		{"a shape loop cut short", func(t *testing.T) string {
 			// A grep that empties the shape list the loops read, while the
 			// first loop is on its first shape.
@@ -709,6 +718,21 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 	t.Run("awk fails", func(t *testing.T) {
 		r, tip := brokenTip(t, "no.awk")
 		wantCouldNotRun(t, r, tip, []string{ppShimPATH(t, "awk", "exit 2\n")})
+	})
+	// The awk that puts each hit back where it came from loses its write, and
+	// exits 0 as busybox awk does when its standard output fails: only the
+	// count of findings before and after can tell. The exit 0 is forced, so
+	// this holds under an awk that would report the failure itself.
+	t.Run("a hit placed but not written", func(t *testing.T) {
+		if fi, err := os.Stat("/dev/full"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+			t.Skip("no /dev/full here to stand in for a full disk")
+		}
+		r := ppSeed(t, env)
+		r.git("checkout", "-q", "-b", "broken")
+		r.write("lost.txt", "first line\nwrite to "+addr("lost.join", "example.invalid")+"\n")
+		tip := r.commit("broken: write to " + addr("lost.message", "example.invalid"))
+		shim := ppShimPATH(t, "awk", "if [ -n \"${IMPRINT_SHAPE:-}\" ]; then '"+awkBin+"' \"$@\" >/dev/full; exit 0; fi\nexec '"+awkBin+"' \"$@\"\n")
+		wantCouldNotRun(t, r, tip, []string{shim}, "findings went from ")
 	})
 }
 
@@ -1143,6 +1167,7 @@ func TestPrePushToolchains(t *testing.T) {
 	if len(shells) == 0 || len(awks) == 0 {
 		t.Skip("no shell or no awk on PATH")
 	}
+	grepBin := ppRealBin(t, "grep")
 
 	r := ppSeed(t, base)
 	other := addr("tc.other", "example.invalid")
@@ -1205,6 +1230,30 @@ func TestPrePushToolchains(t *testing.T) {
 				code, out = c.hookNewBranch("nulline", nulLineTip)
 				ppWantRefused(t, code, out, "address: ", ":nl.txt:2:", nulLine)
 				ppWantChecked(t, out)
+
+				// greperr is not there to be written: a grep before the shape
+				// loop - the one over the declared identities - puts a
+				// directory in its place. In bash and busybox sh the failed
+				// 2> of the first shape grep then returns 1, grep's "no line
+				// matched", and every shape read as clean.
+				shim := t.TempDir()
+				fired := filepath.Join(t.TempDir(), "fired")
+				script := "#!/bin/sh\nfor a; do last=$a; done\n" +
+					"case \"${last:-}\" in */allowed | */committers) : >'" + fired + "'; [ -e \"${last%/*}/greperr\" ] || mkdir \"${last%/*}/greperr\" ;; esac\n" +
+					"exec '" + grepBin + "' \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(shim, "grep"), []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				path := shim + string(os.PathListSeparator)
+				if env.pathDir != "" {
+					path += env.pathDir + string(os.PathListSeparator)
+				}
+				code, out = c.hookNewBranch("leak", leakTip, "PATH="+path+os.Getenv("PATH"))
+				ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
+				ppWantChecked(t, out)
+				if _, err := os.Stat(fired); err != nil {
+					t.Logf("%s ran no grep from PATH, so the case of greperr not being there was not exercised", sh.label)
+				}
 			})
 		}
 	}
