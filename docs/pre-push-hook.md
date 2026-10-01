@@ -20,17 +20,25 @@ messages are checked alongside the added lines, since a message is as public as 
 trailers are where addresses ride in. A committer may also be GitHub's web-flow identity, the
 one a merge through the web UI records; as an author it is still undeclared.
 
+Every shape is matched twice, under your own locale and under `C`, and a line either match
+finds is a finding. The patterns hold characters outside ASCII, which takes your locale; but
+a byte that is not valid in your locale's encoding matches no bracket expression there, not
+even `[^0-9]`, and such bytes do arrive: a file is stored as it was written, a commit made by
+a tool other than git's own commands can keep them in its message, and a tag object is raw
+bytes. A Latin-1 no-break space right before a phone number hid it from a UTF-8 locale and not
+from `C` (*measured with GNU grep 3.12, 2026-10-01*). Commit messages and the author and
+committer identities are read with `git log --encoding=UTF-8`. Without that flag git
+re-encodes what it prints into `i18n.logOutputEncoding`, or into `i18n.commitEncoding` when
+that is unset. Set to Latin-1, either one hid a postcode before a place that starts with an
+umlaut from both matches, and made a declared name outside ASCII read as undeclared
+(*measured with git 2.55.0, 2026-10-01*).
+
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
 Everything else in the tag object is checked against the same shapes: the message, a signature
 block, the tag's name, any other header line, and whatever follows the tagger's identity on its
 line. That includes a tag whose header never ends in an empty line, from which git itself reads
-no message although its bytes are published. A tag object is raw bytes that git does not
-re-encode, so each shape is matched under your own locale and under `C` as well: a byte that is
-not valid in your locale's encoding, such as a Latin-1 no-break space right before a phone
-number, hides the shape from the first and not from the second (*measured with GNU grep,
-2026-10-01*). That closes the gap for a byte next to a shape, not inside one: the patterns are
-written in UTF-8, so a place name spelled in Latin-1 still passes. A pushed ref is followed
+no message although its bytes are published. A pushed ref is followed
 through every tag object it leads to, so the tags inside a nested tag are read as well as the
 outer one; where the chain ends in a commit, that commit's new history is checked as for any
 branch. A new tag on a commit the remote already has adds no commit, and its tag object is
@@ -114,11 +122,14 @@ or a tree carries no history that would tell its new lines from published ones.
 `IMPRINT_PUSH_ANYWAY` with a reason is the way to push one on purpose (the owner's call,
 2026-10-01). The names of refs are not read at all: a branch name, or the name of a tag without
 a tag object, passes whatever it holds; an annotated tag's name is read only as a line of its
-tag object. The lines new commits add are matched under your own locale only, so that same
-Latin-1 byte before a phone number hides it there (*measured 2026-10-01*). Commit messages
-reach their check as `git log` re-encodes them, which is UTF-8 unless `i18n.logOutputEncoding`
-names another encoding; set to Latin-1, it hides a shape the same way (*measured in review,
-2026-10-01*). And the hook diffs lines, with no copy detection, so lines copied or moved into
+tag object. Matching under `C` as well closes the gap for a byte next to a shape, not inside
+one: the patterns are written in UTF-8, so a place name spelled in Latin-1 still passes, and
+so does a phone number whose separator is a no-break space, in either encoding, since the
+pattern takes only a space, a slash or a hyphen there (*measured with GNU grep 3.12,
+2026-10-01*). Matching under `C` also reports more: there the umlauts in the postcode pattern
+are read byte by byte, so five digits followed by a word that starts with a lowercase umlaut
+are reported as a postcode and place, under any locale (*measured through the hook,
+2026-10-01*); `IMPRINT_PUSH_ANYWAY` with a reason is the way past that. And the hook diffs lines, with no copy detection, so lines copied or moved into
 another file are reported again even though they are already published; `IMPRINT_PUSH_ANYWAY`
 with a reason is the way past that.
 
