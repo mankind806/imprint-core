@@ -140,8 +140,11 @@ shared_by() {
       || { shared="the legacy remotes/ folder in the git directory is not empty, and this hook does not read it"; return; }
   fi
   # extensions is read from the repository's own config file, as git reads it,
-  # so that a -c on the command line cannot hide it.
-  sb_wtc="$(git config --file "$sb_common/config" --type=bool --get extensions.worktreeConfig 2>/dev/null)"; sb_rc=$?
+  # so that a -c on the command line cannot hide it. This read and the one of
+  # the fetch refspecs below take exit 1 for "not set", and in bash and busybox
+  # sh a redirection that fails returns 1 as well - so neither sends its errors
+  # to /dev/null. git config says nothing for a key that is not set.
+  sb_wtc="$(git config --file "$sb_common/config" --type=bool --get extensions.worktreeConfig)"; sb_rc=$?
   [ "$sb_rc" -le 1 ] || { shared="git config could not read extensions.worktreeConfig"; return; }
   [ "$sb_wtc" != true ] \
     || { shared="extensions.worktreeConfig is on, and another worktree's config.worktree can define a remote or turn this one's fetch elsewhere"; return; }
@@ -151,7 +154,7 @@ shared_by() {
     case "$sb_r" in
       "$sb_dest"/*) shared="remote $sb_r stores its refs under refs/remotes/$sb_dest/"; return ;;
     esac
-    sb_specs="$(git config --get-all "remote.$sb_r.fetch" 2>/dev/null)"; sb_rc=$?
+    sb_specs="$(git config --get-all "remote.$sb_r.fetch")"; sb_rc=$?
     [ "$sb_rc" -le 1 ] || { shared="git config could not read remote $sb_r's fetch refspecs"; return; }
     while IFS= read -r sb_spec; do
       sb_spec="${sb_spec#+}"
@@ -212,11 +215,11 @@ trap 'rm -rf "$work"' EXIT
 # clean up and still refuse the push.
 trap 'rm -rf "$work"; exit 1' HUP INT TERM
 # hits, mhits and greperr, which the shape greps write to, are made here too:
-# in bash and busybox sh a redirection that fails returns 1, which is also
-# grep's "no line matched". Once they exist, grep's > and 2> only truncate
-# them, which takes neither space nor an inode. true, not ":" - a redirection
-# that fails on a special built-in such as ":" ends the shell before || refuse
-# can say why.
+# once they exist, the greps' > and 2> only truncate them, which takes neither
+# space nor an inode. That alone does not settle a grep's result, since a
+# target can still fail to open; the shape loops read it from a file of its own
+# (greprc, below). true, not ":" - a redirection that fails on a special
+# built-in such as ":" ends the shell before || refuse can say why.
 for f in findings errors ran skipped ranges hits mhits greperr; do
   true >"$work/$f" || refuse "$cannot_write"
 done
@@ -558,11 +561,23 @@ for f in added addedloc; do
   [ "$n_f" = "$n_added" ] || note errors \
     'wrote down %s of %s added line(s) in %s\n' "${n_f:-none}" "$n_added" "$f"
 done
+# In bash and busybox sh a redirection that fails returns 1, which is also
+# grep's "no line matched": a hits or greperr that cannot be opened - the file
+# table full, or a directory in its place - would read as a clean shape. So
+# every redirection sits on a group around grep, which then does not run at
+# all, and grep's own exit status leaves the group through greprc, written
+# only once grep has run. A greprc that is missing or holds anything but one
+# number is a grep that could not run.
 n_done=0
 while IFS="$tab" read -r name pattern; do
-  grep -a -n -E "$pattern" "$work/added" >"$work/hits" 2>"$work/greperr" </dev/null
-  rc=$?
-  if [ "$rc" -gt 1 ]; then
+  rm -f "$work/greprc" || refuse "could not clear the file grep's exit status goes to."
+  { grep -a -n -E "$pattern" "$work/added"; printf '%s\n' "$?" >"$work/greprc"; } \
+    </dev/null >"$work/hits" 2>"$work/greperr"
+  rc="$(cat "$work/greprc" 2>/dev/null)" || rc=''
+  case "$rc" in '' | *[!0-9]*) rc='' ;; esac
+  if [ -z "$rc" ]; then
+    note errors 'could not run grep for %s over the added lines\n' "$name"
+  elif [ "$rc" -gt 1 ]; then
     note errors 'grep could not read the added lines: %s\n' "$(cat "$work/greperr")"
   elif [ "$rc" -eq 0 ] && [ ! -s "$work/hits" ]; then
     # 0 means a line matched, and -n writes at least its number: an empty file
@@ -596,9 +611,15 @@ git log --no-walk=unsorted --stdin --format='%h|%s%n%b' <"$work/commits" >"$work
   || refuse "git log failed reading the messages of the new commits."
 n_done=0
 while IFS="$tab" read -r name pattern; do
-  grep -a -n -E "$pattern" "$work/messages" > "$work/mhits" 2>/dev/null </dev/null
-  rc=$?
-  if [ "$rc" -gt 1 ]; then
+  # The same group as over the added lines, for the same reason.
+  rm -f "$work/greprc" || refuse "could not clear the file grep's exit status goes to."
+  { grep -a -n -E "$pattern" "$work/messages"; printf '%s\n' "$?" >"$work/greprc"; } \
+    </dev/null >"$work/mhits" 2>/dev/null
+  rc="$(cat "$work/greprc" 2>/dev/null)" || rc=''
+  case "$rc" in '' | *[!0-9]*) rc='' ;; esac
+  if [ -z "$rc" ]; then
+    note errors 'could not run grep for %s over the commit messages\n' "$name"
+  elif [ "$rc" -gt 1 ]; then
     note errors 'grep could not read the commit messages of this range\n'
   elif [ "$rc" -eq 0 ] && [ ! -s "$work/mhits" ]; then
     note errors 'grep matched %s in the commit messages but wrote no hit down\n' "$name"

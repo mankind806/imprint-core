@@ -1231,28 +1231,49 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantRefused(t, code, out, "address: ", ":nl.txt:2:", nulLine)
 				ppWantChecked(t, out)
 
-				// greperr is not there to be written: a grep before the shape
-				// loop - the one over the declared identities - puts a
-				// directory in its place. In bash and busybox sh the failed
-				// 2> of the first shape grep then returns 1, grep's "no line
-				// matched", and every shape read as clean.
-				shim := t.TempDir()
-				fired := filepath.Join(t.TempDir(), "fired")
-				script := "#!/bin/sh\nfor a; do last=$a; done\n" +
-					"case \"${last:-}\" in */allowed | */committers) : >'" + fired + "'; [ -e \"${last%/*}/greperr\" ] || mkdir \"${last%/*}/greperr\" ;; esac\n" +
-					"exec '" + grepBin + "' \"$@\"\n"
-				if err := os.WriteFile(filepath.Join(shim, "grep"), []byte(script), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				path := shim + string(os.PathListSeparator)
-				if env.pathDir != "" {
-					path += env.pathDir + string(os.PathListSeparator)
-				}
-				code, out = c.hookNewBranch("leak", leakTip, "PATH="+path+os.Getenv("PATH"))
-				ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
-				ppWantChecked(t, out)
-				if _, err := os.Stat(fired); err != nil {
-					t.Logf("%s ran no grep from PATH, so the case of greperr not being there was not exercised", sh.label)
+				// A file a shape grep writes to cannot be opened: a grep
+				// before the shape loops - the one over the declared
+				// identities - puts a directory in its place. In bash and
+				// busybox sh the failed redirection returns 1, grep's "no line
+				// matched", and every shape read as clean: "no findings" for
+				// hits and greperr, and with mhits the added line's finding
+				// alone, which IMPRINT_PUSH_ANYWAY waved through.
+				for _, f := range []struct{ file, where string }{
+					{"hits", " over the added lines"},
+					{"greperr", " over the added lines"},
+					{"mhits", " over the commit messages"},
+				} {
+					shim := t.TempDir()
+					fired := filepath.Join(t.TempDir(), "fired")
+					script := "#!/bin/sh\nfor a; do last=$a; done\n" +
+						"case \"${last:-}\" in */allowed | */committers) d=\"${last%/*}\"; [ -d \"$d/" + f.file + "\" ] || { rm -f \"$d/" + f.file + "\" && mkdir \"$d/" + f.file + "\" && : >'" + fired + "'; } ;; esac\n" +
+						"exec '" + grepBin + "' \"$@\"\n"
+					if err := os.WriteFile(filepath.Join(shim, "grep"), []byte(script), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					path := shim + string(os.PathListSeparator)
+					if env.pathDir != "" {
+						path += env.pathDir + string(os.PathListSeparator)
+					}
+					for _, anyway := range []bool{false, true} {
+						e := []string{"PATH=" + path + os.Getenv("PATH")}
+						if anyway {
+							e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
+						}
+						if err := os.Remove(fired); err != nil && !errors.Is(err, os.ErrNotExist) {
+							t.Fatal(err)
+						}
+						code, out = c.hookNewBranch("leak", leakTip, e...)
+						if _, err := os.Stat(fired); err != nil {
+							t.Logf("%s ran no grep from PATH, so %s replaced by a directory was not exercised", sh.label, f.file)
+							break
+						}
+						ppWantRefused(t, code, out, "check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it",
+							"could not run grep for address"+f.where)
+						if strings.Contains(out, "no findings") {
+							t.Errorf("%s replaced by a directory: hook reports no findings; output:\n%s", f.file, out)
+						}
+					}
 				}
 			})
 		}
