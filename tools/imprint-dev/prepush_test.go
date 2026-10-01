@@ -707,3 +707,227 @@ func TestPrePushWebFlowMatchesCommitConf(t *testing.T) {
 			name, user, domain, m.Name, m.EmailUser, m.EmailDomain)
 	}
 }
+
+// tag makes an annotated tag NAME at TARGET, tagged by taggerName and
+// taggerEmail, and returns the tag object's id. git takes the tagger from the
+// committer identity. Names have to be distinct: dates are fixed, and the
+// name is part of the object.
+func (r *ppRepo) tag(name, target, taggerName, taggerEmail, message string) string {
+	r.t.Helper()
+	cmd := exec.Command("git", "-C", r.dir, "tag", "-a", "-m", message, name, target)
+	cmd.Env = ccIsolatedGitEnv("GIT_COMMITTER_NAME="+taggerName, "GIT_COMMITTER_EMAIL="+taggerEmail)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		r.t.Fatalf("git tag %s: %v\n%s", name, err, out)
+	}
+	oid := r.git("rev-parse", "refs/tags/"+name)
+	if typ := r.git("cat-file", "-t", oid); typ != "tag" {
+		r.t.Fatalf("refs/tags/%s points at a %s, want a tag object", name, typ)
+	}
+	return oid
+}
+
+// tagLine is the line git pipes into the hook for a new tag NAME at OID.
+func (r *ppRepo) tagLine(name, oid string) string {
+	return "refs/tags/" + name + " " + oid + " refs/tags/" + name + " " + r.zero + "\n"
+}
+
+// hookNewTag runs the hook for a push of a tag origin does not have yet.
+func (r *ppRepo) hookNewTag(name, oid string, extraEnv ...string) (int, string) {
+	r.t.Helper()
+	return r.hook([]string{"origin", r.origin}, r.tagLine(name, oid), extraEnv...)
+}
+
+// 15. A tag on a commit origin already has adds no commit, and is still
+// read: a shape in its message is refused - any of the shapes.
+func TestPrePushTagMessage(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pushed := r.head()
+	for _, tc := range []struct{ name, shape, text string }{
+		{"msg-address", "address", "release notes, write to " + addr("tag.message", "example.invalid")},
+		{"msg-postcode", "postcode and place", "release notes, shipped from " + ppPostcode},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.tag(tc.name, pushed, ppAuthorName, ccTestAuthorEmail, "first line\n\n"+tc.text)
+			code, out := r.hookNewTag(tc.name, oid)
+			ppWantRefused(t, code, out, tc.shape+" in the message of tag "+tc.name+": ", tc.text,
+				"0 new commit(s), 1 tag object(s)")
+			ppWantChecked(t, out)
+		})
+	}
+}
+
+// 16. The tagger has to be a declared identity. GitHub's web-flow identity
+// is let in as a merge's committer only, so as a tagger it is undeclared.
+func TestPrePushTagger(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pushed := r.head()
+	t.Run("declared tagger", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.tag("by-author", pushed, ppAuthorName, ccTestAuthorEmail, "a clean tag by the declared identity")
+		code, out := r.hookNewTag("by-author", oid)
+		ppWantPass(t, code, out)
+		if !strings.Contains(out, "0 undeclared tagger(s)") {
+			t.Errorf("hook report lacks %q; output:\n%s", "0 undeclared tagger(s)", out)
+		}
+	})
+	t.Run("undeclared tagger", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.tag("by-stranger", pushed, "Someone Else", ccTestSomeoneEmail, "a clean tag by a stranger")
+		code, out := r.hookNewTag("by-stranger", oid)
+		ppWantRefused(t, code, out,
+			"undeclared identity: Someone Else <"+ccTestSomeoneEmail+">, tagger of tag by-stranger")
+	})
+	t.Run("web-flow tagger", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.tag("by-web-flow", pushed, "GitHub", ccTestWebFlowEmail, "a clean tag by the web flow")
+		code, out := r.hookNewTag("by-web-flow", oid)
+		ppWantRefused(t, code, out,
+			"undeclared identity: GitHub <"+ccTestWebFlowEmail+">, tagger of tag by-web-flow")
+	})
+}
+
+// 17. A nested tag publishes the tags inside it: a shape only in the inner
+// tag's message, or a stranger only as the inner tagger, is refused although
+// the outer tag is clean.
+func TestPrePushNestedTag(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pushed := r.head()
+	t.Run("shape in the inner message", func(t *testing.T) {
+		r := r.with(t)
+		inner := addr("inner.tag", "example.invalid")
+		innerOid := r.tag("inner-shape", pushed, ppAuthorName, ccTestAuthorEmail, "inner, contact "+inner)
+		outerOid := r.tag("outer-shape", innerOid, ppAuthorName, ccTestAuthorEmail, "outer, clean")
+		code, out := r.hookNewTag("outer-shape", outerOid)
+		ppWantRefused(t, code, out, "address in the message of tag inner-shape: ", inner, "2 tag object(s)")
+	})
+	t.Run("stranger as the inner tagger", func(t *testing.T) {
+		r := r.with(t)
+		innerOid := r.tag("inner-stranger", pushed, "Someone Else", ccTestSomeoneEmail, "inner, by a stranger")
+		outerOid := r.tag("outer-stranger", innerOid, ppAuthorName, ccTestAuthorEmail, "outer, by the author")
+		code, out := r.hookNewTag("outer-stranger", outerOid)
+		ppWantRefused(t, code, out, "tagger of tag inner-stranger")
+	})
+}
+
+// 18. A clean tag on a pushed commit passes and reads nothing else - not
+// the unpushed commit on HEAD that carries a shape in its file and message.
+func TestPrePushCleanTagOnPushedCommit(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pushed := r.head()
+	local := addr("unpushed.tagged", "example.invalid")
+	r.write("local.txt", "unpushed "+local+"\n")
+	r.commit("local: unpushed commit with a shape, " + local)
+	oid := r.tag("clean", pushed, ppAuthorName, ccTestAuthorEmail, "a clean release tag")
+	code, out := r.hookNewTag("clean", oid)
+	ppWantPass(t, code, out)
+	for _, w := range []string{"0 new commit(s), 1 tag object(s)", "ran: annotated tags"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("hook report lacks %q; output:\n%s", w, out)
+		}
+	}
+	ppWantAbsent(t, out, local, ppSeedAddr)
+}
+
+// 19. A tag on a commit origin does not have yet brings that commit along,
+// and the commit is checked as on any other ref.
+func TestPrePushTagOnNewCommit(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	carried := addr("tag.carries", "example.invalid")
+	r.write("carried.txt", "a line the tag brings along: "+carried+"\n")
+	tip := r.commit("carried: a commit only the tag points at")
+	oid := r.tag("carrier", tip, ppAuthorName, ccTestAuthorEmail, "a clean tag on a new commit")
+	code, out := r.hookNewTag("carrier", oid)
+	ppWantRefused(t, code, out, ":carried.txt:1:", carried, "1 new commit(s), 1 tag object(s)")
+}
+
+// 20. A real git push of a tag hands the hook the tag object's id: a shape in
+// the message stops the push, and origin does not get the tag.
+func TestPrePushTagRealPush(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pushed := r.head()
+	leak := addr("real.push", "example.invalid")
+	r.tag("leaky", pushed, ppAuthorName, ccTestAuthorEmail, "notes, contact "+leak)
+	r.tag("fine", pushed, ppAuthorName, ccTestAuthorEmail, "notes, nothing to see")
+	r.installHook()
+
+	err, out := r.realPush("origin", "refs/tags/leaky")
+	if err == nil {
+		t.Fatalf("git push succeeded, want the hook to refuse it; output:\n%s", out)
+	}
+	ppWantRefused(t, 1, out, "address in the message of tag leaky: ", leak)
+	cmd := exec.Command("git", "-C", r.origin, "rev-parse", "-q", "--verify", "refs/tags/leaky")
+	cmd.Env = ccIsolatedGitEnv()
+	if got, err := cmd.Output(); err == nil {
+		t.Errorf("origin has tag leaky at %s, want no such ref", strings.TrimSpace(string(got)))
+	}
+
+	err, out = r.realPush("origin", "refs/tags/fine")
+	if err != nil {
+		t.Fatalf("git push of a clean tag: %v, want success; output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "1 tag object(s)") {
+		t.Errorf("hook report lacks %q; output:\n%s", "1 tag object(s)", out)
+	}
+}
+
+// 21. IMPRINT_PUSH_ANYWAY waves a tag finding through, as any finding. A tag
+// object the hook cannot read - an inner tag missing from the object store, a
+// tagger line it cannot parse - refuses the push, and no override covers it.
+func TestPrePushTagAnywayAndUnreadable(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	pushed := r.head()
+	anyway := "IMPRINT_PUSH_ANYWAY=only a test"
+	t.Run("finding with a reason", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.tag("anyway", pushed, ppAuthorName, ccTestAuthorEmail, "notes, contact "+addr("tag.anyway", "example.invalid"))
+		code, out := r.hookNewTag("anyway", oid, anyway)
+		ppWantPass(t, code, out)
+		if !strings.Contains(out, "only a test") {
+			t.Errorf("output does not echo the reason; output:\n%s", out)
+		}
+	})
+	t.Run("inner tag missing", func(t *testing.T) {
+		r := r.with(t)
+		innerOid := r.tag("lost-inner", pushed, ppAuthorName, ccTestAuthorEmail, "an inner tag that goes missing")
+		outerOid := r.tag("lost-outer", innerOid, ppAuthorName, ccTestAuthorEmail, "the outer tag of a lost one")
+		r.git("tag", "-d", "lost-inner")
+		if err := os.Remove(filepath.Join(r.dir, ".git", "objects", innerOid[:2], innerOid[2:])); err != nil {
+			t.Fatalf("removing the loose object: %v", err)
+		}
+		for _, e := range [][]string{nil, {anyway}} {
+			code, out := r.hookNewTag("lost-outer", outerOid, e...)
+			ppWantRefused(t, code, out, "could not read the type of "+innerOid)
+		}
+	})
+	t.Run("tagger line without an identity", func(t *testing.T) {
+		r := r.with(t)
+		raw := "object " + pushed + "\ntype commit\ntag odd\ntagger nobody in brackets 1767225600 +0000\n\na tag no git would write\n"
+		cmd := exec.Command("git", "-C", r.dir, "hash-object", "-t", "tag", "-w", "--literally", "--stdin")
+		cmd.Env = ccIsolatedGitEnv()
+		cmd.Stdin = strings.NewReader(raw)
+		got, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git hash-object: %v", err)
+		}
+		oid := strings.TrimSpace(string(got))
+		for _, e := range [][]string{nil, {anyway}} {
+			code, out := r.hookNewTag("odd", oid, e...)
+			ppWantRefused(t, code, out, "could not read the tagger of tag odd", "IMPRINT_PUSH_ANYWAY does not cover it")
+		}
+	})
+}
