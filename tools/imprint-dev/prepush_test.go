@@ -1210,6 +1210,16 @@ func TestPrePushToolchains(t *testing.T) {
 	noTagger := r.rawTag("object " + tagged + "\ntype commit\ntag tc-notagger\n\na tag that names no tagger\n")
 	treeTag := r.tag("tc-ontree", tree, ppAuthorName, ccTestAuthorEmail, "a clean tag on a tree")
 	latin1 := r.tag("tc-latin1", tagged, ppAuthorName, ccTestAuthorEmail, "release\n\nTel.:\xa0"+"0"+"30"+" "+"1234567")
+	r.git("checkout", "-q", "-b", "latin1line", "main")
+	r.write("l1.txt", "head\nTel.:\xa0"+"0"+"30"+" "+"1234567\n")
+	latin1LineTip := r.commit("latin1line: a Latin-1 byte before a number")
+	tcID := ppAuthorName + " <" + ccTestAuthorEmail + "> 1767225600 +0000"
+	rawMsgTip := r.rawCommit("tree " + tree + "\nparent " + tagged + "\nauthor " + tcID + "\ncommitter " + tcID +
+		"\n\nrawmsg: a Latin-1 byte\n\nTel.:\xa0" + "0" + "30" + " " + "1234567\n")
+	tcPlace := "10115" + " " + "\u00dcbungsstadt"
+	r.git("checkout", "-q", "-b", "encmsg", "main")
+	r.write("enc.txt", "a clean line\n")
+	encMsgTip := r.commit("encmsg: deliver to " + tcPlace)
 
 	for _, sh := range shells {
 		for _, aw := range awks {
@@ -1259,6 +1269,15 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantRefused(t, code, out, "the tag pushed to refs/tags/tc-ontree ends in tree "+tree)
 				code, out = c.hookNewTag("tc-latin1", latin1, "LC_ALL=C.UTF-8")
 				ppWantRefused(t, code, out, "phone number in tag tc-latin1: 8:")
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("latin1line", latin1LineTip, "LC_ALL=C.UTF-8")
+				ppWantRefused(t, code, out, "phone number: ", ":l1.txt:2:")
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("rawmsg", rawMsgTip, "LC_ALL=C.UTF-8")
+				ppWantRefused(t, code, out, "phone number in a commit message: ")
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("encmsg", encMsgTip, append([]string{"LC_ALL=C.UTF-8"}, ppLatin1Log...)...)
+				ppWantRefused(t, code, out, "postcode and place in a commit message: ", tcPlace)
 				ppWantChecked(t, out)
 
 				// greperr is not there to be written: a grep before the shape
@@ -1570,7 +1589,20 @@ func TestPrePushBlobOrTreeRef(t *testing.T) {
 // command would write, since a push carries them all the same.
 func (r *ppRepo) rawTag(content string) string {
 	r.t.Helper()
-	cmd := exec.Command("git", "-C", r.dir, "hash-object", "-t", "tag", "-w", "--literally", "--stdin")
+	return r.rawObject("tag", content)
+}
+
+// rawCommit writes content as a commit object, byte for byte: git commit and
+// git commit-tree turn a message byte that is not valid UTF-8 into UTF-8,
+// taking it for Latin-1, and so cannot make the commit some other tool can.
+func (r *ppRepo) rawCommit(content string) string {
+	r.t.Helper()
+	return r.rawObject("commit", content)
+}
+
+func (r *ppRepo) rawObject(kind, content string) string {
+	r.t.Helper()
+	cmd := exec.Command("git", "-C", r.dir, "hash-object", "-t", kind, "-w", "--literally", "--stdin")
 	cmd.Env = ccIsolatedGitEnv()
 	cmd.Stdin = strings.NewReader(content)
 	got, err := cmd.Output()
@@ -1794,4 +1826,96 @@ func TestPrePushWorkGone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ppLatin1Log has git print commit metadata in Latin-1 for one hook run,
+// without touching the repository's config.
+var ppLatin1Log = []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=i18n.logOutputEncoding", "GIT_CONFIG_VALUE_0=ISO-8859-1"}
+
+// 38. The lines a new commit adds are raw bytes, as the file was written. A
+// Latin-1 no-break space right before a phone number matches no bracket
+// expression under a UTF-8 locale, so the added lines are matched under C as
+// well, as a tag object is (33). The hook runs here under C.UTF-8; where that
+// locale is missing, grep falls back to C and this case proves less.
+func TestPrePushAddedLineLatin1Byte(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	phone := "0" + "30" + " " + "1234567"
+	r.git("checkout", "-q", "-b", "latin1")
+	r.write("latin1.txt", "first line\nTel.:\xa0"+phone+"\n")
+	tip := r.commit("latin1: a Latin-1 byte before a number")
+	code, out := r.hookNewBranch("latin1", tip, "LC_ALL=C.UTF-8")
+	ppWantRefused(t, code, out, "phone number: "+tip+":latin1.txt:2:")
+	ppWantChecked(t, out)
+	if n := strings.Count(out, ":latin1.txt:2:"); n != 1 {
+		t.Errorf("the hit is reported %d times, want once; output:\n%s", n, out)
+	}
+}
+
+// 39. A commit message reaches its check as git log prints it, re-encoded
+// into i18n.logOutputEncoding, or into i18n.commitEncoding when that is unset.
+// In Latin-1, a place that starts with an umlaut matches the pattern under
+// neither locale, so the hook asks git for UTF-8. A message whose bytes are
+// not valid UTF-8, with no encoding header to say what they are, is printed
+// as it is, and is matched under C as well. The hook runs under C.UTF-8.
+func TestPrePushCommitMessageEncoding(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	phone := "0" + "30" + " " + "1234567"
+	place := "10115" + " " + "\u00dcbungsstadt"
+	for _, c := range []struct{ name, key string }{
+		{"i18n.logOutputEncoding", "i18n.logOutputEncoding"},
+		{"i18n.commitEncoding alone", "i18n.commitEncoding"},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			r := ppSeed(t, env)
+			r.git("checkout", "-q", "-b", "enc")
+			r.write("enc.txt", "a clean line\n")
+			tip := r.commit("enc: deliver to " + place + "\n\nTel.:\u00a0" + phone)
+			code, out := r.hookNewBranch("enc", tip, "LC_ALL=C.UTF-8",
+				"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0="+c.key, "GIT_CONFIG_VALUE_0=ISO-8859-1")
+			ppWantRefused(t, code, out, "postcode and place in a commit message: ", place,
+				"phone number in a commit message: ")
+			ppWantChecked(t, out)
+		})
+	}
+	t.Run("a byte that is not valid UTF-8", func(t *testing.T) {
+		t.Parallel()
+		r := ppSeed(t, env)
+		id := ppAuthorName + " <" + ccTestAuthorEmail + "> 1767225600 +0000"
+		tip := r.rawCommit("tree " + r.git("rev-parse", "HEAD^{tree}") + "\nparent " + r.head() +
+			"\nauthor " + id + "\ncommitter " + id + "\n\nraw: a Latin-1 byte\n\nTel.:\xa0" + phone + "\n")
+		code, out := r.hookNewBranch("raw", tip, "LC_ALL=C.UTF-8")
+		ppWantRefused(t, code, out, "phone number in a commit message: ")
+		ppWantChecked(t, out)
+		if n := strings.Count(out, "phone number in a commit message: "); n != 1 {
+			t.Errorf("the hit is reported %d times, want once; output:\n%s", n, out)
+		}
+	})
+}
+
+// 40. The identities of the new commits reach check 1 re-encoded the same
+// way. A declared name outside ASCII, printed in Latin-1, would no longer
+// equal the UTF-8 name the clone declares, and its own commit would be
+// refused. A stranger with such a name is still undeclared.
+func TestPrePushIdentityEncoding(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	name := "J\u00fcrgen Test"
+	r.git("config", "user.name", name)
+	r.git("checkout", "-q", "-b", "umlaut")
+	r.write("umlaut.txt", "a clean line\n")
+	tip := r.commitAs(name, ccTestAuthorEmail, name, ccTestAuthorEmail, "umlaut: a declared name outside ASCII")
+	code, out := r.hookNewBranch("umlaut", tip, ppLatin1Log...)
+	ppWantPass(t, code, out)
+	stranger := "Gr\u00fcn Fremd"
+	r.write("stranger.txt", "another clean line\n")
+	tip = r.commitAs(stranger, ccTestSomeoneEmail, stranger, ccTestSomeoneEmail, "stranger: an undeclared name outside ASCII")
+	code, out = r.hookNewBranch("umlaut", tip, ppLatin1Log...)
+	ppWantRefused(t, code, out, "undeclared identity: "+stranger+" <"+ccTestSomeoneEmail+">")
+	ppWantChecked(t, out)
 }

@@ -215,13 +215,13 @@ trap 'rm -rf "$work"' EXIT
 # dash and busybox sh do not run the EXIT trap when a signal ends them; these
 # clean up and still refuse the push.
 trap 'rm -rf "$work"; exit 1' HUP INT TERM
-# hits, hits.own, hits.c, mhits and greperr, which the shape greps write to,
-# are made here too: in bash and busybox sh a redirection that fails returns 1,
-# which is also grep's "no line matched". Once they exist, grep's > and 2> only
-# truncate them, which takes neither space nor an inode. true, not ":" - a
-# redirection that fails on a special built-in such as ":" ends the shell
-# before || refuse can say why.
-for f in findings errors ran skipped ranges hits hits.own hits.c mhits greperr; do
+# hits, hits.own, hits.c and greperr, which the shape greps write to, are made
+# here too: in bash and busybox sh a redirection that fails returns 1, which is
+# also grep's "no line matched". Once they exist, grep's > and 2> only truncate
+# them, which takes neither space nor an inode. true, not ":" - a redirection
+# that fails on a special built-in such as ":" ends the shell before || refuse
+# can say why.
+for f in findings errors ran skipped ranges hits hits.own hits.c greperr; do
   true >"$work/$f" || refuse "$cannot_write"
 done
 
@@ -599,7 +599,12 @@ web_flow="$web_flow_name <$web_flow_user$at$web_flow_domain>"
 cp "$work/allowed" "$work/committers" || refuse "could not copy the declared identities."
 note committers '%s\n' "$web_flow"
 
-git log --no-walk=unsorted --stdin --format='A %an <%ae>%nC %cn <%ce>' \
+# git log re-encodes what it prints into i18n.logOutputEncoding, or into
+# i18n.commitEncoding when that is unset (measured with git 2.55.0,
+# 2026-10-01). A declared name outside ASCII, printed in Latin-1, would no
+# longer equal the UTF-8 one in the declared list, so git is asked for UTF-8,
+# which is what git config holds.
+git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='A %an <%ae>%nC %cn <%ce>' \
   <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
 sort -u -o "$work/ids" "$work/ids" || refuse "could not sort the identities."
 true >"$work/undeclared" || refuse "$cannot_write"
@@ -639,7 +644,8 @@ note ran 'declared identity - %s identity/identities over %s new commit(s), %s u
 # clean diff - and should git print "Binary files" anyway, that is an error.
 #
 # The awks only sort lines; the shapes are matched by grep below, under your
-# own locale, since a pattern holds characters outside ASCII. classify turns
+# own locale and under C (grep_both): a file is stored as it was written, in
+# whatever encoding that was. classify turns
 # one diff into one record per added line, "commit:path:line<TAB>content" -
 # git quotes a path that holds a control character, so the location has no raw
 # TAB. Inside a hunk every line starts with +, -, a space or a backslash; any
@@ -814,15 +820,7 @@ for f in added addedloc; do
 done
 n_done=0
 while IFS="$tab" read -r name pattern; do
-  grep -a -n -E "$pattern" "$work/added" >"$work/hits" 2>"$work/greperr" </dev/null
-  rc=$?
-  if [ "$rc" -gt 1 ]; then
-    note errors 'grep could not read the added lines: %s\n' "$(cat "$work/greperr")"
-  elif [ "$rc" -eq 0 ] && [ ! -s "$work/hits" ]; then
-    # 0 means a line matched, and -n writes at least its number: an empty file
-    # is a write that failed, which busybox grep does not report in its exit.
-    note errors 'grep matched %s in the added lines but wrote no hit down\n' "$name"
-  elif [ "$rc" -eq 0 ]; then
+  if grep_both "$name" "$pattern" "$work/added" "the added lines"; then
     # Every hit is one finding, so findings has to grow by as many lines as
     # hits holds: an awk that lost a write without saying so is an error.
     n_hits="$(wc -l <"$work/hits" | tr -d ' ')"
@@ -846,21 +844,20 @@ note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
 
 # --- check 3: commit messages ------------------------------------------------
 # A message is as public as a blob, and trailers are where addresses ride in.
-git log --no-walk=unsorted --stdin --format='%h|%s%n%b' <"$work/commits" >"$work/messages" \
+# --encoding=UTF-8 for the reason check 1 gives: in Latin-1, a place that
+# starts with an umlaut matches the pattern under neither locale. A message
+# whose bytes are not valid UTF-8 and that carries no encoding header to say
+# what they are is printed as it is, which grep_both matches under C as well.
+git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%h|%s%n%b' \
+  <"$work/commits" >"$work/messages" \
   || refuse "git log failed reading the messages of the new commits."
 n_done=0
 while IFS="$tab" read -r name pattern; do
-  grep -a -n -E "$pattern" "$work/messages" > "$work/mhits" 2>/dev/null </dev/null
-  rc=$?
-  if [ "$rc" -gt 1 ]; then
-    note errors 'grep could not read the commit messages of this range\n'
-  elif [ "$rc" -eq 0 ] && [ ! -s "$work/mhits" ]; then
-    note errors 'grep matched %s in the commit messages but wrote no hit down\n' "$name"
-  elif [ "$rc" -eq 0 ]; then
+  if grep_both "$name" "$pattern" "$work/messages" "the commit messages"; then
     while IFS= read -r hit; do
       [ -n "$hit" ] || continue
       note findings '%s in a commit message: %s\n' "$name" "$hit"
-    done <"$work/mhits" || refuse "could not read back the hits in the commit messages."
+    done <"$work/hits" || refuse "could not read back the hits in the commit messages."
   fi
   n_done=$((n_done + 1))
 done <"$work/shapes"
