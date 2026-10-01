@@ -58,7 +58,11 @@ covers it: "I could not look" and "I looked and found nothing" must never share 
 
 **What it takes the remote to hold is this clone's word for it.** Only the destination's own
 tracking refs count — `refs/remotes/<remote>/*` for the remote git names — so a commit that
-only a private mirror's tracking refs hold is still checked on its way to a public remote. A
+only a private mirror's tracking refs hold is still checked on its way to a public remote.
+They count only while no other remote stores refs under that prefix: when another remote's
+name starts with `<remote>/`, or one of its fetch refspecs points there (a mirror's
+`+refs/*:refs/*` included), none of them counts, and everything the remote's old tip does
+not reach is checked. A
 push to a location rather than a configured remote has no tracking refs to trust, and then
 everything the remote's old tip does not reach is checked. And tracking refs are what this
 clone last fetched, not what the remote holds now: after `git remote set-url` points a remote

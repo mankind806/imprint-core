@@ -31,8 +31,10 @@ var ppSeedAddr = addr("seed.fixture", "example.invalid")
 const ppAuthorName = "Test Author"
 
 type ppHookEnv struct {
-	shell string // absolute path of the shell that runs the hook
-	hook  string // absolute path of .githooks/pre-push
+	shell     string   // absolute path of the shell that runs the hook
+	shellArgs []string // arguments before the hook's path ("sh" for busybox)
+	hook      string   // absolute path of .githooks/pre-push
+	pathDir   string   // a directory put first on the hook's PATH, or ""
 }
 
 // ppSetup resolves git, the shell and the hook path before a test calls
@@ -157,9 +159,21 @@ func refLine(branch, localOid, remoteOid string) string {
 // returns its exit code and combined output.
 func (r *ppRepo) hook(args []string, stdin string, extraEnv ...string) (int, string) {
 	r.t.Helper()
-	cmd := exec.Command(r.env.shell, append([]string{r.env.hook}, args...)...)
+	return r.hookVia(nil, args, stdin, extraEnv...)
+}
+
+// hookVia runs the hook as hook does, with wrap (a command that execs its
+// arguments) in front of the shell, when wrap is not empty.
+func (r *ppRepo) hookVia(wrap, args []string, stdin string, extraEnv ...string) (int, string) {
+	r.t.Helper()
+	argv := append(append(append(append([]string{}, wrap...), r.env.shell), r.env.shellArgs...), r.env.hook)
+	cmd := exec.Command(argv[0], append(argv[1:], args...)...)
 	cmd.Dir = r.dir
-	cmd.Env = ccIsolatedGitEnv(append([]string{"TMPDIR=" + r.t.TempDir()}, extraEnv...)...)
+	env := []string{"TMPDIR=" + r.t.TempDir()}
+	if r.env.pathDir != "" {
+		env = append(env, "PATH="+r.env.pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	cmd.Env = ccIsolatedGitEnv(append(env, extraEnv...)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
@@ -211,7 +225,7 @@ func ppWantChecked(t *testing.T, out string) {
 func (r *ppRepo) installHook() {
 	r.t.Helper()
 	hooks := r.t.TempDir()
-	wrapper := "#!/bin/sh\nexec '" + r.env.shell + "' '" + r.env.hook + "' \"$@\"\n"
+	wrapper := "#!/bin/sh\nexec '" + strings.Join(append(append([]string{r.env.shell}, r.env.shellArgs...), r.env.hook), "' '") + "' \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(hooks, "pre-push"), []byte(wrapper), 0o755); err != nil {
 		r.t.Fatal(err)
 	}
@@ -705,5 +719,337 @@ func TestPrePushWebFlowMatchesCommitConf(t *testing.T) {
 	if name != m.Name || user != m.EmailUser || domain != m.EmailDomain {
 		t.Errorf("hook web flow %q / %q / %q, commit.conf mergeCommitter %q / %q / %q",
 			name, user, domain, m.Name, m.EmailUser, m.EmailDomain)
+	}
+}
+
+// 15. GIT_DIFF_OPTS overrides -U0 even on diff-tree, and with
+// diff.suppressBlankEmpty a blank context line comes out as an empty line.
+// Together they shifted the line numbers in one parent's diff of a merge
+// only, and the line the merge adds fell out of the intersection. With both
+// set, the hook still names the line.
+func TestPrePushDiffEnvironment(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	r.write("blank.txt", "a\nb\nc\n")
+	r.commit("blank: three lines")
+	r.pushNoVerify("origin", "main")
+	r.git("checkout", "-q", "-b", "side", "main")
+	r.write("blank.txt", "a\n\nb\nc\n")
+	r.commit("side: a blank line, pushed")
+	r.pushNoVerify("origin", "side")
+	r.git("fetch", "-q", "origin")
+	r.git("checkout", "-q", "-b", "feature", "main")
+	r.write("feature.txt", "a clean line\n")
+	r.commit("feature: clean commit before the merge")
+	evil := addr("blank.context", "example.invalid")
+	r.git("merge", "-q", "--no-ff", "--no-commit", "origin/side")
+	r.write("blank.txt", "a\n\nb\n"+evil+"\nc\n")
+	r.git("add", "-A")
+	r.git("commit", "-q", "-m", "merge: origin/side with a line of its own")
+	r.git("rev-parse", "--verify", "HEAD^2")
+	r.git("config", "diff.suppressBlankEmpty", "true")
+	code, out := r.hookNewBranch("blank", r.head(), "GIT_DIFF_OPTS=-u3")
+	ppWantRefused(t, code, out, "address: ", ":blank.txt:4:", evil)
+	ppWantChecked(t, out)
+}
+
+// 16. Refs under refs/remotes/origin/ that another remote wrote are not
+// origin's word: a commit only that other remote holds is checked on its way
+// to origin, and the scope line says why.
+func TestPrePushTrackingNamespaceShared(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	// privateTip commits a shape only the private remote gets, then a clean
+	// commit on top of it, and returns that clean commit.
+	privateTip := func(r *ppRepo, secret string) string {
+		r.t.Helper()
+		r.git("checkout", "-q", "-b", "secret", "main")
+		r.write("secret.txt", "contact "+secret+"\n")
+		r.commit("secret: only on the private remote")
+		r.write("feature.txt", "a clean line\n")
+		return r.commit("feature: clean commit on top")
+	}
+	t.Run("another remote's fetch refspec", func(t *testing.T) {
+		r := ppSeed(t, env)
+		secret := addr("refspec.private", "example.invalid")
+		tip := privateTip(r, secret)
+		priv := r.newBare()
+		r.git("remote", "add", "priv", priv)
+		r.git("config", "--replace-all", "remote.priv.fetch", "+refs/heads/*:refs/remotes/origin/priv/*")
+		r.pushNoVerify("priv", "secret~1:refs/heads/secret")
+		r.git("fetch", "-q", "priv")
+		r.git("rev-parse", "--verify", "refs/remotes/origin/priv/secret")
+		code, out := r.hookNewBranch("feature", tip)
+		ppWantRefused(t, code, out, secret, "remote priv fetches into refs/remotes/origin/", "not trusted")
+		ppWantChecked(t, out)
+	})
+	t.Run("another remote named under origin/", func(t *testing.T) {
+		r := ppSeed(t, env)
+		secret := addr("name.private", "example.invalid")
+		tip := privateTip(r, secret)
+		priv := r.newBare()
+		// A URL and no fetch refspec, so only the name says where its refs go.
+		r.git("config", "remote.origin/priv.url", priv)
+		r.pushNoVerify("origin/priv", "secret~1:refs/heads/secret")
+		r.git("fetch", "-q", "origin/priv", "+refs/heads/*:refs/remotes/origin/priv/*")
+		r.git("rev-parse", "--verify", "refs/remotes/origin/priv/secret")
+		code, out := r.hookNewBranch("feature", tip)
+		ppWantRefused(t, code, out, secret, "remote origin/priv stores its refs under refs/remotes/origin/", "not trusted")
+		ppWantChecked(t, out)
+	})
+}
+
+// 17. A relative TMPDIR whose name holds "=": awk took the working files for
+// variable assignments, read nothing, and let a shape through.
+func TestPrePushRelativeTMPDIR(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	leak := addr("relative.tmpdir", "example.invalid")
+	r.git("checkout", "-q", "-b", "rel")
+	r.write("rel.txt", "first line\nwrite to "+leak+"\n")
+	tip := r.commit("rel: add a contact line")
+	if err := os.Mkdir(filepath.Join(r.dir, "a=b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out := r.hookNewBranch("rel", tip, "TMPDIR=a=b")
+	ppWantRefused(t, code, out, "address: ", ":rel.txt:2:", leak)
+	ppWantChecked(t, out)
+}
+
+// 18. A ref line the hook cannot write down - here under a file size limit of
+// zero, with the signal for it ignored so that the write fails rather than
+// killing the shell - is refused, not read as nothing to push.
+func TestPrePushRefListNotWritten(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	limit := []string{env.shell, "-c", `trap '' XFSZ; ulimit -f 0; exec "$@"`, "sh"}
+	if out, err := exec.Command(env.shell, "-c", `trap '' XFSZ; ulimit -f 0`).CombinedOutput(); err != nil {
+		t.Skipf("%s cannot ignore XFSZ and set a file size limit: %v\n%s", env.shell, err, out)
+	}
+	r := ppSeed(t, env)
+	r.git("checkout", "-q", "-b", "limited")
+	r.write("limited.txt", "a clean line\n")
+	tip := r.commit("limited: one clean commit")
+	code, out := r.hookVia(limit, []string{"origin", r.origin}, refLine("limited", tip, r.zero))
+	ppWantRefused(t, code, out, "wrote down 0 of 1 ref line(s)")
+}
+
+// 19. A replace ref (git replace) shows a clean commit in place of one that
+// adds a shape, but a push sends the original - so the hook reads the
+// original.
+func TestPrePushReplacedCommit(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	leak := addr("replaced.commit", "example.invalid")
+	r.git("checkout", "-q", "-b", "decoy", "main")
+	r.write("repl.txt", "a clean line\n")
+	decoy := r.commit("repl: the clean stand-in")
+	r.git("checkout", "-q", "-b", "repl", "main")
+	r.write("repl.txt", "contact "+leak+"\n")
+	real := r.commit("repl: the commit that is pushed")
+	r.git("replace", real, decoy)
+	if got := r.git("show", "repl:repl.txt"); got != "a clean line" {
+		t.Fatalf("git shows %q at repl, want the stand-in's line", got)
+	}
+	code, out := r.hookNewBranch("repl", real)
+	ppWantRefused(t, code, out, "address: ", ":repl.txt:1:", leak)
+	ppWantChecked(t, out)
+	// What a push sends: the original, which origin then serves.
+	r.pushNoVerify("origin", "repl")
+	if got := strings.TrimSpace(ccRunGit(t, r.origin, "show", "repl:repl.txt")); !strings.Contains(got, leak) {
+		t.Errorf("origin serves %q at repl, want the original line with the shape", got)
+	}
+}
+
+// 20. A rename (git mv) of a file that holds a shape already on origin adds
+// no line: without rename detection every line of the file would read as new.
+func TestPrePushRenamePushedShape(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	r.git("checkout", "-q", "-b", "moved")
+	r.git("mv", "notes.txt", "moved.txt")
+	tip := r.commit("notes: rename")
+	code, out := r.hookNewBranch("moved", tip)
+	ppWantPass(t, code, out)
+	ppWantAbsent(t, out, ppSeedAddr)
+}
+
+// 21. An octopus merge (three parents): bringing in only pushed content
+// passes, and a line new to all three parents is refused.
+func TestPrePushOctopusMerge(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	one, two := addr("octopus.one", "example.invalid"), addr("octopus.two", "example.invalid")
+	r.git("checkout", "-q", "-b", "o1", "main")
+	r.write("o1.txt", "first branch "+one+"\n")
+	r.commit("o1: a shape, pushed")
+	r.git("checkout", "-q", "-b", "o2", "main")
+	r.write("o2.txt", "second branch "+two+"\n")
+	r.commit("o2: a shape, pushed")
+	r.pushNoVerify("origin", "o1")
+	r.pushNoVerify("origin", "o2")
+	r.git("fetch", "-q", "origin")
+	r.git("checkout", "-q", "-b", "feature", "main")
+	r.write("feature.txt", "a clean line\n")
+	r.commit("feature: clean commit before the merge")
+
+	t.Run("only pushed content", func(t *testing.T) {
+		r := r.with(t)
+		r.git("checkout", "-q", "-b", "octo", "feature")
+		r.git("merge", "-q", "--no-ff", "--no-edit", "origin/o1", "origin/o2")
+		r.git("rev-parse", "--verify", "HEAD^3")
+		code, out := r.hookNewBranch("octo", r.head())
+		ppWantPass(t, code, out)
+		ppWantAbsent(t, out, one, two)
+	})
+	t.Run("a line new to every parent", func(t *testing.T) {
+		r := r.with(t)
+		evil := addr("octopus.evil", "example.invalid")
+		r.git("checkout", "-q", "-b", "octo-evil", "feature")
+		r.git("merge", "-q", "--no-ff", "--no-commit", "origin/o1", "origin/o2")
+		r.write("README.md", "seed\noctopus "+evil+"\n")
+		r.git("add", "-A")
+		r.git("commit", "-q", "-m", "merge: o1 and o2 with a line of its own")
+		r.git("rev-parse", "--verify", "HEAD^3")
+		code, out := r.hookNewBranch("octo-evil", r.head())
+		ppWantRefused(t, code, out, "address: ", ":README.md:2:", evil)
+		ppWantChecked(t, out)
+		ppWantAbsent(t, out, one, two)
+	})
+}
+
+// 22. A NUL byte on the same line as a shape: busybox awk and mawk end a
+// record at a NUL, so without the hook's tr step the rest of the line would
+// never reach the check.
+func TestPrePushNULOnShapeLine(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	hidden := addr("same.line", "example.invalid")
+	r.git("checkout", "-q", "-b", "nulline")
+	r.write("nl.txt", "head\nbin\x00ary contact "+hidden+"\n")
+	tip := r.commit("nulline: a NUL before a shape")
+	code, out := r.hookNewBranch("nulline", tip)
+	ppWantRefused(t, code, out, "address: ", ":nl.txt:2:", hidden)
+	ppWantChecked(t, out)
+}
+
+// 23. A few cases under every shell and awk found on PATH: sh, dash and
+// busybox sh, each with the default awk, mawk, busybox awk and original-awk.
+// CI runs on Ubuntu, where sh is dash and awk may be mawk; the combinations
+// that ran are logged (go test -v), so the log says which were exercised. A
+// combination that resolves to one already listed runs once.
+func TestPrePushToolchains(t *testing.T) {
+	base := ppSetup(t)
+	t.Parallel()
+	type tool struct {
+		label string   // what the log calls it
+		key   string   // the resolved binary and its arguments, to skip duplicates
+		bin   string   // the path as found on PATH, which is what runs
+		args  []string // arguments before the script's own
+		shim  bool     // an awk other than the default, so put first on PATH
+	}
+	find := func(name string, args ...string) (tool, bool) {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			return tool{}, false
+		}
+		real := p
+		if e, err := filepath.EvalSymlinks(p); err == nil {
+			real = e
+		}
+		label := strings.Join(append([]string{name}, args...), " ")
+		if b := filepath.Base(real); b != name {
+			label += " (" + b + ")"
+		}
+		return tool{label: label, key: real + " " + strings.Join(args, " "), bin: p, args: args}, true
+	}
+	var shells, awks []tool
+	seen := map[string]bool{}
+	for _, c := range [][]string{{"sh"}, {"dash"}, {"busybox", "sh"}} {
+		if tl, ok := find(c[0], c[1:]...); ok && !seen["sh:"+tl.key] {
+			seen["sh:"+tl.key] = true
+			shells = append(shells, tl)
+		}
+	}
+	for _, c := range [][]string{{"awk"}, {"mawk"}, {"busybox", "awk"}, {"original-awk"}} {
+		if tl, ok := find(c[0], c[1:]...); ok && !seen["awk:"+tl.key] {
+			seen["awk:"+tl.key] = true
+			tl.shim = c[0] != "awk"
+			awks = append(awks, tl)
+		}
+	}
+	if len(shells) == 0 || len(awks) == 0 {
+		t.Skip("no shell or no awk on PATH")
+	}
+
+	r := ppSeed(t, base)
+	other := addr("tc.other", "example.invalid")
+	r.git("checkout", "-q", "-b", "other", "main")
+	r.write("other.txt", "from the other branch "+other+"\n")
+	r.commit("other: a shape, pushed")
+	r.pushNoVerify("origin", "other")
+	r.git("fetch", "-q", "origin")
+	r.git("checkout", "-q", "-b", "feature", "main")
+	r.write("feature.txt", "a clean line\n")
+	clean := r.commit("feature: clean commit")
+	leak := addr("tc.leak", "example.invalid")
+	r.git("checkout", "-q", "-b", "leak", "main")
+	r.write("leak.txt", "first line\nwrite to "+leak+"\n")
+	leakTip := r.commit("leak: add a contact line")
+	nulLine := addr("tc.nulline", "example.invalid")
+	r.git("checkout", "-q", "-b", "nulline", "main")
+	r.write("nl.txt", "head\nbin\x00ary contact "+nulLine+"\n")
+	nulLineTip := r.commit("nulline: a NUL before a shape")
+	r.git("checkout", "-q", "-b", "merged", "feature")
+	r.git("merge", "-q", "--no-ff", "--no-edit", "origin/other")
+	mergedTip := r.head()
+	nulFile := addr("tc.evilnul", "example.invalid")
+	r.git("checkout", "-q", "-b", "evil-nul", "feature")
+	r.git("merge", "-q", "--no-ff", "--no-commit", "origin/other")
+	r.write("n.bin", "bin\x00ary\ncontact "+nulFile+"\n")
+	r.git("add", "-A")
+	r.git("commit", "-q", "-m", "merge: origin/other with a NUL file of its own")
+	evilNulTip := r.head()
+
+	for _, sh := range shells {
+		for _, aw := range awks {
+			sh, aw := sh, aw
+			name := sh.label + " + " + aw.label
+			t.Logf("toolchain: %s", name)
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				env := base
+				env.shell, env.shellArgs = sh.bin, sh.args
+				if aw.shim {
+					shim := t.TempDir()
+					script := "#!/bin/sh\nexec '" + strings.Join(append([]string{aw.bin}, aw.args...), "' '") + "' \"$@\"\n"
+					if err := os.WriteFile(filepath.Join(shim, "awk"), []byte(script), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					env.pathDir = shim
+				}
+				c := *r
+				c.t, c.env = t, env
+				code, out := c.hookNewBranch("feature", clean)
+				ppWantPass(t, code, out)
+				code, out = c.hookNewBranch("leak", leakTip)
+				ppWantRefused(t, code, out, "address: ", ":leak.txt:2:", leak)
+				code, out = c.hookNewBranch("merged", mergedTip)
+				ppWantPass(t, code, out)
+				ppWantAbsent(t, out, other)
+				code, out = c.hookNewBranch("evil-nul", evilNulTip)
+				ppWantRefused(t, code, out, "address: ", ":n.bin:2:", nulFile)
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("nulline", nulLineTip)
+				ppWantRefused(t, code, out, "address: ", ":nl.txt:2:", nulLine)
+				ppWantChecked(t, out)
+			})
+		}
 	}
 }
