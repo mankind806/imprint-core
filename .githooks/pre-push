@@ -9,7 +9,8 @@
 # personal data takes - phone numbers, bank account numbers and postal
 # addresses in the formats the patterns below spell out. An annotated tag is
 # held to the same: its tagger has to be a declared identity, and its message
-# must not match a shape.
+# must not match a shape. A ref that ends in a blob or a tree is refused
+# unread.
 #
 # WHAT IT READS. The new commits, and of their content only the lines they
 # add; and every tag object a pushed ref leads to, its tagger and its message.
@@ -174,16 +175,18 @@ new_commits() {
 # on the way is published with the ref and goes to check 4, an inner tag of a
 # nested one as much as the outer. A ref that ends in a commit goes on to
 # rev-list with that commit. tags lists each tag object once - "oid N ref",
-# its content in tag.N; objects lists the refs that end in a blob or a tree.
+# its content in tag.N; objects lists the refs that end in a blob or a tree -
+# "type oid ref via", via being "direct" or "tag" - for the finding below.
 # An object this clone cannot type or read stops the push here: what a ref
 # publishes has to be known before anything about it can be checked.
 : >"$work/commitrefs"; : >"$work/tags"; : >"$work/objects"
 n_tags=0
 while read -r local_oid remote_oid remote_ref; do
-  obj="$local_oid"
+  obj="$local_oid"; via=direct
   type="$(git cat-file -t "$obj" 2>/dev/null </dev/null)" \
     || refuse "could not read the type of $obj, pushed to $remote_ref."
   while [ "$type" = tag ]; do
+    via=tag
     if ! grep -q "^$obj " "$work/tags"; then
       n_tags=$((n_tags + 1))
       git cat-file tag "$obj" >"$work/tag.$n_tags" 2>/dev/null </dev/null \
@@ -202,7 +205,7 @@ while read -r local_oid remote_oid remote_ref; do
   done
   case "$type" in
     commit) printf '%s %s\n' "$obj" "$remote_oid" >>"$work/commitrefs" ;;
-    blob | tree) printf '%s %s %s\n' "$type" "$obj" "$remote_ref" >>"$work/objects" ;;
+    blob | tree) printf '%s %s %s %s\n' "$type" "$obj" "$remote_ref" "$via" >>"$work/objects" ;;
     *) refuse "$remote_ref points at a $type, which this hook does not know how to read." ;;
   esac
 done <"$work/ranges"
@@ -292,6 +295,29 @@ else
   printf 'annotated tags - no pushed ref leads to a tag object\n' >>"$work/skipped"
 fi
 
+# --- refs that end in a blob or a tree ---------------------------------------
+# A ref may point straight at a blob or a tree, or at a tag that ends in one.
+# A local bare repository took a blob under refs/tags/ and a tree under a
+# namespace of its own, and refused a blob only under refs/heads/ (measured
+# with git 2.55.0, 2026-10-01). Its content is not read here: a blob or a
+# tree carries no history to tell new lines from published ones, so every line
+# in it would count as new. Such a ref is a finding instead (the owner's call,
+# 2026-10-01): IMPRINT_PUSH_ANYWAY with a reason is the loud way to push one on
+# purpose.
+if [ -s "$work/objects" ]; then
+  while read -r o_type o_oid o_ref o_via; do
+    if [ "$o_via" = tag ]; then
+      printf 'unread content: the tag pushed to %s ends in %s %s, and this hook does not read a %s\n' \
+        "$o_ref" "$o_type" "$o_oid" "$o_type" >>"$work/findings"
+    else
+      printf 'unread content: %s points straight at %s %s, and this hook does not read a %s\n' \
+        "$o_ref" "$o_type" "$o_oid" "$o_type" >>"$work/findings"
+    fi
+  done <"$work/objects"
+  printf 'refs to a blob or a tree - %s ref(s), each a finding, its content unread\n' \
+    "$(wc -l <"$work/objects" | tr -d ' ')" >>"$work/ran"
+fi
+
 # report - says what ran, what was skipped and what was found, and ends the
 # hook with its verdict. It does not return.
 report() {
@@ -339,9 +365,10 @@ report() {
 # No new commit, so no commit identity, added line or commit message to check.
 # This has to come before any `git log --stdin`: handed an empty list, git log
 # falls back to HEAD and would check a commit nobody is pushing (measured with
-# git 2.55.0, 2026-10-01). With no tag object either, nothing at all was read.
+# git 2.55.0, 2026-10-01). With no tag object and no blob or tree either,
+# nothing at all was read.
 if [ "$n_commits" -eq 0 ]; then
-  if [ "$n_tags" -eq 0 ]; then
+  if [ "$n_tags" -eq 0 ] && [ ! -s "$work/objects" ]; then
     say "pre-push: $n_refs ref(s), 0 new commit(s), 0 tag object(s); $scope."
     say "pre-push: checks that ran: none needed."
     say "pre-push:   skipped: declared identity, tracked content, commit messages - no new commit, so no commit identity, added line or commit message to check"

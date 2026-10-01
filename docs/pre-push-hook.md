@@ -77,9 +77,15 @@ the URL they were fetched from: with a `pushurl`, a `pushInsteadOf` or a second 
 remote, git hands the hook another location, and then everything the remote's old tip does
 not reach is checked, as for a push to a location.
 
-Some of what a push publishes is not read at all: a ref that points straight at a blob or a
-tree, or at a tag that ends in one, and the names of refs — a branch or tag name, and the name
-a tag object carries. And the hook diffs lines, with no copy
+A ref that points straight at a blob or a tree, or at a tag that ends in one, is refused
+unread, as a finding. Git takes such a ref: a local bare repository accepted a blob under
+`refs/tags/` and a tree under a namespace of its own, and refused a blob only under
+`refs/heads/` (*measured with git 2.55.0, 2026-10-01; what a hosted remote accepts was not
+checked*). A blob or a tree carries no history that would tell its new lines from published
+ones.
+`IMPRINT_PUSH_ANYWAY` with a reason is the way to push one on purpose (the owner's call,
+2026-10-01). The names of refs are not read at all: a branch or tag name, and the name a tag
+object carries, pass whatever they hold. And the hook diffs lines, with no copy
 detection, so lines copied or moved into another file are reported again even though they are
 already published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
 

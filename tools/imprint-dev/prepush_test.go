@@ -931,3 +931,55 @@ func TestPrePushTagAnywayAndUnreadable(t *testing.T) {
 		}
 	})
 }
+
+// 22. A ref that points at a blob or a tree, straight or through a tag, is
+// a finding: the hook does not read the content, and rev-list would list
+// nothing for it. IMPRINT_PUSH_ANYWAY with a reason lets it through; a real
+// push of a blob under refs/tags/ is stopped before origin gets it.
+func TestPrePushBlobOrTreeRef(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	cmd := exec.Command("git", "-C", r.dir, "hash-object", "-w", "--stdin")
+	cmd.Env = ccIsolatedGitEnv()
+	cmd.Stdin = strings.NewReader("a loose blob, contact " + addr("in.blob", "example.invalid") + "\n")
+	got, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git hash-object: %v", err)
+	}
+	blob := strings.TrimSpace(string(got))
+	tree := r.git("rev-parse", "HEAD^{tree}")
+	tagBlob := r.tag("on-blob", blob, ppAuthorName, ccTestAuthorEmail, "a clean tag on a blob")
+	tagTree := r.tag("on-tree", tree, ppAuthorName, ccTestAuthorEmail, "a clean tag on a tree")
+	line := func(ref, oid string) string { return ref + " " + oid + " " + ref + " " + r.zero + "\n" }
+
+	for _, tc := range []struct{ name, ref, oid, want string }{
+		{"blob", "refs/tags/b", blob, "unread content: refs/tags/b points straight at blob " + blob},
+		{"tree", "refs/trees/t", tree, "unread content: refs/trees/t points straight at tree " + tree},
+		{"tag on a blob", "refs/tags/on-blob", tagBlob, "unread content: the tag pushed to refs/tags/on-blob ends in blob " + blob},
+		{"tag on a tree", "refs/tags/on-tree", tagTree, "unread content: the tag pushed to refs/tags/on-tree ends in tree " + tree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := r.with(t)
+			code, out := r.hook([]string{"origin", r.origin}, line(tc.ref, tc.oid))
+			ppWantRefused(t, code, out, tc.want, "refs to a blob or a tree - 1 ref(s)")
+			ppWantChecked(t, out)
+			code, out = r.hook([]string{"origin", r.origin}, line(tc.ref, tc.oid), "IMPRINT_PUSH_ANYWAY=pushed on purpose")
+			ppWantPass(t, code, out)
+		})
+	}
+	t.Run("real push of a blob under refs/tags", func(t *testing.T) {
+		r := r.with(t)
+		r.installHook()
+		err, out := r.realPush("origin", blob+":refs/tags/blob")
+		if err == nil {
+			t.Fatalf("git push succeeded, want the hook to refuse it; output:\n%s", out)
+		}
+		ppWantRefused(t, 1, out, "points straight at blob "+blob)
+		cmd := exec.Command("git", "-C", r.origin, "rev-parse", "-q", "--verify", "refs/tags/blob")
+		cmd.Env = ccIsolatedGitEnv()
+		if got, err := cmd.Output(); err == nil {
+			t.Errorf("origin has refs/tags/blob at %s, want no such ref", strings.TrimSpace(string(got)))
+		}
+	})
+}
