@@ -1312,12 +1312,20 @@ func TestPrePushToolchains(t *testing.T) {
 				// busybox sh the failed redirection returns 1, grep's "no line
 				// matched", and every shape read as clean. hits.own, hits.c
 				// and greperr are grep_both's grep targets; hits is where sort
-				// merges their lines.
-				for _, f := range []struct{ file, want string }{
-					{"hits.own", "could not run grep for address over the added lines"},
-					{"hits.c", "could not run grep for address over the added lines"},
-					{"greperr", "could not run grep for address over the added lines"},
-					{"hits", "sort could not merge the address hits in the added lines"},
+				// merges their lines. Checks 2 and 3 share them, and each has
+				// to say so on its own: a check 3 that read the directory as
+				// clean would leave the added line's finding alone, which
+				// IMPRINT_PUSH_ANYWAY waves through.
+				for _, f := range []struct {
+					file  string
+					wants []string
+				}{
+					{"hits.own", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit messages"}},
+					{"hits.c", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit messages"}},
+					{"greperr", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit messages"}},
+					// sort runs only where a grep found something, and the
+					// leak branch's message is clean, so this one is check 2's.
+					{"hits", []string{"sort could not merge the address hits in the added lines"}},
 				} {
 					shim := t.TempDir()
 					fired := filepath.Join(t.TempDir(), "fired")
@@ -1344,7 +1352,7 @@ func TestPrePushToolchains(t *testing.T) {
 							t.Logf("%s ran no grep from PATH, so %s replaced by a directory was not exercised", sh.label, f.file)
 							break
 						}
-						ppWantRefused(t, code, out, "check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it", f.want)
+						ppWantRefused(t, code, out, append([]string{"check(s) could not run", "IMPRINT_PUSH_ANYWAY does not cover it"}, f.wants...)...)
 						if strings.Contains(out, "no findings") {
 							t.Errorf("%s replaced by a directory: hook reports no findings; output:\n%s", f.file, out)
 						}

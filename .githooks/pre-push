@@ -391,7 +391,7 @@ SHAPES
 }
 n_shapes="$(shapes | wc -l | tr -d ' ')"
 case "$n_shapes" in '' | 0 | *[!0-9]*) refuse "found no shapes to check." ;; esac
-# Both shape loops below read this file in the main shell, not from a pipe: a
+# Every shape loop below reads this file in the main shell, not from a pipe: a
 # piped loop runs in a subshell, which has none of the traps above, and a signal
 # that ended it alone would leave the remaining shapes unrun while the hook went
 # on to report no findings. Each loop counts the shapes it finished, and fewer
