@@ -1026,6 +1026,9 @@ func TestPrePushToolchains(t *testing.T) {
 	stranger := "Someone Else <" + ccTestSomeoneEmail + ">"
 	rawTag := r.rawTag("object " + tagged + "\ntype commit\ntag tc-raw\ntagger " + stranger + " 1767225600 +0000")
 	tree := r.git("rev-parse", "main^{tree}")
+	noTagger := r.rawTag("object " + tagged + "\ntype commit\ntag tc-notagger\n\na tag that names no tagger\n")
+	treeTag := r.tag("tc-ontree", tree, ppAuthorName, ccTestAuthorEmail, "a clean tag on a tree")
+	latin1 := r.tag("tc-latin1", tagged, ppAuthorName, ccTestAuthorEmail, "release\n\nTel.:\xa0"+"0"+"30"+" "+"1234567")
 
 	for _, sh := range shells {
 		for _, aw := range awks {
@@ -1069,6 +1072,13 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantChecked(t, out)
 				code, out = c.hook([]string{"origin", c.origin}, "refs/trees/t "+tree+" refs/trees/t "+c.zero+"\n")
 				ppWantRefused(t, code, out, "points straight at tree "+tree)
+				code, out = c.hookNewTag("tc-notagger", noTagger)
+				ppWantRefused(t, code, out, "no tagger: tag tc-notagger")
+				code, out = c.hookNewTag("tc-ontree", treeTag)
+				ppWantRefused(t, code, out, "the tag pushed to refs/tags/tc-ontree ends in tree "+tree)
+				code, out = c.hookNewTag("tc-latin1", latin1, "LC_ALL=C.UTF-8")
+				ppWantRefused(t, code, out, "phone number in tag tc-latin1: 8:")
+				ppWantChecked(t, out)
 			})
 		}
 	}
