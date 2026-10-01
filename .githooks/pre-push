@@ -307,7 +307,9 @@ while read -r local_oid remote_oid remote_ref; do
     || refuse "could not read the type of $obj, pushed to $remote_ref."
   while [ "$type" = tag ]; do
     via=tag
-    if ! grep -q "^$obj " "$work/tags"; then
+    # tags holds ref names as git sent them, in any bytes, so it is read
+    # under C, as the tag objects below are.
+    if ! LC_ALL=C grep -q "^$obj " "$work/tags"; then
       n_tags=$((n_tags + 1))
       git cat-file tag "$obj" >"$work/tag.raw" 2>/dev/null </dev/null \
         || refuse "could not read tag object $obj, pushed to $remote_ref."
@@ -317,7 +319,7 @@ while read -r local_oid remote_oid remote_ref; do
       printf '%s %s %s\n' "$obj" "$n_tags" "$remote_ref" >>"$work/tags"
       tagfile="$work/tag.$n_tags"
     else
-      tagfile="$work/tag.$(sed -n "s/^$obj \\([0-9]*\\) .*/\\1/p" "$work/tags")"
+      tagfile="$work/tag.$(LC_ALL=C sed -n "s/^$obj \\([0-9]*\\) .*/\\1/p" "$work/tags")"
     fi
     obj="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^object //p' "$tagfile")"
     case "$obj" in
@@ -376,6 +378,8 @@ n_written="$(wc -l <"$work/shapes" | tr -d ' ')"
 [ "$n_written" = "$n_shapes" ] || refuse \
   "wrote down ${n_written:-no} of $n_shapes shape(s)."
 tab="$(printf '\t')"
+nl='
+'
 
 # grep_both NAME PATTERN FILE WHERE - the lines of FILE that match the shape
 # NAME, whose pattern is PATTERN, into hits as "N:line", in the order of N.
@@ -413,7 +417,12 @@ grep_both() {
   fi
   # Every line either grep wrote has to be in the merged list, byte for byte;
   # one that is not is a write that failed. grep -v exits 1 when it selects
-  # nothing, which is the one answer that lets the hits through.
+  # nothing, which is the one answer that lets the hits through. An empty list
+  # is refused first: busybox grep reads an empty -f file as one empty pattern.
+  if [ ! -s "$work/hits" ]; then
+    note errors 'sort lost some of the %s hits in %s while merging them\n' "$gb_name" "$gb_where"
+    return 2
+  fi
   for gb_part in hits.own hits.c; do
     LC_ALL=C grep -Fxqv -f "$work/hits" "$work/$gb_part" </dev/null
     [ "$?" -eq 1 ] && continue
@@ -597,10 +606,9 @@ fi
 # name an encoding the bytes are not in: with i18n.commitEncoding set to
 # Latin-1 and UTF-8 typed in, git commit writes UTF-8 under a Latin-1 header,
 # and the conversion turns each character outside ASCII into two that no
-# pattern and no declared name holds. git log has no way to print the bytes as
-# stored - --encoding=none still converts under --format (both measured with
-# git 2.55.0, 2026-10-01) - so the object of such a commit is read as well,
-# and checks 1 and 3 read it both ways. A commit with no encoding header, or
+# pattern and no declared name holds. git log --format converts even under
+# --encoding=none (both measured with git 2.55.0, 2026-10-01), so the object
+# of such a commit is read as well, and checks 1 and 3 read it both ways. A commit with no encoding header, or
 # one that names UTF-8, git prints as stored already. rawcommits lists
 # "oid N short" for each commit read so, and raw.N holds its object, with any
 # NUL turned into \001.
@@ -651,8 +659,16 @@ while IFS= read -r line; do
   grep -Fxq -- "$id" "$list" && continue
   r_n="$(sed -n "s/^$i_oid \\([0-9]*\\) .*/\\1/p" "$work/rawcommits")"
   if [ -n "$r_n" ]; then
-    r_id="$(LC_ALL=C sed -n -e '/^$/q' -e "s/^$key \\(.*>\\).*\$/\\1/p" "$work/raw.$r_n" | sed -n 1p)"
-    [ -n "$r_id" ] && LC_ALL=C grep -Fxq -- "$r_id" "$list" && continue
+    # git takes the last of several author or committer lines, so the stored
+    # reading vouches only for a header that has exactly one.
+    r_hdr="$(LC_ALL=C sed -n -e '/^$/q' -e "/^$key /p" "$work/raw.$r_n")"
+    case "$r_hdr" in
+      '' | *"$nl"*) ;;
+      *)
+        r_id="$(printf '%s\n' "$r_hdr" | LC_ALL=C sed -n "s/^$key \\(.*>\\).*\$/\\1/p")"
+        [ -n "$r_id" ] && LC_ALL=C grep -Fxq -- "$r_id" "$list" && continue
+        ;;
+    esac
   fi
   note undeclared '%s\n' "$id"
 done <"$work/ids" || refuse "could not read back the identities of the new commits."

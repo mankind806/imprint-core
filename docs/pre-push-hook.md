@@ -35,10 +35,11 @@ umlaut from both matches, and made a declared name outside ASCII read as undecla
 whatever encoding a commit's header names, and the header can be wrong. With
 `i18n.commitEncoding` set to Latin-1 and UTF-8 typed in, `git commit` writes UTF-8 under a
 Latin-1 header, and the conversion turns the same umlaut into two characters that neither
-match finds. `git log` cannot print the bytes as stored, so a commit whose header names an
-encoding other than UTF-8 is also read straight from its object: its message is matched as
-stored too, and an identity of it counts as declared when either reading does (*measured with
-git 2.55.0, 2026-10-01*). A tag object is read byte for byte throughout, so a tagger whose
+match finds. `git log --format` converts even under `--encoding=none`, so a commit whose header
+names an encoding other than UTF-8 is also read straight from its object: its message is
+matched as stored too, and an identity of it counts as declared when either reading does, as
+long as its header holds one author line and one committer line (*measured with git 2.55.0,
+2026-10-01*). A tag object is read byte for byte throughout, so a tagger whose
 name is stored in Latin-1 is read as written.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be

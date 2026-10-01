@@ -1984,6 +1984,13 @@ func TestPrePushMislabelledEncoding(t *testing.T) {
 		t.Fatal(err)
 	}
 	rightPlace := commitOn("rightplace", "d.txt", nil, "-F", msgFile)
+	// git takes the last of two author lines, so a declared first one must
+	// not vouch for the stranger git shows.
+	declared := name + " <" + ccTestAuthorEmail + "> 1767225600 +0000"
+	other := "Eve Stranger <" + ccTestSomeoneEmail + "> 1767225600 +0000"
+	twoAuthors := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") +
+		"\nauthor " + declared + "\nauthor " + other + "\ncommitter " + declared + "\ncommitter " + other +
+		"\nencoding ISO-8859-1\n\ntwo: a declared line before a stranger's\n")
 	if enc := r.git("log", "-1", "--format=%e", misPlace); enc != "ISO-8859-1" {
 		t.Fatalf("the fixture commit's encoding header is %q, want ISO-8859-1", enc)
 	}
@@ -2010,6 +2017,9 @@ func TestPrePushMislabelledEncoding(t *testing.T) {
 			code, out = r.hookNewBranch("rightplace", rightPlace, c.env...)
 			ppWantRefused(t, code, out, "postcode and place in a commit message: ", "|right: deliver to "+place)
 			ppWantChecked(t, out)
+			code, out = r.hookNewBranch("two", twoAuthors, c.env...)
+			ppWantRefused(t, code, out, "undeclared identity: Eve Stranger <"+ccTestSomeoneEmail+">")
+			ppWantChecked(t, out)
 		})
 	}
 }
@@ -2026,6 +2036,11 @@ func TestPrePushTaggerLatin1Name(t *testing.T) {
 	oid := r.rawTag("object " + r.head() + "\ntype commit\ntag latin1-tagger\ntagger " + name + " <" + ccTestAuthorEmail +
 		"> 1767225600 +0000\n\na clean tag\n")
 	code, out := r.hookNewTag("latin1-tagger", oid, "LC_ALL=C.UTF-8")
+	ppWantPass(t, code, out)
+	// The same tag object under two refs, the first named in Latin-1: the
+	// second finds the object through the tag list, which holds that name.
+	refs := "refs/tags/x\xfc " + oid + " refs/tags/x\xfc " + r.zero + "\n" + r.tagLine("latin1-tagger", oid)
+	code, out = r.hook([]string{"origin", r.origin}, refs, "LC_ALL=C.UTF-8")
 	ppWantPass(t, code, out)
 	stranger := r.rawTag("object " + r.head() + "\ntype commit\ntag latin1-stranger\ntagger Gr\xfcn Fremd <" + ccTestSomeoneEmail +
 		"> 1767225600 +0000\n\na clean tag\n")
