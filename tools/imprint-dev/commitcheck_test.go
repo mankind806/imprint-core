@@ -12,9 +12,9 @@ import (
 // Every test address in this file and in commitcheck_integration_test.go
 // goes through it (or through the emailUser/emailDomain split in ccTestConf
 // below), so neither .go source file itself carries an address-shaped
-// literal: .githooks/pre-push's own address check scans every pushed
-// commit's whole tree, not just what changed, and would otherwise flag both
-// files on every future push, forever, once this lands on main.
+// literal: .githooks/pre-push's own address check reads every line a pushed
+// commit adds, and would otherwise flag both files on the push that adds them
+// and on every push that changes those lines again.
 func addr(user, domain string) string { return user + "@" + domain }
 
 // Shared test addresses, also used by commitcheck_integration_test.go.

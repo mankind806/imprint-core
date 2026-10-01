@@ -75,10 +75,11 @@ the merge commit message, not a blank one. The pull request text becomes the com
 
 Commit messages carry no addresses: no `Signed-off-by` or `Co-authored-by` lines with one,
 and no other line that holds one. The pre-push hook, `.githooks/pre-push`, refuses a push
-whose commit messages or tracked files contain an address of the kind mail uses, a few other
-shapes of personal data, or an author or committer identity the clone has not declared. It
-runs only in a clone that opted in (`git config core.hooksPath .githooks`); the README
-section "The pre-push hook" says what it checks and what it does not.
+whose new commits carry, in their messages or in the lines they add to tracked files, an
+address of the kind mail uses or a few other shapes of personal data, or whose commits carry
+an author or committer identity the clone has not declared. It runs only in a clone that
+opted in (`git config core.hooksPath .githooks`); the README section "The pre-push hook" says
+what it checks and what it does not.
 
 ## Commit identity and messages, checked in CI
 

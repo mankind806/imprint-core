@@ -60,8 +60,8 @@ type ccIdentity struct {
 	// split across two JSON fields and joined only at load time (see
 	// resolveEmail). A whole address here would be an address-shaped
 	// literal in tracked content, and .githooks/pre-push's own address check
-	// scans every pushed commit's whole tree, not just what changed, so it
-	// would flag this file on every future push forever, not just this one.
+	// would flag it on the push that adds the line and on every push whose
+	// commits change that line again.
 	EmailUser   string `json:"emailUser"`
 	EmailDomain string `json:"emailDomain"`
 	Comment     string `json:"comment,omitempty"`

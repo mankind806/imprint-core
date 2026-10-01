@@ -5,9 +5,18 @@
 # WHAT IT ENFORCES. One rule has a mechanical half, and this is it: nothing
 # leaves this repository except its git identity. The hook refuses a push whose
 # commits carry an identity this clone has not declared, and it refuses a push
-# whose tracked content or commit messages match a shape that personal data
-# takes - phone numbers, bank account numbers and postal addresses in the
-# formats the patterns below spell out.
+# whose new commits add a line, or carry a message, that matches a shape that
+# personal data takes - phone numbers, bank account numbers and postal
+# addresses in the formats the patterns below spell out.
+#
+# WHAT IT READS. The new commits, and of their content only the lines they
+# add. A commit is new unless the remote's old tip for that ref reaches it, or
+# one of this clone's tracking refs for the destination remote does
+# (refs/remotes/<remote>/*, and only that remote's). Those refs are what this
+# clone last fetched, not what the remote holds now: after pointing a remote at
+# another repository, run `git fetch --prune` first. A line already on it was
+# checked on its way there, or predates the hook; reading it again would refuse
+# every push for what is already published.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -40,6 +49,10 @@
 # that is not git - no remote name and location in the arguments, or a terminal
 # on standard input - is a hook that was handed nothing, and is still refused.
 #
+# NOTHING NEW. A ref whose commits the remote already holds - a new branch at
+# a commit already on it, say - adds no commit, and the push proceeds with the
+# checks named as skipped.
+#
 # FAIL-CLOSED. Every other way this script can fail to finish - a git command
 # that errors, an unset identity, a temporary file it cannot create - ends in a
 # refused push. A gate that waves you through when it breaks is worse than no
@@ -55,6 +68,20 @@ refuse() { say "pre-push: $*"; say "pre-push: refusing the push."; exit 1; }
 # terminal on standard input, whatever is running this is not a push, and an
 # empty ref list from it says nothing about what is being published.
 if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no; fi
+
+# The destination remote's tracking refs stand for what it already holds - but
+# only when git named a remote this clone has configured. A location, or a name
+# with no remote behind it here, has no tracking refs to trust, and then every
+# commit the remote's old tip does not reach counts as new. A name holding a
+# glob character would widen --remotes=, so it is treated the same way: that
+# checks more, never less.
+dest_remote=''
+if [ "$#" -eq 2 ] && [ -n "$1" ]; then
+  case "$1" in
+    *'*'* | *'?'* | *'['*) ;;
+    *) git config --get "remote.$1.url" >/dev/null 2>&1 && dest_remote="$1" ;;
+  esac
+fi
 
 work="$(mktemp -d 2>/dev/null)" || refuse "could not create a working directory."
 trap 'rm -rf "$work"' EXIT
@@ -82,10 +109,8 @@ while read -r local_ref local_oid remote_ref remote_oid || [ -n "${local_ref:-}"
   lines=$((lines + 1))
   if [ "$local_oid" = "$zero" ]; then
     printf 'deletion of %s - a deletion carries no new content\n' "${remote_ref:-?}" >>"$work/skipped"
-  elif [ "$remote_oid" = "$zero" ]; then
-    printf '%s\n' "$local_oid" >>"$work/ranges"
   else
-    printf '%s..%s\n' "$remote_oid" "$local_oid" >>"$work/ranges"
+    printf '%s %s\n' "$local_oid" "${remote_oid:-}" >>"$work/ranges"
   fi
 done
 if [ "$lines" -eq 0 ]; then
@@ -100,29 +125,78 @@ if [ ! -s "$work/ranges" ]; then
   exit 0
 fi
 
+# new_commits LOCAL REMOTE - the commits LOCAL brings that the destination does
+# not hold yet. One rule for a new ref and an updated one: after a rebase onto a
+# newer main and a force-push, main's commits are on the tracking refs and stay
+# out. The remote's old tip counts only when this clone has it; without it the
+# exclusion is dropped, which checks more, not less.
+new_commits() {
+  nc_local="$1"; nc_remote="$2"
+  set -- "$nc_local" --not
+  if [ "$nc_remote" != "$zero" ] && git cat-file -e "$nc_remote^{commit}" 2>/dev/null; then
+    set -- "$@" "$nc_remote"
+  fi
+  [ -z "$dest_remote" ] || set -- "$@" --remotes="$dest_remote"
+  git rev-list "$@"
+}
+
 : >"$work/commits"
-while read -r range; do
-  git rev-list "$range" >>"$work/commits" || refuse "git rev-list failed for $range."
+while read -r local_oid remote_oid; do
+  new_commits "$local_oid" "${remote_oid:-}" >>"$work/commits" </dev/null \
+    || refuse "git rev-list failed for $local_oid."
 done <"$work/ranges"
-sort -u "$work/commits" -o "$work/commits"
+sort -u "$work/commits" -o "$work/commits" || refuse "could not sort the commit list."
 n_commits="$(wc -l <"$work/commits" | tr -d ' ')"
 n_refs="$(wc -l <"$work/ranges" | tr -d ' ')"
+if [ -n "$dest_remote" ]; then
+  scope="commits already on refs/remotes/$dest_remote/* or at the remote's old tip are not re-checked"
+else
+  scope="no configured remote was named, so only commits at the remote's old tip are not re-checked"
+fi
+
+# No new commit, nothing unchecked is published. This exit has to come before
+# any `git log --stdin`: handed an empty list, git log falls back to HEAD and
+# would check a commit nobody is pushing (measured with git 2.55.0, 2026-10-01).
+if [ "$n_commits" -eq 0 ]; then
+  say "pre-push: $n_refs ref(s), 0 new commit(s); $scope."
+  say "pre-push: checks that ran: none needed."
+  say "pre-push:   skipped: declared identity, tracked content, commit messages - no new commit, so nothing unchecked is published"
+  while read -r s; do say "pre-push:   skipped: $s"; done <"$work/skipped"
+  say "pre-push:   not checked by anything here: whether the prose is abstract."
+  exit 0
+fi
 
 # --- check 1: every author and committer is a declared identity --------------
-: >"$work/ids"
-while read -r range; do
-  git log --format='%an <%ae>%n%cn <%ce>' "$range" >>"$work/ids" || refuse "git log failed for $range."
-done <"$work/ranges"
-sort -u "$work/ids" -o "$work/ids"
-n_ids="$(wc -l <"$work/ids" | tr -d ' ')"
-undeclared=0
-while read -r id; do
+# A committer may also be GitHub's web-flow identity, which a merge through the
+# web UI or API records: the mergeCommitter entry in .imprint/commit.conf. It is
+# put together from parts, as there, so this file carries no address-shaped
+# literal for its own check to flag. As an author it is still undeclared.
+web_flow_name='GitHub'
+web_flow_user='noreply'
+web_flow_domain='github.com'
+at=@
+web_flow="$web_flow_name <$web_flow_user$at$web_flow_domain>"
+cp "$work/allowed" "$work/committers" || refuse "could not copy the declared identities."
+printf '%s\n' "$web_flow" >>"$work/committers"
+
+git log --no-walk=unsorted --stdin --format='A %an <%ae>%nC %cn <%ce>' \
+  <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
+sort -u "$work/ids" -o "$work/ids" || refuse "could not sort the identities."
+: >"$work/undeclared"
+while IFS= read -r line; do
+  role="${line%% *}"; id="${line#? }"
   [ -n "$id" ] || continue
-  grep -Fxq "$id" "$work/allowed" && continue
-  undeclared=$((undeclared + 1))
-  printf 'undeclared identity: %s\n' "$id" >>"$work/findings"
+  if [ "$role" = C ]; then list="$work/committers"; else list="$work/allowed"; fi
+  grep -Fxq -- "$id" "$list" && continue
+  printf '%s\n' "$id" >>"$work/undeclared"
 done <"$work/ids"
-printf 'declared identity - %s identity/identities over %s commit(s), %s undeclared\n' \
+sort -u "$work/undeclared" -o "$work/undeclared" || refuse "could not sort the undeclared identities."
+while IFS= read -r id; do
+  printf 'undeclared identity: %s\n' "$id" >>"$work/findings"
+done <"$work/undeclared"
+undeclared="$(wc -l <"$work/undeclared" | tr -d ' ')"
+n_ids="$(sed 's/^. //' "$work/ids" | sort -u | wc -l | tr -d ' ')"
+printf 'declared identity - %s identity/identities over %s new commit(s), %s undeclared\n' \
   "$n_ids" "$n_commits" "$undeclared" >>"$work/ran"
 
 # --- the shapes --------------------------------------------------------------
@@ -137,34 +211,102 @@ SHAPES
 n_shapes="$(shapes | wc -l | tr -d ' ')"
 tab="$(printf '\t')"
 
-# --- check 2: tracked content, every commit in the range ---------------------
-# Every commit, not just the tip: a push publishes the whole range, and a file
+# --- check 2: tracked content, the lines the new commits add -----------------
+# Every new commit, not just the tip: a push publishes them all, and a line
 # removed in a later commit stays reachable by its hash for anyone who clones.
-# --text is not decoration - grep falls silent on a file holding a NUL byte and
-# reports no match, which looks exactly like a clean tree.
+# The added lines are enough, because every line of a new commit's tree was
+# either added by some new commit or is already on the remote. A merge adds a
+# line only when the line is new against every parent - a line from either
+# parent was checked at that parent or is already published - and -c is what
+# makes diff-tree print a merge at all. --text is not decoration - without it a
+# file holding a NUL byte becomes "Binary files differ", and none of its lines
+# would be read, which looks exactly like a clean diff.
+#
+# The awk only sorts lines; the shapes are matched by grep below, under your own
+# locale, since a pattern holds characters outside ASCII. It appends one record
+# per added line to two parallel files: line N of addedloc says where line N of
+# added comes from (commit:path:line), and added holds the bare content.
+classify='
+BEGIN { st = 0; c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_ADDEDLOC"]; add = ENVIRON["IMPRINT_ADDED"] }
+/^diff / { st = 1; path = ""; next }
+st == 1 && /^\+\+\+ / {
+  path = substr($0, 5)
+  if (substr(path, 1, 2) == "b/") path = substr(path, 3)
+  if (substr(path, length(path), 1) == "\t") path = substr(path, 1, length(path) - 1)
+  next
+}
+/^@/ {
+  np = 0
+  while (substr($0, np + 1, 1) == "@") np++
+  np--
+  plus = ""
+  for (i = 0; i < np; i++) plus = plus "+"
+  split($0, f, " ")
+  ln = f[np + 2]
+  sub(/^\+/, "", ln); sub(/,.*/, "", ln)
+  if (np < 1 || ln !~ /^[0-9]+$/) exit 3
+  ln = ln + 0
+  st = 2
+  next
+}
+st == 2 {
+  ch = substr($0, 1, 1)
+  if (ch != " " && ch != "+" && ch != "-") next
+  pre = substr($0, 1, np)
+  if (index(pre, "-")) next
+  if (pre == plus) { print c ":" path ":" ln >> loc; print substr($0, np + 1) >> add }
+  ln++
+}
+'
+# join puts a grep hit back where it came from: "N:content" becomes
+# "shape: commit:path:line:content", the form git grep prints.
+join='
+BEGIN {
+  f = ENVIRON["IMPRINT_ADDEDLOC"]; name = ENVIRON["IMPRINT_SHAPE"]; n = 0
+  while ((r = (getline l < f)) > 0) loc[++n] = l
+  if (r < 0) exit 2
+}
+{
+  i = index($0, ":")
+  k = substr($0, 1, i - 1)
+  if (i < 2 || !(k in loc)) exit 3
+  print name ": " loc[k] ":" substr($0, i + 1)
+}
+'
+: >"$work/added"; : >"$work/addedloc"
 while read -r commit; do
-  shapes | while IFS="$tab" read -r name pattern; do
-    hits="$(git grep --text -n -E "$pattern" "$commit" 2>"$work/greperr")"
-    rc=$?
-    if [ "$rc" -gt 1 ]; then
-      printf 'git grep could not read %s: %s\n' "$commit" "$(cat "$work/greperr")" >>"$work/errors"
-    elif [ "$rc" -eq 0 ]; then
-      printf '%s\n' "$hits" | while IFS= read -r hit; do
-        [ -n "$hit" ] || continue
-        printf '%s: %s\n' "$name" "$hit" >>"$work/findings"
-      done
-    fi
-  done
+  if ! git diff-tree --no-commit-id -r -p -c -M -U0 --text --root --no-ext-diff --no-textconv \
+      --no-color "$commit" >"$work/diff" 2>"$work/differr" </dev/null; then
+    printf 'git diff-tree could not read %s: %s\n' "$commit" "$(cat "$work/differr")" >>"$work/errors"
+    continue
+  fi
+  # A NUL would end an awk record early in some awks; it never matches a shape.
+  if ! tr '\000' '\001' <"$work/diff" >"$work/diff.t"; then
+    printf 'tr could not prepare the diff of %s\n' "$commit" >>"$work/errors"
+    continue
+  fi
+  IMPRINT_COMMIT="$commit" IMPRINT_ADDED="$work/added" IMPRINT_ADDEDLOC="$work/addedloc" \
+    LC_ALL=C awk "$classify" <"$work/diff.t" \
+    || printf 'awk could not sort the diff of %s into added lines\n' "$commit" >>"$work/errors"
 done <"$work/commits"
-printf 'tracked content - %s shape(s) over the trees of all %s commit(s)\n' \
+shapes | while IFS="$tab" read -r name pattern; do
+  grep -a -n -E "$pattern" "$work/added" >"$work/hits" 2>"$work/greperr"
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    printf 'grep could not read the added lines: %s\n' "$(cat "$work/greperr")" >>"$work/errors"
+  elif [ "$rc" -eq 0 ]; then
+    IMPRINT_SHAPE="$name" IMPRINT_ADDEDLOC="$work/addedloc" \
+      LC_ALL=C awk "$join" <"$work/hits" >>"$work/findings" \
+      || printf 'awk could not place the %s hits\n' "$name" >>"$work/errors"
+  fi
+done
+printf 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
   "$n_shapes" "$n_commits" >>"$work/ran"
 
 # --- check 3: commit messages ------------------------------------------------
 # A message is as public as a blob, and trailers are where addresses ride in.
-: >"$work/messages"
-while read -r range; do
-  git log --format='%h|%s%n%b' "$range" >>"$work/messages" || refuse "git log failed for $range."
-done <"$work/ranges"
+git log --no-walk=unsorted --stdin --format='%h|%s%n%b' <"$work/commits" >"$work/messages" \
+  || refuse "git log failed reading the messages of the new commits."
 shapes | while IFS="$tab" read -r name pattern; do
   grep -a -n -E "$pattern" "$work/messages" > "$work/mhits" 2>/dev/null
   rc=$?
@@ -177,10 +319,11 @@ shapes | while IFS="$tab" read -r name pattern; do
     done <"$work/mhits"
   fi
 done
-printf 'commit messages - %s shape(s) over %s commit(s)\n' "$n_shapes" "$n_commits" >>"$work/ran"
+printf 'commit messages - %s shape(s) over %s new commit(s)\n' "$n_shapes" "$n_commits" >>"$work/ran"
 
 # --- report ------------------------------------------------------------------
-say "pre-push: $n_refs ref(s), $n_commits commit(s). Checks that ran:"
+say "pre-push: $n_refs ref(s), $n_commits new commit(s); $scope."
+say "pre-push: checks that ran:"
 while read -r r; do say "pre-push:   ran: $r"; done <"$work/ran"
 if [ -s "$work/skipped" ]; then
   while read -r s; do say "pre-push:   skipped: $s"; done <"$work/skipped"
