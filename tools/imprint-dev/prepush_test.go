@@ -696,7 +696,10 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		}, []string{"sort could not merge the address hits in the commit messages"}},
 		{"a sort that loses a merged hit", func(t *testing.T) string {
 			return ppShimPATH(t, "sort", "for a; do case \"$a\" in */hits.own) '"+sortBin+"' \"$@\" | sed '$d'; exit ;; esac; done\nexec '"+sortBin+"' \"$@\"\n")
-		}, []string{"sort merged 1 and 1 address hit(s) in the commit messages into 0"}},
+		}, []string{"sort lost some of the address hits in the commit messages while merging them"}},
+		{"a sort that swaps a merged hit for another line", func(t *testing.T) string {
+			return ppShimPATH(t, "sort", "for a; do case \"$a\" in */hits.own) '"+sortBin+"' \"$@\" | sed '1s/.*/1:not what grep found/'; exit ;; esac; done\nexec '"+sortBin+"' \"$@\"\n")
+		}, []string{"sort lost some of the address hits in the commit messages while merging them"}},
 		{"a shape loop cut short", func(t *testing.T) string {
 			// A grep that empties the shape list the loops read, while the
 			// first loop is on its first shape.
@@ -1230,6 +1233,13 @@ func TestPrePushToolchains(t *testing.T) {
 	r.git("checkout", "-q", "-b", "encmsg", "main")
 	r.write("enc.txt", "a clean line\n")
 	encMsgTip := r.commit("encmsg: deliver to " + tcPlace)
+	r.git("checkout", "-q", "-b", "mislabel", "main")
+	r.write("mis.txt", "a clean line\n")
+	r.stage()
+	r.git("-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "-m", "mislabel: deliver to "+tcPlace)
+	mislabelTip := r.head()
+	latin1Tagger := r.rawTag("object " + tagged + "\ntype commit\ntag tc-latin1tagger\ntagger Gr\xfcn Fremd <" +
+		ccTestSomeoneEmail + "> 1767225600 +0000\n\na clean tag\n")
 
 	for _, sh := range shells {
 		for _, aw := range awks {
@@ -1288,6 +1298,12 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantChecked(t, out)
 				code, out = c.hookNewBranch("encmsg", encMsgTip, append([]string{"LC_ALL=C.UTF-8"}, ppLatin1Log...)...)
 				ppWantRefused(t, code, out, "postcode and place in a commit message: ", tcPlace)
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("mislabel", mislabelTip, "LC_ALL=C.UTF-8")
+				ppWantRefused(t, code, out, " as stored|mislabel: deliver to "+tcPlace)
+				ppWantChecked(t, out)
+				code, out = c.hookNewTag("tc-latin1tagger", latin1Tagger, "LC_ALL=C.UTF-8")
+				ppWantRefused(t, code, out, ", tagger of tag tc-latin1tagger")
 				ppWantChecked(t, out)
 
 				// greperr is not there to be written: a grep before the shape
@@ -1928,4 +1944,95 @@ func TestPrePushIdentityEncoding(t *testing.T) {
 	code, out = r.hookNewBranch("umlaut", tip, ppLatin1Log...)
 	ppWantRefused(t, code, out, "undeclared identity: "+stranger+" <"+ccTestSomeoneEmail+">")
 	ppWantChecked(t, out)
+}
+
+// 41. A commit's encoding header can name an encoding its bytes are not in:
+// with i18n.commitEncoding set to Latin-1 and UTF-8 typed in, git commit
+// writes UTF-8 under a Latin-1 header. git log converts it anyway, which
+// turns the umlaut of a place into two characters no pattern holds, and a
+// declared name into one nobody declared, so the hook reads such a commit as
+// stored as well. A commit whose header is right - Latin-1 bytes under a
+// Latin-1 header - is still read through git's conversion. Each case runs
+// with and without the setting when the hook runs, under C.UTF-8.
+func TestPrePushMislabelledEncoding(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	place := "10115" + " " + "Übungsstadt"
+	name := "Jürgen Test"
+	stranger := "Grün Fremd"
+	r := ppSeed(t, env)
+	r.git("config", "user.name", name)
+	// commitOn commits one new file on a new branch off main, with
+	// i18n.commitEncoding set to Latin-1 and the given -c settings.
+	commitOn := func(branch, file string, settings []string, args ...string) string {
+		r.git("checkout", "-q", "-b", branch, "main")
+		r.write(file, "a clean line\n")
+		r.stage()
+		pre := []string{"-c", "i18n.commitEncoding=ISO-8859-1"}
+		for _, kv := range settings {
+			pre = append(pre, "-c", kv)
+		}
+		r.git(append(append(pre, "commit", "-q"), args...)...)
+		return r.head()
+	}
+	misPlace := commitOn("misplace", "a.txt", nil, "-m", "misplace: deliver to "+place)
+	misName := commitOn("misname", "b.txt", nil, "-m", "misname: a declared name outside ASCII")
+	misStranger := commitOn("misstranger", "c.txt", []string{"user.name=" + stranger, "user.email=" + ccTestSomeoneEmail},
+		"-m", "misstranger: an undeclared name outside ASCII")
+	msgFile := filepath.Join(t.TempDir(), "msg")
+	if err := os.WriteFile(msgFile, []byte("right: deliver to 10115 \xdcbungsstadt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rightPlace := commitOn("rightplace", "d.txt", nil, "-F", msgFile)
+	if enc := r.git("log", "-1", "--format=%e", misPlace); enc != "ISO-8859-1" {
+		t.Fatalf("the fixture commit's encoding header is %q, want ISO-8859-1", enc)
+	}
+	for _, c := range []struct {
+		name string
+		env  []string
+	}{
+		{"setting unset when the hook runs", []string{"LC_ALL=C.UTF-8"}},
+		{"setting still on when the hook runs", []string{"LC_ALL=C.UTF-8",
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=i18n.commitEncoding", "GIT_CONFIG_VALUE_0=ISO-8859-1"}},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			r := r.with(t)
+			code, out := r.hookNewBranch("misplace", misPlace, c.env...)
+			ppWantRefused(t, code, out, "postcode and place in a commit message: ", " as stored|misplace: deliver to "+place)
+			ppWantChecked(t, out)
+			code, out = r.hookNewBranch("misname", misName, c.env...)
+			ppWantPass(t, code, out)
+			code, out = r.hookNewBranch("misstranger", misStranger, c.env...)
+			ppWantRefused(t, code, out, "undeclared identity: ", " <"+ccTestSomeoneEmail+">")
+			ppWantChecked(t, out)
+			code, out = r.hookNewBranch("rightplace", rightPlace, c.env...)
+			ppWantRefused(t, code, out, "postcode and place in a commit message: ", "|right: deliver to "+place)
+			ppWantChecked(t, out)
+		})
+	}
+}
+
+// 42. A tag object is read under C by sed as well as by grep: in a UTF-8
+// locale GNU sed's .* stops at a byte that is not valid UTF-8, and a declared
+// tagger whose name is stored in Latin-1 was a check that could not run.
+func TestPrePushTaggerLatin1Name(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	name := "J\xfcrgen Test"
+	r.git("config", "user.name", name)
+	oid := r.rawTag("object " + r.head() + "\ntype commit\ntag latin1-tagger\ntagger " + name + " <" + ccTestAuthorEmail +
+		"> 1767225600 +0000\n\na clean tag\n")
+	code, out := r.hookNewTag("latin1-tagger", oid, "LC_ALL=C.UTF-8")
+	ppWantPass(t, code, out)
+	stranger := r.rawTag("object " + r.head() + "\ntype commit\ntag latin1-stranger\ntagger Gr\xfcn Fremd <" + ccTestSomeoneEmail +
+		"> 1767225600 +0000\n\na clean tag\n")
+	code, out = r.hookNewTag("latin1-stranger", stranger, "LC_ALL=C.UTF-8")
+	ppWantRefused(t, code, out, "undeclared identity: ", ", tagger of tag latin1-stranger")
+	ppWantChecked(t, out)
+	if strings.Contains(out, "address in tag") {
+		t.Errorf("the tagger's identity was read as a shape; output:\n%s", out)
+	}
 }

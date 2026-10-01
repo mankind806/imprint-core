@@ -13,7 +13,8 @@
 # or a tree is refused unread.
 #
 # WHAT IT READS. The new commits, and of their content only the lines they
-# add; and every tag object a pushed ref leads to, all of it.
+# add; and every tag object a pushed ref leads to, all of it. A new commit
+# whose header names an encoding other than UTF-8 is also read as stored.
 # A commit is new unless the remote's old tip for that ref reaches it, or
 # one of this clone's tracking refs for the destination remote does
 # (refs/remotes/<remote>/*, only when the push goes to the URL they are fetched
@@ -318,7 +319,7 @@ while read -r local_oid remote_oid remote_ref; do
     else
       tagfile="$work/tag.$(sed -n "s/^$obj \\([0-9]*\\) .*/\\1/p" "$work/tags")"
     fi
-    obj="$(sed -n -e '/^$/q' -e 's/^object //p' "$tagfile")"
+    obj="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^object //p' "$tagfile")"
     case "$obj" in
       '' | *[!0-9a-f]*) refuse "a tag object pushed to $remote_ref names no object it points at." ;;
     esac
@@ -406,20 +407,20 @@ grep_both() {
     return 2
   fi
   [ "$gb_own" -eq 0 ] || [ "$gb_c" -eq 0 ] || return 1
-  # The merged list holds every line number either grep wrote, so it is at
-  # least as long as each of the two; shorter is a write that failed.
-  gb_n_own="$(wc -l <"$work/hits.own" | tr -d ' ')"
-  gb_n_c="$(wc -l <"$work/hits.c" | tr -d ' ')"
   if ! LC_ALL=C sort -u -t: -k1,1n "$work/hits.own" "$work/hits.c" >"$work/hits" 2>"$work/greperr"; then
     note errors 'sort could not merge the %s hits in %s: %s\n' "$gb_name" "$gb_where" "$(cat "$work/greperr")"
     return 2
   fi
-  gb_n="$(wc -l <"$work/hits" | tr -d ' ')"
-  [ -n "$gb_n" ] && [ -n "$gb_n_own" ] && [ -n "$gb_n_c" ] \
-    && [ "$gb_n" -ge "$gb_n_own" ] && [ "$gb_n" -ge "$gb_n_c" ] && return 0
-  note errors 'sort merged %s and %s %s hit(s) in %s into %s\n' \
-    "${gb_n_own:-?}" "${gb_n_c:-?}" "$gb_name" "$gb_where" "${gb_n:-?}"
-  return 2
+  # Every line either grep wrote has to be in the merged list, byte for byte;
+  # one that is not is a write that failed. grep -v exits 1 when it selects
+  # nothing, which is the one answer that lets the hits through.
+  for gb_part in hits.own hits.c; do
+    LC_ALL=C grep -Fxqv -f "$work/hits" "$work/$gb_part" </dev/null
+    [ "$?" -eq 1 ] && continue
+    note errors 'sort lost some of the %s hits in %s while merging them\n' "$gb_name" "$gb_where"
+    return 2
+  done
+  return 0
 }
 
 # The declared identities, written down before the first check that reads
@@ -450,11 +451,15 @@ git config --get-all imprint.allowedIdentity >>"$work/allowed" 2>/dev/null; rc=$
 # what the remote has.
 if [ "$n_tags" -gt 0 ]; then
   true >"$work/taggers.undeclared" || refuse "$cannot_write"
+  # Every sed over the object runs under C: in a UTF-8 locale GNU sed's .*
+  # stops at a byte that is not valid UTF-8, and a tagger named in Latin-1
+  # could not be read, nor its identity left out of the shapes (measured with
+  # GNU sed, 2026-10-01).
   while read -r t_oid t_n t_ref; do
     t_file="$work/tag.$t_n"
-    t_name="$(sed -n -e '/^$/q' -e 's/^tag //p' "$t_file" | sed -n 1p)"
+    t_name="$(LC_ALL=C sed -n -e '/^$/q' -e 's/^tag //p' "$t_file" | sed -n 1p)"
     [ -n "$t_name" ] || t_name="$t_oid"
-    sed -n -e '/^$/q' -e 's/^tagger //p' "$t_file" >"$work/taggers" || {
+    LC_ALL=C sed -n -e '/^$/q' -e 's/^tagger //p' "$t_file" >"$work/taggers" || {
       note errors 'sed could not read the tagger of tag %s\n' "$t_name"
       continue
     }
@@ -464,7 +469,7 @@ if [ "$n_tags" -gt 0 ]; then
     # the ref list above: sed keeps a missing final newline as it found it.
     t_line=''
     while IFS= read -r t_line || [ -n "$t_line" ]; do
-      t_id="$(printf '%s\n' "$t_line" | sed -n 's/^\(.*>\).*$/\1/p')"
+      t_id="$(printf '%s\n' "$t_line" | LC_ALL=C sed -n 's/^\(.*>\).*$/\1/p')"
       if [ -z "$t_id" ]; then
         note errors 'could not read the tagger of tag %s as "Name <address>"\n' "$t_name"
       elif ! grep -Fxq -- "$t_id" "$work/allowed"; then
@@ -475,7 +480,7 @@ if [ "$n_tags" -gt 0 ]; then
     done <"$work/taggers" || refuse "could not read back the tagger of tag $t_name."
     # The object as it is, but for the identity on each tagger line of the
     # header, checked above; line numbers stay those of the object.
-    sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext" || {
+    LC_ALL=C sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext" || {
       note errors 'sed could not read tag %s\n' "$t_name"
       continue
     }
@@ -586,6 +591,36 @@ if [ "$n_commits" -eq 0 ]; then
   report
 fi
 
+# --- commits whose header names an encoding other than UTF-8 -----------------
+# Checks 1 and 3 read commits through git log, asking for UTF-8 (see check 1),
+# and git converts a commit from the encoding its header names. A header can
+# name an encoding the bytes are not in: with i18n.commitEncoding set to
+# Latin-1 and UTF-8 typed in, git commit writes UTF-8 under a Latin-1 header,
+# and the conversion turns each character outside ASCII into two that no
+# pattern and no declared name holds. git log has no way to print the bytes as
+# stored - --encoding=none still converts under --format (both measured with
+# git 2.55.0, 2026-10-01) - so the object of such a commit is read as well,
+# and checks 1 and 3 read it both ways. A commit with no encoding header, or
+# one that names UTF-8, git prints as stored already. rawcommits lists
+# "oid N short" for each commit read so, and raw.N holds its object, with any
+# NUL turned into \001.
+git log --no-walk=unsorted --stdin --format='%H %h %e' <"$work/commits" >"$work/encodings" \
+  || refuse "git log failed reading the encodings of the new commits."
+n_enc="$(wc -l <"$work/encodings" | tr -d ' ')"
+[ "$n_enc" = "$n_commits" ] || refuse \
+  "git log listed encodings for ${n_enc:-none} of $n_commits new commit(s)."
+true >"$work/rawcommits" || refuse "$cannot_write"
+n_raw=0
+while read -r e_oid e_short e_enc; do
+  case "$e_enc" in '' | [Uu][Tt][Ff]-8 | [Uu][Tt][Ff]8) continue ;; esac
+  n_raw=$((n_raw + 1))
+  git cat-file commit "$e_oid" >"$work/raw.tmp" 2>/dev/null </dev/null \
+    || refuse "could not read commit $e_oid as stored."
+  tr '\000' '\001' <"$work/raw.tmp" >"$work/raw.$n_raw" \
+    || refuse "could not prepare commit $e_oid for reading as stored."
+  note rawcommits '%s %s %s\n' "$e_oid" "$n_raw" "$e_short"
+done <"$work/encodings" || refuse "could not read back the encodings of the new commits."
+
 # --- check 1: every author and committer is a declared identity --------------
 # A committer may also be GitHub's web-flow identity, which a merge through the
 # web UI or API records: the mergeCommitter entry in .imprint/commit.conf. It is
@@ -603,16 +638,22 @@ note committers '%s\n' "$web_flow"
 # i18n.commitEncoding when that is unset (measured with git 2.55.0,
 # 2026-10-01). A declared name outside ASCII, printed in Latin-1, would no
 # longer equal the UTF-8 one in the declared list, so git is asked for UTF-8,
-# which is what git config holds.
-git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='A %an <%ae>%nC %cn <%ce>' \
+# which is what git config holds. An identity of a commit read as stored as
+# well (above) is declared when either reading of it is.
+git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%H A %an <%ae>%n%H C %cn <%ce>' \
   <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
-sort -u -o "$work/ids" "$work/ids" || refuse "could not sort the identities."
 true >"$work/undeclared" || refuse "$cannot_write"
 while IFS= read -r line; do
+  i_oid="${line%% *}"; line="${line#* }"
   role="${line%% *}"; id="${line#? }"
   [ -n "$id" ] || continue
-  if [ "$role" = C ]; then list="$work/committers"; else list="$work/allowed"; fi
+  if [ "$role" = C ]; then list="$work/committers"; key=committer; else list="$work/allowed"; key=author; fi
   grep -Fxq -- "$id" "$list" && continue
+  r_n="$(sed -n "s/^$i_oid \\([0-9]*\\) .*/\\1/p" "$work/rawcommits")"
+  if [ -n "$r_n" ]; then
+    r_id="$(LC_ALL=C sed -n -e '/^$/q' -e "s/^$key \\(.*>\\).*\$/\\1/p" "$work/raw.$r_n" | sed -n 1p)"
+    [ -n "$r_id" ] && LC_ALL=C grep -Fxq -- "$r_id" "$list" && continue
+  fi
   note undeclared '%s\n' "$id"
 done <"$work/ids" || refuse "could not read back the identities of the new commits."
 sort -u -o "$work/undeclared" "$work/undeclared" || refuse "could not sort the undeclared identities."
@@ -620,7 +661,7 @@ while IFS= read -r id; do
   note findings 'undeclared identity: %s\n' "$id"
 done <"$work/undeclared" || refuse "could not read back the undeclared identities."
 undeclared="$(wc -l <"$work/undeclared" | tr -d ' ')"
-n_ids="$(sed 's/^. //' "$work/ids" | sort -u | wc -l | tr -d ' ')"
+n_ids="$(sed 's/^[^ ]* . //' "$work/ids" | sort -u | wc -l | tr -d ' ')"
 note ran 'declared identity - %s identity/identities over %s new commit(s), %s undeclared\n' \
   "$n_ids" "$n_commits" "$undeclared"
 
@@ -848,9 +889,17 @@ note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
 # starts with an umlaut matches the pattern under neither locale. A message
 # whose bytes are not valid UTF-8 and that carries no encoding header to say
 # what they are is printed as it is, which grep_both matches under C as well.
+# A commit read as stored as well (above) adds its message as stored, after
+# all of git log's.
 git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%h|%s%n%b' \
   <"$work/commits" >"$work/messages" \
   || refuse "git log failed reading the messages of the new commits."
+while read -r r_oid r_n r_short; do
+  note messages '%s as stored|' "$r_short"
+  LC_ALL=C sed '1,/^$/d' "$work/raw.$r_n" >>"$work/messages" \
+    || refuse "could not write down the message of $r_oid as stored."
+  note messages '\n'
+done <"$work/rawcommits" || refuse "could not read back the commits read as stored."
 n_done=0
 while IFS="$tab" read -r name pattern; do
   if grep_both "$name" "$pattern" "$work/messages" "the commit messages"; then

@@ -31,7 +31,15 @@ committer identities are read with `git log --encoding=UTF-8`. Without that flag
 re-encodes what it prints into `i18n.logOutputEncoding`, or into `i18n.commitEncoding` when
 that is unset. Set to Latin-1, either one hid a postcode before a place that starts with an
 umlaut from both matches, and made a declared name outside ASCII read as undeclared
-(*measured with git 2.55.0, 2026-10-01*).
+(*measured with git 2.55.0, 2026-10-01*). The flag has a cost of its own: git converts from
+whatever encoding a commit's header names, and the header can be wrong. With
+`i18n.commitEncoding` set to Latin-1 and UTF-8 typed in, `git commit` writes UTF-8 under a
+Latin-1 header, and the conversion turns the same umlaut into two characters that neither
+match finds. `git log` cannot print the bytes as stored, so a commit whose header names an
+encoding other than UTF-8 is also read straight from its object: its message is matched as
+stored too, and an identity of it counts as declared when either reading does (*measured with
+git 2.55.0, 2026-10-01*). A tag object is read byte for byte throughout, so a tagger whose
+name is stored in Latin-1 is read as written.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
@@ -73,8 +81,9 @@ behind it. The hook says so itself, in every report it prints.
 It fails closed. Every way it can fail to finish — a git command that errors, an identity
 this clone never set, a temporary directory it cannot create, a line of its own report it
 cannot write down on a full disk — ends in a refused push, because a gate that waves you
-through when it breaks is indistinguishable from one that checked. One empty case is not such a failure and took a refused push to find: git runs the
-hook even when the remote is already up to date, and pipes in an empty ref list. Nothing is
+through when it breaks is indistinguishable from one that checked. One empty case is not
+such a failure and took a refused push to find: git runs the hook even when the remote is
+already up to date, and pipes in an empty ref list. Nothing is
 published in that run, so there is nothing to check, and the hook says so and lets it
 through — but only when git is the one calling, which is a hook invoked with a remote name
 and location and handed a pipe rather than a terminal. An empty list from anything else is
@@ -129,9 +138,9 @@ pattern takes only a space, a slash or a hyphen there (*measured with GNU grep 3
 2026-10-01*). Matching under `C` also reports more: there the umlauts in the postcode pattern
 are read byte by byte, so five digits followed by a word that starts with a lowercase umlaut
 are reported as a postcode and place, under any locale (*measured through the hook,
-2026-10-01*); `IMPRINT_PUSH_ANYWAY` with a reason is the way past that. And the hook diffs lines, with no copy detection, so lines copied or moved into
-another file are reported again even though they are already published; `IMPRINT_PUSH_ANYWAY`
-with a reason is the way past that.
+2026-10-01*). And the hook diffs lines, with no copy detection, so lines copied or moved into
+another file are reported again even though they are already published. For both,
+`IMPRINT_PUSH_ANYWAY` with a reason is the way past.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in
