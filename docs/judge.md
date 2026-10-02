@@ -8,7 +8,7 @@
 | Aufruf | ein Ereignis als JSON auf stdin, genau ein Verdikt als JSON auf stdout | gebaut; `judge_test.go` |
 | Gates | `done`, `foreign_return`, beide Hinweis (`warn`), `fail_mode: open` | gebaut; **in keinem Hook verdrahtet** |
 | Fragen, Schwellen, Fail-Modus | eine Datei, `tools/imprint-dev/judge/gates.json`, ins Binary eingebettet | gebaut; `TestEmbeddedRegistry` |
-| Modell | gepinnt `jev-1.13.0`, nie `jev-latest` | gebaut; `TestRegistryPinningAndVersion` |
+| Modell | gepinnt `jev-1.13.0`, nie `jev-latest` | gebaut; `TestRegistryPinningAndVersion`; live 2026-10-02: API nennt `model: jev-1.13.0` |
 | Maskierung | jedes String-Blatt von State und Fragen, mit `MaskDetail` | gebaut; `TestJudgeMasksEverythingSent` |
 | Log | eine JSONL-Zeile je Aufruf, ohne Texte | gebaut; `TestJudgeLogOneLinePerCall` |
 | Durchsetzung | keine: kein Hook ruft `judge` | **nichts setzt hier etwas durch** |
@@ -24,6 +24,21 @@
                                      5 eine Logzeile
                          stdout ◀── Verdikt-JSON (Exit 0, auch wenn der Aufruf scheiterte)
 ```
+
+## Gemessen
+
+Ein Live-Aufruf am 2026-10-02 (go1.27.1, Commit 107b79d, `--source test`, eigener Log-Pfad), Gate
+`done`, synthetische Eingabe: eine Erfolgsmeldung nach `Edit` und erfolgreichem `go test ./...`.
+
+| Messgröße | Wert |
+|---|---|
+| Verdikt | `allow` (`claim` 0.97, `backed` 0.94, `local_evidence` true) |
+| Latenz | 288 ms gesamt, davon 287 ms Anfrage, 0 ms Schlüssel (aus der Umgebung) |
+| Antwortfelder (nur Namen gelesen) | `answers`, `model`, `usage` |
+| `model` in der Antwort | `jev-1.13.0`, gleich dem gesendeten |
+
+Nicht gemessen: Aufbau von `usage` (darum noch kein `tokens_in` im Log), Latenz-Verteilung (n = 1),
+`foreign_return` gegen die echte API.
 
 ## Aufruf
 
