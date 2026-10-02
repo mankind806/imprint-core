@@ -2399,6 +2399,14 @@ func TestPrePushCommitObjectHeader(t *testing.T) {
 			}
 		})
 	}
+	// A \001 of the object's own before the identity is no NUL, and the
+	// identity is left out as anywhere.
+	t.Run("a control character before the identity", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawCommit(parent + "x-note a\x01b\nauthor " + me + date + "\ncommitter " + me + date + "\n\nctl: a clean subject\n")
+		code, out := r.hookNewBranch("ctl", oid)
+		ppWantPass(t, code, out)
+	})
 	t.Run("a clean extra header line", func(t *testing.T) {
 		r := r.with(t)
 		oid := r.rawCommit(r.ppRawHead() + "x-note a clean note\n\nclean: a clean subject\n")
@@ -2516,6 +2524,7 @@ func TestPrePushGpgsigHeader(t *testing.T) {
 		{"gpgsig", "gpgsig " + ppArmour(" ", ""), nil},
 		{"an SSH signature", "gpgsig " + strings.Replace(strings.Replace(ppArmour(" ", ""), "PGP SIGNATURE", "SSH SIGNATURE", 2), " \n", "", 1), nil},
 		{"an X.509 signature", "gpgsig " + strings.Replace(ppArmour(" ", ""), "PGP SIGNATURE", "SIGNED MESSAGE", 2), nil},
+		{"a PGP message", "gpgsig " + strings.Replace(ppArmour(" ", ""), "PGP SIGNATURE", "PGP MESSAGE", 2), nil},
 		{"gpgsig-sha256", "gpgsig-sha256 " + ppArmour(" ", ""), nil},
 		{"an armour header", "gpgsig " + ppArmour(" ", "Comment: "+comment), []string{"address in a commit object: ", ":6: Comment: " + comment}},
 		{"after the armour", "gpgsig " + ppArmour(" ", "") + " " + ppIBANLine + "\n", []string{"IBAN in a commit object: ", ":11: " + ppIBANLine}},
@@ -2805,6 +2814,12 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 	// commit's committer line before its author line, or the committer
 	// line named for another commit.
 	gitBin := ppRealBin(t, "git")
+	t.Run("a cmp that cannot compare", func(t *testing.T) {
+		r := r.with(t)
+		s := ppShimPATH(t, "cmp", "exit 2\n")
+		code, out := r.hookNewBranch("count", plain, s)
+		ppWantRefused(t, code, out, "cmp could not compare commit "+plain+" with its copy.")
+	})
 	t.Run("a converted reading that prints nothing", func(t *testing.T) {
 		r := r.with(t)
 		s := ppShimPATH(t, "git", "case \" $* \" in *\" --pretty=raw \"*) exit 0 ;; esac\nexec '"+gitBin+"' \"$@\"\n")
@@ -3034,7 +3049,7 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 		r := r.with(t)
 		name := "\u5c71\u7530 Taro"
 		stored := "\x8eR\x93c Taro <" + ccTestSomeoneEmail + "> 1767225600 -0100"
-		oid := r.rawCommit("tree " + r.git("rev-parse", "HEAD^{tree}") + "\nparent " + r.head() + "\nauthor " + stored +
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") + "\nauthor " + stored +
 			"\ncommitter " + stored + "\nencoding Shift_JIS\n\nsjis: a clean subject\n")
 		if got := r.git("log", "-1", "--encoding=UTF-8", "--format=%an", oid); got != name {
 			t.Fatalf("git shows the author as %q, want %q", got, name)
@@ -3042,6 +3057,29 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8",
 			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestSomeoneEmail+">")
 		ppWantPass(t, code, out)
+	})
+	// A NUL makes the commit a finding of its own, and nothing more: the
+	// names are declared as in a commit without one.
+	t.Run("a NUL and a declared name in Shift_JIS", func(t *testing.T) {
+		r := r.with(t)
+		name := "\u5c71\u7530 Taro"
+		stored := "\x8eR\x93c Taro <" + ccTestSomeoneEmail + "> 1767225600 -0100"
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") + "\nauthor " + stored +
+			"\ncommitter " + stored + "\nencoding Shift_JIS\n\nsjis: a subject\n\nbody\x00tail\n")
+		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8",
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestSomeoneEmail+">")
+		ppWantRefused(t, code, out, "holds a NUL byte, where git stops converting it", "1 finding(s)")
+	})
+	t.Run("a NUL and user.name in Big5", func(t *testing.T) {
+		r := r.with(t)
+		big5 := "\xaaL Wei"
+		stored := big5 + " <" + ccTestSomeoneEmail + "> 1767225600 -0100"
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") + "\nauthor " + stored +
+			"\ncommitter " + stored + "\nencoding BIG5\n\nbig5: a subject\n\nbody\x00tail\n")
+		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8",
+			"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0="+big5,
+			"GIT_CONFIG_KEY_1=user.email", "GIT_CONFIG_VALUE_1="+ccTestSomeoneEmail)
+		ppWantRefused(t, code, out, "holds a NUL byte, where git stops converting it", "1 finding(s)")
 	})
 	t.Run("user.name in Big5", func(t *testing.T) {
 		r := r.with(t)

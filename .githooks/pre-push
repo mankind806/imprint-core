@@ -27,7 +27,8 @@
 # or predates the hook; reading it again would refuse every push for what is
 # already published. A new commit whose header names an encoding other than
 # UTF-8, or names none on its encoding line, is read as git converts it, too;
-# one that names an encoding this hook cannot read in full is a finding.
+# one that names an encoding this hook cannot read in full, holds a NUL where
+# git stops converting, or that git could not convert is a finding.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -800,7 +801,7 @@ note committers '%s\n' "$web_flow"
 # tagger line holds no ">"; reading a commit as converted, a tagger is not
 # written when the one in its place in the object as stored, from
 # IMPRINT_RAWTAGGERS, is the same, or is declared - and, with IMPRINT_UNREAD
-# above 0, differs from it in nothing but characters outside ASCII. It writes
+# set, differs from it in nothing but characters outside ASCII. It writes
 # five counts to IMPRINT_OBJCNT, one to a line: the lines it printed; 1 when the
 # header names an encoding other than UTF-8 - reading a commit as converted,
 # when it holds at least as many encoding lines as IMPRINT_ENCLINES says the
@@ -839,12 +840,12 @@ function put(s) { print s; print c ":" FNR >> loc; k++ }
 function ascii(s) { gsub(/[^ -~]/, "", s); return s }
 function declared(id, role) { return role == "author" ? (id in allowed) : (id in committers) }
 function vouched(span, shown, role) {
-  return !conv || declared(span, role) || (declared(shown, role) && (!unread || ascii(span) == ascii(shown)))
+  return !conv || declared(span, role) || (declared(shown, role) && (unread != 1 || ascii(span) == ascii(shown)))
 }
 function rawvouched(id,   t) {
   if (nti > nrt) return 0
   t = rawt[nti]
-  return (t in allowed) && (!unread || ascii(t) == ascii(id))
+  return (t in allowed) && (unread != 1 || ascii(t) == ascii(id))
 }
 function signed(f) { return f == "gpgsig" || f == "gpgsig-sha256" || f == "mergetag" }
 FNR == 1 {
@@ -942,7 +943,8 @@ ascii_of() { printf '%s\n' "$1" | LC_ALL=C sed 's/[^ -~]//g'; }
 # could not be read is one whose header and message nothing has checked.
 # committext and commitloc are parallel, as added and addedloc are below, and
 # rawcommits lists "oid N U" for each commit read as converted as well, U
-# being 1 when its encoding is not one prepare reads in full, and raw.N
+# being 1 when its encoding is not one prepare reads in full, 2 when it is but
+# the object holds a NUL, else 0, and raw.N
 # holding its object.
 for f in committext commitloc convtext convloc mttaggers rawcommits; do
   true >"$work/$f" || refuse "$cannot_write"
@@ -993,7 +995,7 @@ while read -r o_oid; do
     mv "$work/raw.t" "$work/raw.$n_raw" || refuse "could not keep commit $o_oid for reading as converted."
     note rawcommits '%s %s %s\n' "$o_oid" "$n_raw" "$o_u"
     r_u="$o_u"; r_e="$o_e"
-    case "$r_u" in 0) r_uf='' ;; *) r_uf=1 ;; esac
+    case "$r_u" in 1) r_uf=1 ;; *) r_uf='' ;; esac
     # The whole commit as git log converts it, header and message: --pretty=raw
     # prints every header line, a converted one as git reads it. --no-color,
     # since color.ui=always or git -p in a terminal colours the commit line.
@@ -1063,7 +1065,7 @@ while IFS= read -r line; do
       *)
         r_id="$(printf '%s\n' "$r_hdr" | LC_ALL=C sed -n "s/^$key \\(.*>\\).*\$/\\1/p")"
         [ -n "$r_id" ] && LC_ALL=C grep -Fxq -- "$r_id" "$list" \
-          && { [ "$r_u" = 0 ] || [ "$(ascii_of "$r_id")" = "$(ascii_of "$id")" ]; } && continue
+          && { [ "$r_u" != 1 ] || [ "$(ascii_of "$r_id")" = "$(ascii_of "$id")" ]; } && continue
         ;;
     esac
   fi
