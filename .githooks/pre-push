@@ -391,11 +391,11 @@ SHAPES
 }
 # The postcode pattern spells each umlaut out as an alternative, not inside a
 # bracket: every shape is also matched under C (grep_both, the tag check),
-# where a bracket reads the umlauts' UTF-8 bytes one by one. That made five
-# digits before a word starting with a lowercase umlaut a postcode and place,
-# and missed a place starting with a capital one; spelled out, C reads each
-# umlaut as the character a UTF-8 locale does (measured with GNU grep 3.12,
-# 2026-10-02).
+# where a bracket reads the umlauts' UTF-8 bytes one by one. Under C that made
+# five digits before a word starting with a lowercase umlaut or ß a postcode
+# and place, and missed a place starting with a capital umlaut; spelled out, C
+# reads each umlaut as the character a UTF-8 locale does (measured with GNU
+# grep 3.12, 2026-10-02).
 n_shapes="$(shapes | wc -l | tr -d ' ')"
 case "$n_shapes" in '' | 0 | *[!0-9]*) refuse "found no shapes to check." ;; esac
 # Every shape loop below reads this file in the main shell, not from a pipe: a

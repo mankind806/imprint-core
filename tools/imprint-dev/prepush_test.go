@@ -1231,8 +1231,8 @@ func TestPrePushToolchains(t *testing.T) {
 		"\n\nrawmsg: a Latin-1 byte\n\nTel.:\xa0" + "0" + "30" + " " + "1234567\n")
 	// The encoding cases here hold with any grep: busybox sh runs busybox's
 	// own grep, which in CI matched no capital umlaut in a place while the
-	// postcode pattern held its umlauts in a bracket, so the encoding cases
-	// that need one stay in tests 40 and 42. A declared name outside ASCII
+	// postcode pattern held its umlauts in a bracket; the encoding cases
+	// that need one are in tests 40 and 42. A declared name outside ASCII
 	// shows git log's --encoding at work, and a mislabelled commit's
 	// address its message read as stored. umlautplace below runs the
 	// spelled-out pattern (44) under every shell.
@@ -1320,9 +1320,11 @@ func TestPrePushToolchains(t *testing.T) {
 				if strings.Contains(out, "undeclared identity") {
 					t.Errorf("the stored reading did not vouch for the declared name; output:\n%s", out)
 				}
-				code, out = c.hookNewBranch("umlautplace", umlautPlaceTip)
-				ppWantRefused(t, code, out, "postcode and place: ", ":up.txt:2:")
-				ppWantChecked(t, out)
+				for _, lc := range []string{"LC_ALL=C", "LC_ALL=C.UTF-8"} {
+					code, out = c.hookNewBranch("umlautplace", umlautPlaceTip, lc)
+					ppWantRefused(t, code, out, "postcode and place: ", ":up.txt:2:")
+					ppWantChecked(t, out)
+				}
 				code, out = c.hookNewTag("tc-latin1tagger", latin1Tagger, "LC_ALL=C.UTF-8")
 				ppWantRefused(t, code, out, ", tagger of tag tc-latin1tagger")
 				ppWantChecked(t, out)
