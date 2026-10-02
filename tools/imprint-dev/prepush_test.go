@@ -3089,6 +3089,20 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 			"GIT_CONFIG_KEY_1=user.email", "GIT_CONFIG_VALUE_1="+ccTestSomeoneEmail)
 		ppWantRefused(t, code, out, "holds a NUL byte, where git stops converting it", "1 finding(s)")
 	})
+	// The same in a merge: the tag's tagger git shows is vouched for by the
+	// one stored in its place, a NUL or not.
+	t.Run("a NUL and a merged tagger in Shift_JIS", func(t *testing.T) {
+		r := r.with(t)
+		sjis := "\x8eR\x93c Taro <" + ccTestSomeoneEmail + ">"
+		date := " 1767225600 -0100"
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") +
+			"\nauthor " + sjis + date + "\ncommitter " + sjis + date + "\nencoding Shift_JIS\nmergetag object " + r.git("rev-parse", "main") +
+			"\n type commit\n tag t-sjis\n tagger " + sjis + date + "\n \n a clean tag\n\nsjis: merge\n\nbody\x00tail\n")
+		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8",
+			"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=\x8eR\x93c Taro",
+			"GIT_CONFIG_KEY_1=user.email", "GIT_CONFIG_VALUE_1="+ccTestSomeoneEmail)
+		ppWantRefused(t, code, out, "holds a NUL byte, where git stops converting it", "1 finding(s)")
+	})
 	t.Run("user.name in Big5", func(t *testing.T) {
 		r := r.with(t)
 		r.git("checkout", "-q", "-b", "big5", "main")
