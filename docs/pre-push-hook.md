@@ -119,15 +119,16 @@ another tag.
 |---|---|---|
 | `gpgsig` or `gpgsig-sha256` header of a commit | not matched, inside the last signature armour | matched: armour lines, `Comment:` and other armour headers |
 | `mergetag` header of a merge (the merged tag) | not matched, inside the last signature armour | matched: tag name, message, any other armour, armour lines; tagger held to the declared identities |
-| a tag object pushed as such (the tag check) | not matched, inside the last signature armour | matched: the message before it, armour lines and headers, any other armour |
+| a tag object pushed as such (the tag check) | not matched, inside the last signature armour | matched: the message before it, armour lines and headers, any other armour, lines after its END line |
 
 A signed commit carries its signature in a `gpgsig` header (`gpgsig-sha256` in a SHA-256
 repository), and a merge of a signed tag carries the tag, tagger and signature, in a
-`mergetag` header; git writes one only for a tag whose message holds a signature (*measured
-with git 2.55.0, 2026-10-02*). A signature's base64 lines are encoded bytes in which no shape
-can be read, yet a run of their letters and digits takes the IBAN pattern's form now and
-then: in random bytes the size of a signature, base64 encoded and wrapped as git stores them,
-about one OpenPGP Ed25519 signature in 2,400, one SSH Ed25519 signature in 1,450, one OpenPGP
+`mergetag` header; git writes one only for a tag whose message holds a line that starts with
+a signature marker — signed, or typed into an unsigned tag's message (*measured with git
+2.55.0, 2026-10-02*). A signature's base64 lines are encoded bytes in which no shape can be
+read, yet a run of their letters and digits takes the IBAN pattern's form now and then: in
+random bytes the size of a signature, base64 encoded and wrapped as git stores them, about
+one OpenPGP Ed25519 signature in 2,400, one SSH Ed25519 signature in 1,450, one OpenPGP
 RSA-4096 signature in 425 and one 3 KB X.509 signature in 85 (*simulated, 200,000 runs each,
 400,000 for SSH at the 232 characters of a real one and 50,000 for X.509, 2026-10-02; none of
 the signed commits in this repository's history held such a line that day*). So in those
@@ -240,17 +241,18 @@ Shapes are matched line by line, in a commit object as in a file or a tag, so on
 across a line end passes; that includes the first paragraph of a message, whose lines `git
 log`'s subject would join. The signature rule above leaves a hole of its own: a line made
 only of base64 characters can hold an IBAN written without spaces, or a phone number with a
-slash, and between a signature's first and END line it passes. In a commit's `gpgsig` or
-`mergetag` header git puts nothing there but the signature, and only a commit object made by
-hand can; a tag's message is a person's text, and `git tag -a` writes such an armour into it
-as typed. A merge of a tag signed by someone this clone has not declared is refused for its
-tagger: `IMPRINT_PUSH_ANYWAY` with a reason is the way past, or a merge of the commit the tag
-points at rather than of the tag. And `git merge --no-edit` of a signed tag writes the tag's
-signature and the report on verifying it into the merge's message, as lines that start with
-`#`; they are matched as the rest of the message is, base64 included. For an SSH key git
-knows through `gpg.ssh.allowedSignersFile`, that report is `Good "git" signature for
-<principal> …`, and a principal that is an address is a finding (*both measured with git
-2.55.0, 2026-10-02*). A message given with `-m` leaves them out.
+slash, and between a signature's first and END line it passes. In a commit's `gpgsig` header
+git puts nothing there but the signature, and only a commit object made by hand can. A tag's
+message is a person's text: `git tag -a` writes such an armour into it as typed, and `git
+merge -m` of that tag copies it into the merge's `mergetag` header, unsigned or not
+(*measured with git 2.55.0, 2026-10-02*). A merge of a tag signed by someone this clone has
+not declared is refused for its tagger: `IMPRINT_PUSH_ANYWAY` with a reason is the way past,
+or a merge of the commit the tag points at rather than of the tag. And `git merge --no-edit`
+of a signed tag writes the tag's signature and the report on verifying it into the merge's
+message, as lines that start with `#`; they are matched as the rest of the message is, base64
+included. For an SSH key git knows through `gpg.ssh.allowedSignersFile`, that report is `Good
+"git" signature for <principal> …`, and a principal that is an address is a finding (*both
+measured with git 2.55.0, 2026-10-02*). A message given with `-m` leaves them out.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in

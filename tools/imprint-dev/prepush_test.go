@@ -2558,6 +2558,8 @@ func TestPrePushGpgsigHeader(t *testing.T) {
 			[]string{"IBAN in a commit object: ", ":7: " + ppIBANLine}},
 		{"a spaced IBAN in the armour", "gpgsig -----BEGIN PGP SIGNATURE-----\n \n " + ppSpacedIBAN + "\n -----END PGP SIGNATURE-----\n",
 			[]string{"IBAN in a commit object: ", ":7: " + ppSpacedIBAN}},
+		{"a later marker with no END line", "gpgsig " + ppArmour(" ", "") + " -----BEGIN PGP SIGNATURE-----\n \n " + ppIBANLine + "x\n",
+			[]string{"IBAN in a commit object: ", ":8: " + ppIBANLine, ":13: " + ppIBANLine + "x"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := r.with(t)
@@ -3178,8 +3180,9 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 // other line is, line numbers those of the object: the message before the
 // armour, an armour of another name or before the last one, an armour
 // header, a line after the END line, a line before a last marker line that
-// git takes for the start - a line that starts with a marker - and one that
-// is base64 only once a tagger's identity is cut from it. An awk that fails,
+// git takes for the start - a line that starts with a marker - one after a
+// last marker that no END line follows, and one that is base64 only once a
+// tagger's identity is cut from it. An awk that fails,
 // reads the object once only, or reports a count its output does not hold,
 // is a check that could not run.
 func TestPrePushTagSignature(t *testing.T) {
@@ -3248,9 +3251,19 @@ func TestPrePushTagSignature(t *testing.T) {
 	t.Run("header-armour", func(t *testing.T) {
 		r := r.with(t)
 		oid := r.rawTag("object " + r.head() + "\ntype commit\ntag header-armour\ntagger " + me + " 1767225600 +0000\n" +
-			"-----BEGIN PGP SIGNATURE-----\ntagger " + me + ppIBANLine + "\n\na message\n")
+			"-----BEGIN PGP SIGNATURE-----\ntagger " + me + ppIBANLine + "\n-----END PGP SIGNATURE-----\n\na message\n")
 		code, out := r.hookNewTag("header-armour", oid)
 		ppWantRefused(t, code, out, "IBAN in tag header-armour: 6:tagger"+ppIBANLine)
+		ppWantChecked(t, out)
+	})
+	// A later marker with no END line after it: git takes it for the
+	// signature, the armour before it is message, and there is no armour
+	// to leave anything out of.
+	t.Run("reopened", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawTag(head("reopened") + "a clean tag\n" + ppArmour("", "") + "-----BEGIN PGP SIGNATURE-----\n\n" + fakeIBAN + "\n")
+		code, out := r.hookNewTag("reopened", oid)
+		ppWantRefused(t, code, out, "IBAN in tag reopened: 10:"+ppIBANLine, "IBAN in tag reopened: 15:"+fakeIBAN)
 		ppWantChecked(t, out)
 	})
 	awkBin := ppRealBin(t, "awk")

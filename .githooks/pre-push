@@ -524,7 +524,7 @@ grep_both() {
 # header - everything up to its last ">" - and a line of the signature that is
 # base64 alone in the object, when there is an END line, printed empty so that
 # line numbers stay those of the object. It fails when the second pass did not
-# read as many lines as the first, and writes the lines it printed to
+# read as many lines as the first, and writes the number of lines it printed to
 # IMPRINT_OBJCNT.
 tagprep='
 BEGIN {
@@ -802,20 +802,21 @@ note committers '%s\n' "$web_flow"
 #
 # A signed commit carries its signature in a gpgsig header, and a merge of a
 # signed tag carries that tag, tagger and signature, in a mergetag header; git
-# writes one only for a tag that holds a signature (measured with git 2.55.0,
-# 2026-10-02). A signature's base64 lines are encoded bytes, in which no shape
-# can be read, yet a run of their letters and digits takes the IBAN pattern's
-# form in about one RSA-4096 signature in 425 (simulated, 2026-10-02). So in
-# these two headers a signature's base64 lines are not matched: from the last
-# line of the header that opens a signature, as git finds one - a line that
-# starts with -----BEGIN PGP SIGNATURE-----, PGP MESSAGE, SSH SIGNATURE or
-# SIGNED MESSAGE - to the -----END ...----- line after it - an armour only when
-# that line is there - a line made only of base64 characters is skipped. Every
-# other line of them is matched: the armour lines, an armour header such as
-# Comment:, the merged tag's name and message, any armour of another name or
-# before the last one. The merged tag's tagger is left out the way the tag check
-# leaves a tagger out, everything up to the last > on the line, and check 1
-# holds it to the declared identities as the tag check does.
+# writes one only for a tag whose message holds a line that starts with a
+# signature marker - signed, or typed into an unsigned tag's message (measured
+# with git 2.55.0, 2026-10-02). A signature's base64 lines are encoded bytes, in
+# which no shape can be read, yet a run of their letters and digits takes the
+# IBAN pattern's form in about one RSA-4096 signature in 425 (simulated,
+# 2026-10-02). So in these two headers a signature's base64 lines are not
+# matched: from the last line of the header that opens a signature, as git finds
+# one - a line that starts with -----BEGIN PGP SIGNATURE-----, PGP MESSAGE, SSH
+# SIGNATURE or SIGNED MESSAGE - to the -----END ...----- line after it - an
+# armour only when that line is there - a line made only of base64 characters is
+# skipped. Every other line of them is matched: the armour lines, an armour
+# header such as Comment:, the merged tag's name and message, any armour of
+# another name or before the last one. The merged tag's tagger is left out the
+# way the tag check leaves a tagger out, everything up to the last > on the
+# line, and check 1 holds it to the declared identities as the tag check does.
 #
 # git log converts a commit from the encoding its header names, and the
 # patterns are UTF-8: a Latin-1 place read as stored matches nothing under a
