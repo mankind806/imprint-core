@@ -33,15 +33,16 @@ after a NUL byte in the message, and a push publishes both.
 | an extra header line before the tree | refused by the sending git itself | refused |
 
 (*measured with git 2.55.0, 2026-10-02; what GitHub's receiving end accepts was not
-checked.*) Left out of the object are what the identity check reads, and a signature's
-base64 lines (below). The identity is the author's or the committer's `Name <address>` as git
-splits it — up to the first `<` and on to the first `>` after it — on the one header line of
-that role, before any NUL. Whatever follows on that line is read, a second address included.
-`git log` converts the header from the encoding it names as well, and in UTF-7 that turned
-one author line as stored into two, the declared one last (*measured with git 2.55.0,
+checked.*) Left out of the object are what the identity check reads, and a signature's base64
+lines (below). The identity is the author's or the committer's `Name <address>` as git splits
+it — up to the first `<` and on to the first `>` after it — on the one header line of that
+role, before any NUL. Whatever follows on that line is read, a second address included. `git
+log` converts the header from the encoding it names as well, and in UTF-7 that turned one
+author line as stored into two, the declared one last (*measured with git 2.55.0,
 2026-10-02*): in a commit whose header names an encoding other than UTF-8, the identity is
-left out only when it is declared as stored, or when git shows a declared one that differs
-from it in nothing but characters outside ASCII — a name stored in Latin-1.
+left out only when it is declared as stored, or when git shows a declared one — a name stored
+in Latin-1 or Shift_JIS. For an encoding outside the list below, only when that one differs
+from it in nothing but characters outside ASCII.
 
 Every shape is matched twice, under your own locale and under `C`, and a line either match
 finds is a finding. The patterns hold characters outside ASCII, which takes your locale; but
@@ -69,17 +70,19 @@ conversion turns the same umlaut into two characters that neither match finds, a
 --format` converts even under `--encoding=none`. The object as stored holds the umlaut as
 typed, and the author or committer of such a commit counts as declared when either reading
 does — the stored one only when the header holds a single line for that role, since git shows
-the last of several, and only when the identity git shows differs from it in nothing but
-characters outside ASCII (*measured with git 2.55.0, 2026-10-01*). A conversion that changes
-more is not the same name read two ways: in UTF-7 an extra header line became an author line
-of its own, which git showed, while the stored header held one declared author (*measured
-with git 2.55.0, 2026-10-02*). A tag object is read byte for byte throughout, so a tagger
-whose name is stored in Latin-1 is read as written.
+the last of several (*measured with git 2.55.0, 2026-10-01*). For an encoding outside the
+list below, also only when the identity git shows differs from the stored one in nothing but
+characters outside ASCII: a conversion that changes more is not the same name read two ways,
+and in UTF-7 an extra header line became an author line of its own, which git showed, while
+the stored header held one declared author (*measured with git 2.55.0, 2026-10-02*). The
+encodings on the list make no line of their own, and Shift_JIS, Big5 and GBK keep bytes in
+the ASCII range inside a character, so there the comparison is not made. A tag object is read
+byte for byte throughout, so a tagger whose name is stored in Latin-1 is read as written.
 
 | The header's encoding line names … | read as stored | read as git converts it | finding of its own |
 |---|---|---|---|
 | nothing (no line), UTF-8 or utf8 | yes | — | — |
-| an empty value, ISO-8859-*, latin*, windows-125* or CP125*, KOI8-R/U, EUC-*, GB2312, GBK, GB18030, Big5, Shift_JIS, SJIS, CP932 | yes | yes | — |
+| an empty value, US-ASCII, ISO-8859-*, latin*, windows-125* or CP125*, KOI8-R/U, EUC-JP/KR/CN/TW, GB2312, GBK, GB18030, Big5, Big5-HKSCS, Shift_JIS, SJIS, CP932, Windows-31J | yes | yes | — |
 | any other encoding: UTF-7, UTF-16, UTF-32, EBCDIC (IBM037 …), ISO-2022-* … | yes | yes | `unread encoding` |
 
 Reading both ways covers what git shows only where a conversion makes an ASCII character
@@ -89,8 +92,11 @@ converted text before a shape that is only encoded as stored (*measured with git
 2026-10-02*). So a commit whose header names an encoding outside the list is a finding, as a
 ref to a blob or a tree is; `IMPRINT_PUSH_ANYWAY` with a reason is the way past. `git log`
 stops at a NUL in what it converts as well, so for a listed encoding such a NUL was stored
-as one, and the stored reading reads past it. This is the hook's choice of list, made
-2026-10-02, and a name can be added once its conversion is shown to keep to that rule.
+as one, and the stored reading reads past it. A conversion git cannot finish — one byte the
+encoding leaves undefined is enough — has git print the commit as stored, encoding line and
+all, where a Latin-1 place matches neither reading; that is an `unread encoding` finding too
+(*measured with git 2.55.0, 2026-10-02*). This is the hook's choice of list, made 2026-10-02,
+and a name can be added once its conversion is shown to keep to that rule.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
@@ -126,8 +132,9 @@ finds one — `-----BEGIN PGP SIGNATURE-----`, `PGP MESSAGE`, `SSH SIGNATURE` or
 characters is skipped. An armour of another name, or one before the last, is matched like any
 text. The merged tag's tagger is held to the declared identities as a pushed tag's tagger is,
 and left out of the shapes; a tagger line with no `>` in it is a check that could not run. In
-a merge read as converted, a tagger git shows counts as declared when the one stored is and
-the two differ in nothing but characters outside ASCII, as for an author. A
+a merge read as converted, a tagger git shows counts as declared when the one stored in its
+place is — for an encoding outside the list above, only when the two differ in nothing but
+characters outside ASCII, as for an author. A
 merged tag that names no tagger brings no identity along and is no finding, unlike a pushed
 tag with none. The
 tag check makes no such exception, so a signed tag pushed as a tag object still meets those

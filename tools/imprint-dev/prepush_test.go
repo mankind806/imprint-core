@@ -2589,6 +2589,10 @@ func TestPrePushMergetagHeader(t *testing.T) {
 	if !strings.Contains(out, "1 tagger(s) of merged tags, 0 undeclared") {
 		t.Errorf("the merged tag's tagger was not checked; output:\n%s", out)
 	}
+	// The hook sets what its awk reads; the same names in the environment
+	// change nothing.
+	code, out = r.hookNewBranch("merge-t-declared", declared, "IMPRINT_RAWTAGGERS=/nonexistent", "IMPRINT_UNREAD=1")
+	ppWantPass(t, code, out)
 	code, out = r.hookNewBranch("merge-t-stranger", strangerMerge)
 	ppWantRefused(t, code, out, "undeclared identity: "+stranger+", tagger of the tag commit "+strangerMerge+" merges")
 	ppWantChecked(t, out)
@@ -2647,6 +2651,23 @@ func TestPrePushMergetagHeader(t *testing.T) {
 		code, out := r.hookNewBranch("merge-t-latin1", merge,
 			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestAuthorEmail+">")
 		ppWantPass(t, code, out)
+	})
+
+	// A tagger that only the conversion shows: in UTF-7, the merged tag's
+	// tagger line holds a second address once converted. The tagger as
+	// stored is declared, but in an encoding outside the list it vouches
+	// only for one that differs from it in nothing but characters outside
+	// ASCII.
+	t.Run("a tagger only the conversion shows", func(t *testing.T) {
+		r := r.with(t)
+		hidden := addr("utf7.tagger", "example.invalid")
+		date := " 1767225600 -0100"
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") + "\nparent " + side +
+			"\nauthor " + me + date + "\ncommitter " + me + date + "\nencoding UTF-7\nmergetag object " + side +
+			"\n type commit\n tag t-utf7\n tagger " + me + date + " " + ppUTF7("<"+hidden+">") + "\n \n a clean tag\n\nutf7: merge\n")
+		code, out := r.hookNewBranch("utf7", oid)
+		ppWantRefused(t, code, out, "undeclared identity: "+me+date+" <"+hidden+">, tagger of the tag commit "+oid+" merges",
+			"unread encoding: commit "+oid)
 	})
 
 	// A tagger line that ends no identity in ">", made by hand.
@@ -2753,6 +2774,12 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 	// commit's committer line before its author line, or the committer
 	// line named for another commit.
 	gitBin := ppRealBin(t, "git")
+	t.Run("a converted reading that prints nothing", func(t *testing.T) {
+		r := r.with(t)
+		s := ppShimPATH(t, "git", "case \" $* \" in *\" --pretty=raw \"*) exit 0 ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+		code, out := r.hookNewBranch("count", latin1, s)
+		ppWantRefused(t, code, out, "git log printed no commit "+latin1+" to read as converted.")
+	})
 	for _, c := range []struct{ name, prog string }{
 		{"identities swapped", "NR % 2 == 1 { a = $0; next } { print; print a }"},
 		{"a committer line for another commit", "NR % 2 == 0 { sub(/^[0-9a-f]+/, \"0\") } { print }"},
@@ -2902,5 +2929,58 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 		oid := r.rawCommit(head + "encoding UTF-7\n\nnul: x+AAA-" + ppUTF7("call "+"0"+"30"+" "+"1234567") + "\n")
 		code, out := r.hookNewBranch("enc", oid)
 		ppWantRefused(t, code, out, "unread encoding: commit "+oid)
+	})
+	// One byte the encoding leaves undefined, and git prints the whole
+	// commit as stored, where a Latin-1 place matches nothing.
+	t.Run("a conversion git cannot finish", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawCommit(head + "encoding windows-1252\n\nfailed: deliver to " + "10115" + " \xc4rztehaus \x81\n")
+		cmd := exec.Command("git", "-C", r.dir, "log", "-1", "--encoding=UTF-8", "--pretty=raw", oid)
+		cmd.Env = ccIsolatedGitEnv()
+		got, err := cmd.Output()
+		if err != nil || !strings.Contains(string(got), "\nencoding windows-1252\n") {
+			t.Skipf("git converted the commit here (%v, %q), so the case proves nothing", err, got)
+		}
+		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8")
+		ppWantRefused(t, code, out, "unread encoding: commit "+oid+" names the encoding \"windows-1252\", which git could not convert in full")
+	})
+	// git converts from the first encoding line, and so does the hook.
+	t.Run("two encoding lines", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawCommit(head + "encoding ISO-8859-1\nencoding UTF-8\n\ntwo: deliver to " + "10115" + " \xdcbungsstadt\n")
+		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8")
+		ppWantRefused(t, code, out, "postcode and place in a commit converted to UTF-8: "+oid+":")
+	})
+	// Shift_JIS, Big5 and GBK keep bytes in the ASCII range inside a
+	// character, so a declared name stored in one of them differs in ASCII
+	// from the one git shows, and is declared all the same: those encodings
+	// make no line of their own. 山田 is 8e 52 93 63 in Shift_JIS, 林 aa 4c
+	// in Big5.
+	t.Run("a declared name in Shift_JIS", func(t *testing.T) {
+		r := r.with(t)
+		name := "\u5c71\u7530 Taro"
+		stored := "\x8eR\x93c Taro <" + ccTestSomeoneEmail + "> 1767225600 -0100"
+		oid := r.rawCommit("tree " + r.git("rev-parse", "HEAD^{tree}") + "\nparent " + r.head() + "\nauthor " + stored +
+			"\ncommitter " + stored + "\nencoding Shift_JIS\n\nsjis: a clean subject\n")
+		if got := r.git("log", "-1", "--encoding=UTF-8", "--format=%an", oid); got != name {
+			t.Fatalf("git shows the author as %q, want %q", got, name)
+		}
+		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8",
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestSomeoneEmail+">")
+		ppWantPass(t, code, out)
+	})
+	t.Run("user.name in Big5", func(t *testing.T) {
+		r := r.with(t)
+		r.git("checkout", "-q", "-b", "big5", "main")
+		r.git("config", "user.name", "\xaaL Wei")
+		r.write("big5.txt", "a clean line\n")
+		r.stage()
+		r.git("-c", "i18n.commitEncoding=BIG5", "commit", "-q", "-m", "big5: a clean subject")
+		tip := r.head()
+		if got := r.git("log", "-1", "--encoding=UTF-8", "--format=%an", tip); got != "\u6797 Wei" {
+			t.Fatalf("git shows the author as %q, want the Big5 name converted", got)
+		}
+		code, out := r.hookNewBranch("big5", tip, "LC_ALL=C.UTF-8")
+		ppWantPass(t, code, out)
 	})
 }
