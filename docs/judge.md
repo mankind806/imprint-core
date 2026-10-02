@@ -9,8 +9,9 @@
 | Gates | `done`, `foreign_return`, beide Hinweis (`warn`), `fail_mode: open` | gebaut; **in keinem Hook verdrahtet** |
 | Fragen, Schwellen, Fail-Modus | eine Datei, `tools/imprint-dev/judge/gates.json`, ins Binary eingebettet | gebaut; `TestEmbeddedRegistry` |
 | Modell | gepinnt `jev-1.13.0`, nie `jev-latest` | gebaut; `TestRegistryPinningAndVersion`; live 2026-10-02: API nennt `model: jev-1.13.0` |
-| Maskierung | jedes Textfeld ganz maskieren, dann kappen (nie mitten in einem Platzhalter); höchstens 512 KiB Text je Aufruf, sonst `too_large` und nichts gesendet; `PostState` maskiert jedes String-Blatt noch einmal | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestCutMaskedProperty` (50 × 200 Läufe), `TestMaskCappedIsCutOfWholeMask`, `TestJudgeMaskBudget` |
-| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage | gebaut; `TestJudgeDeadlineCoversBuild` (512 KiB ungünstigster Text, 16 MB, 10.000 Aufrufe) |
+| Maskierung | jedes Textfeld ganz maskieren, dann kappen (nie mitten in einem Platzhalter); höchstens so viel Text je Aufruf, wie im ungünstigsten Fall in der halben Deadline maskiert ist (3 s: 7,2 MB, 6 s: 14,4 MB), sonst `too_large` und nichts gesendet; `PostState` maskiert jedes String-Blatt noch einmal | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestCutMaskedProperty` (50 × 200 Läufe), `TestMaskCappedIsCutOfWholeMask`, `TestJudgeMaskBudget` |
+| Maskier-Geschwindigkeit | dieselben Treffer wie vorher, aus Kandidaten statt NFA über jedes Byte; linear auch auf abgelehnten Treffern | gebaut; `TestMaskDifferential` (alt gegen neu, Byte für Byte), `TestMaskLinearOnRejectedRuns` |
+| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage; Maskieren hört am Ende der Deadline auf zu warten | gebaut; `TestJudgeDeadlineCoversBuild` (dichteste Adressen in Budgetgröße, 15 MiB, 10.000 Aufrufe), `TestJudgeMaskingStopsAtTheDeadline` |
 | Log | eine JSONL-Zeile je Aufruf, ohne Texte und ohne unbekannte Namen | gebaut; `TestJudgeLogOneLinePerCall`, `TestJudgeNeverEchoesUnknownNames` |
 | Durchsetzung | keine: kein Hook ruft `judge` | **nichts setzt hier etwas durch** |
 
@@ -72,7 +73,7 @@ imprint-dev version            # auch: imprint-dev --version
 - rohes Hook-JSON des Hosts (so, wie ein einzeiliger Hook-Wrapper es durchreicht); dann ist `--gate` Pflicht.
 
 Höchstens 16 MB; mehr ist ein Eingabefehler (Verdikt, sofort). Maskiert und gesendet wird davon nur,
-was ins Maskier-Budget von 512 KiB passt (siehe Gates). Speicher, gemessen 2026-10-02 mit
+was ins Maskier-Budget passt (siehe Gates). Speicher, gemessen 2026-10-02 mit
 `/usr/bin/time` (go1.27.1, Linux): 16 MB Fließtext als `tool_response` ≈ 62 MB RSS, 0,05 s; 16 MB aus
 920.000 kleinen JSON-Objekten ≈ 507 MB RSS, 0,7 s (`map[string]any` je Objekt). Mehr Struktur auf
 gleich vielen Bytes braucht mehr Speicher.
@@ -168,17 +169,62 @@ Kappung geschnitten: Anfang, Ende oder beides. Was hinausgeht, ist damit immer e
 oder Anfang + `[…]` + Ende des ganz maskierten Textes; ein Geheimnis wird nie zerschnitten, bevor es
 maskiert ist, gleich wie lang es ist. Fiele ein Schnitt mitten in einen Platzhalter (`<redacted>`,
 `<email>` …), rückt er an dessen Rand; andere `<` bleiben unberührt. Geprüft:
-`TestCutMaskedProperty` (50 Seeds × 200 Texte aus JWT-, base64-, UUID-, Lockfile- und Prosa-Stücken
-mit Geheimnissen dazwischen; Orakel: Präfix/Suffix des ganz maskierten Textes, kein geteilter
-Platzhalter), `TestMaskCappedIsCutOfWholeMask`, die Regressionen `TestForeignReturnKeepsInjectionBesideBlob`,
+`TestCutMaskedProperty` (50 Seeds × 200 Texte aus JWT-, base64-, UUID-, Lockfile-, Mehrbyte- und
+Prosa-Stücken mit Geheimnissen dazwischen; Orakel: Präfix/Suffix des ganz maskierten Textes, gültiges
+UTF-8, kein geteilter Platzhalter, eigene Suche nach Platzhaltern, jede Seite höchstens 9 Zeichen unter
+ihrem Anteil an der Kappung; fängt die Mutationen „Rückblick 8“, „leer“ und „Byte-Schnitt“),
+`TestMaskCappedIsCutOfWholeMask`, die Regressionen `TestForeignReturnKeepsInjectionBesideBlob`,
 `TestDoneKeepsMessageBesideBlob`, `TestMaskCappedLongMatch`. `done` maskiert nur die Befehle der letzten
-15 Aufrufe.
+15 Aufrufe; Werkzeugnamen sind Blätter wie andere: maskiert, auf 100 Zeichen gekappt, im Budget
+(`TestDoneCapsToolNames`).
 
-**Maskier-Budget.** Ganz maskieren kostet Zeit: gemessen 2026-10-02 (go1.27.1, dieser Rechner,
-`MaskDetail` auf 16 MB): Fließtext 9,0 s ohne und 11,2 s mit Namensdatei, zufällige Großbuchstaben und
-Ziffern 23,9 s bzw. 25,7 s. Ein Aufruf maskiert deshalb höchstens 512 KiB Text über alle Felder; mehr
-endet mit `error_class: too_large`, ohne Anfrage (der Fail-Modus entscheidet). Gemessen im Test mit zwei
-CPUs: 511 KiB ungünstigster Text in 0,63 s geurteilt, 16 MB in 0,03 s abgewiesen.
+**Maskier-Geschwindigkeit.** Gos `regexp` hat keinen DFA: eine Suche ohne Anker läuft mit dem NFA über
+jedes Byte. Die Muster sind deshalb unverändert, gesucht wird aber anders (`tools/imprint-dev/mask_fast.go`):
+ein Treffer kann nur an bestimmten Stellen anfangen (Anfangsbuchstaben eines Schlüsselworts, ein `@`,
+zwei Großbuchstaben und zwei Ziffern, Straßen-Endungen vor `\s\d` …); dort wird das Muster mit Anker
+versucht, mit dem Zeichen davor als Kontext für `\b`, auf kleinen Fenstern, damit Gos Backtracker statt
+des NFA läuft. Kandidaten, deren Zeichen davor ein Lookbehind ablehnt, werden übersprungen statt gefunden,
+verworfen und ein Zeichen weiter neu gesucht: das war quadratisch. Namen werden weiter einzeln nacheinander
+ersetzt (eine gemeinsame Alternation ersetzte anders, z. B. bei „Hans Max“ und „Max Mustermann“), aber über
+`strings.Index` auf einer ASCII-kleingeschriebenen Kopie. Wo das nicht exakt ginge, läuft der alte Weg:
+ungültiges UTF-8, und für die Schritte ohne Groß-/Kleinschreibung Text mit K (U+212A), ſ (U+017F) oder ẞ
+(U+1E9E), den einzigen Zeichen, die Go auf ASCII-Buchstaben bzw. ß faltet.
+
+Gemessen 2026-10-02, go1.27.1, `GOMAXPROCS=2`, dieser Rechner, Namensdatei mit 2 Namen,
+`TestMaskProfile` (Laufanleitung im Test), alt = Stand 301db1c:
+
+| 16 MB | alt | neu | langsamster Schritt neu |
+|---|---|---|---|
+| Fließtext | 16,6 s | 0,64 s | `secret_kw` 0,20 s |
+| Großbuchstaben + Ziffern | 25,7 s | 0,95 s | `iban` 0,25 s |
+| UUIDs, Hashes | 15,7 s | 0,85 s | `opaque` 0,16 s |
+| Personendaten dicht | 10,0 s (ohne Namen) | 1,26 s | `secret_kw` 0,26 s |
+| Straßenadressen dicht (2 MB) | 1,52 s | 0,26 s | `street` 0,21 s |
+| `schluessel=wert` dicht (2 MB) | 0,91 s | 0,15 s | `secret_kw` 0,11 s |
+| `a` + 32 KiB Nullen | 26,7 s | 0,6 ms | – |
+| 64 KiB `aeyJ` / `XAKIA` | 18,7 s / 13,6 s | 2,7 ms / 2,3 ms | – |
+
+Der ungünstigste Fall neu sind dichte Straßenadressen: 2,1 s für 16 MB, rund 127 ns je Byte; jedes Muster
+der Namensdatei kostet etwa 0,3 ns je Byte dazu (50 Namen, 85 Muster, 8 MiB: 0,21 s statt 0,87 s alt).
+
+Gleichheit: `TestMaskDifferential` lässt die alte Fassung (`mask_reference_test.go`, nur in Tests) und
+die neue auf dieselben Texte los, mit 4 Namensdateien (keine, 2 Namen, 9 Namen mit Überlappungen und
+Platzhalter-Namen wie `name`, 50 Namen); Ausgabe und Zählung müssen Byte für Byte gleich sein. Im
+normalen Lauf 3.205 Texte, 3,0 MB, 12.820 Vergleiche; einmal mit `IMPRINT_MASK_DIFF_SEEDS=400`:
+41.080 Texte, 40 MB, 164.320 Vergleiche, alle gleich. Die Python-Parität (`mask-test.py`, 13/13) läuft
+unverändert.
+
+**Maskier-Budget.** Ein Aufruf maskiert höchstens so viel Text, wie im ungünstigsten Fall in der Hälfte
+der verbleibenden Deadline maskiert ist: Bytes = halbe Restzeit / (200 ns + 1,5 ns × Namensmuster),
+höchstens 16 MB (`maskBudgetBytes`). 200 ns liegen über den gemessenen 127 ns: bei Last (Lastmittel 10
+durch andere Arbeit auf dem Rechner) kamen 156 ns vor, einmal 232 ns. Mit 2 Namen: 3 s (PostToolUse,
+SubagentStop) → 7,2 MB, ungünstigster Fall gemessen 0,90–0,95 s (31 %); 6 s (Stop) → 14,4 MB,
+1,79 s (30 %). Mehr endet mit `error_class: too_large`, ohne Anfrage, und der Fail-Modus entscheidet;
+bei einem Hinweis-Gate heißt das `allow`. **Grenze, nicht behoben:** Wer einen fremden Text über das
+Budget aufbläht, entgeht `foreign_return`. Rohen Text vor dem Maskieren zu kürzen, kommt nicht in Frage
+(ein Schnitt kann Passphrasen, IBANs und Adressen teilen). Läuft Maskieren doch länger (langsamerer
+Rechner), wartet `judge` nur bis zum Ende der Deadline und antwortet `timeout`; die Maskier-Goroutine
+läuft dann im Hintergrund aus, bis der Prozess endet (ein Prozess je Aufruf).
 
 Kalibrierung, wie in `gates.json` vermerkt: `done` auf 8 synthetischen Fällen am 2026-09-29 mit dem
 Alias `jev-latest` (welche Version er damals war: nicht festgehalten), nicht neu für `jev-1.13.0`.
@@ -233,7 +279,7 @@ Modulversion `(devel)` und `vcs.revision`, `vcs.time`, `vcs.modified`.
 | Code-Gates aus Konzept B §9 (Roster-Datum, Alter-Liste, SessionStart-Zustand, Pfadpräfix) | Pfadliste und Ablöse-Marker-Format sind nicht festgelegt |
 | CL-001…004 als Registry-Gates | die Hooks senden `jev-latest` und einen Text-State; ein Umzug änderte ihr Verhalten |
 | Choice-Fragen | erst mit `skill_suggestion` oder `method` nötig |
-| Texte über 512 KiB urteilen | Produktentscheid offen: die langsamen Muster schneller machen (`knownTokenRE`, `secretKWRE`, `streetRE` ohne festen Anfang), das stdin-Limit senken oder die Deadline heben |
+| Texte über dem Maskier-Budget urteilen | Budget folgt aus der Deadline (siehe oben); mehr Spielraum gäbe nur eine längere Deadline |
 | Check in `imprint-dev check` (jede Frage hat Kriterien; `calibration.model` = `model`, mit Datum) | die heutige Registry fiele auf beiden Gates durch: keine Kriterien, `done` auf `jev-latest` kalibriert, `foreign_return` gar nicht; ob Warnung oder Verstoß, ist offen |
 
 | Wrapper für kritische Gates | was er ausgibt, wenn `imprint-dev` fehlt, ist offen; `\|\| exit 0` wäre offen |
