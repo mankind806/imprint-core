@@ -245,14 +245,17 @@ slash, and between a signature's first and END line it passes. In a commit's `gp
 git puts nothing there but the signature, and only a commit object made by hand can. A tag's
 message is a person's text: `git tag -a` writes such an armour into it as typed, and `git
 merge -m` of that tag copies it into the merge's `mergetag` header, unsigned or not
-(*measured with git 2.55.0, 2026-10-02*). A merge of a tag signed by someone this clone has
-not declared is refused for its tagger: `IMPRINT_PUSH_ANYWAY` with a reason is the way past,
-or a merge of the commit the tag points at rather than of the tag. And `git merge --no-edit`
-of a signed tag writes the tag's signature and the report on verifying it into the merge's
-message, as lines that start with `#`; they are matched as the rest of the message is, base64
-included. For an SSH key git knows through `gpg.ssh.allowedSignersFile`, that report is `Good
-"git" signature for <principal> …`, and a principal that is an address is a finding (*both
-measured with git 2.55.0, 2026-10-02*). A message given with `-m` leaves them out.
+(*measured with git 2.55.0, 2026-10-02*). A tag signed in a SHA-256 repository with a SHA-1
+compatibility hash carries its signature twice, the second time in a `gpgsig` header of the
+tag, and the base64 lines there are matched like any text (*measured in review with git
+2.47.3, 2026-10-02*). A merge of a tag signed by someone this clone has not declared is
+refused for its tagger: `IMPRINT_PUSH_ANYWAY` with a reason is the way past, or a merge of
+the commit the tag points at rather than of the tag. And `git merge --no-edit` of a signed
+tag writes the tag's signature and the report on verifying it into the merge's message, as
+lines that start with `#`; they are matched as the rest of the message is, base64 included.
+For an SSH key git knows through `gpg.ssh.allowedSignersFile`, that report is `Good "git"
+signature for <principal> …`, and a principal that is an address is a finding (*both measured
+with git 2.55.0, 2026-10-02*). A message given with `-m` leaves them out.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in

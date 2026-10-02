@@ -3202,6 +3202,11 @@ func TestPrePushTagSignature(t *testing.T) {
 	}{
 		{"signed", "a clean tag\n" + ppArmour("", ""), nil},
 		{"ssh-signed", "a clean tag\n" + strings.Replace(ppArmour("", ""), "PGP SIGNATURE", "SSH SIGNATURE", 2), nil},
+		{"pgp-message", "a clean tag\n" + strings.Replace(ppArmour("", ""), "PGP SIGNATURE", "PGP MESSAGE", 2), nil},
+		{"x509-signed", "a clean tag\n" + strings.Replace(ppArmour("", ""), "PGP SIGNATURE", "SIGNED MESSAGE", 2), nil},
+		// A real hit sits inside a line of base64 with + and / in it, and
+		// a phone number with a slash is all base64 characters too.
+		{"in-a-line", "a clean tag\n-----BEGIN PGP SIGNATURE-----\n\nAb+/" + ppIBANLine + "/x+\n" + "0" + "30/" + "1234567\n-----END PGP SIGNATURE-----\n", nil},
 		{"before", "release notes\n" + ppIBANLine + "\n" + ppArmour("", ""), []string{"IBAN in tag before: 7:" + ppIBANLine}},
 		{"fake", "-----BEGIN PGP SIGNATURE-----\n" + fakeIBAN + "\n-----END PGP SIGNATURE-----\nmore notes\n" + ppArmour("", ""),
 			[]string{"IBAN in tag fake: 7:" + fakeIBAN}},
