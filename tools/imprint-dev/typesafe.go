@@ -43,39 +43,51 @@ const (
 
 // --- Masking (analog typesafe-dev ts_common.py) ------------------------------
 
+const (
+	bearerBasicPattern     = `(?i)(\b(?:bearer|basic)\s+)([^\s"',;]+)`
+	secretKWPattern        = `(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential|private[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*["']?\s*[=:]\s*)("[^"\n]+"|'[^'\n]+'|["']?[^\s"',;]+)`
+	phonePattern           = `(?:\+49|0)(?:[ \t./()-]*\d){8,}`
+	awsKeyIDPattern        = `(?:AKIA|ASIA)[0-9A-Z]{16}`
+	knownTokenPattern      = `(?:ghp_|gho_|ghs_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|xox[abprs]-|AKIA|ASIA|AIza|GOCSPX-|ya29\.|1//|eyJ|glpat-|npm_)[A-Za-z0-9_\-./+=]{8,}`
+	emailPattern           = `[\p{L}\p{N}_.+-]+@[\p{L}\p{N}_-]+\.[\p{L}\p{N}_.-]+`
+	opaqueCandidatePattern = `[A-Za-z0-9_\-+/]{24,}={0,2}`
+	streetPattern          = `\b(?:(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+(?:\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+\s+)*(?:Straße|Strasse|Str\.|Str\b|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:straße|strasse|str\.|str\b|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile|pfad|steig|gäßchen|gaesschen)))\s+\d+[a-zA-Z]?(?:\s*[-/]\s*\d{1,4}[a-zA-Z]?)?\b`
+	plzOrtPattern          = `\b\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+(?:\s+(?:(?:am|an der)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+|im Breisgau|ob der Tauber))?\b`
+)
+
 var (
-	bearerBasicRE = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+)([^\s"',;]+)`)
+	bearerBasicRE = regexp.MustCompile(bearerBasicPattern)
 	// secretKWRE: keyword, separator, then a quoted value (masked as a whole,
 	// whitespace included) or an unquoted one. Same keyword list as ts_common.py
 	// _MASK_KW; RE2 has no backreferences, so quote pairing is checked in code.
-	secretKWRE = regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential|private[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*["']?\s*[=:]\s*)("[^"\n]+"|'[^'\n]+'|["']?[^\s"',;]+)`)
+	secretKWRE = regexp.MustCompile(secretKWPattern)
 
 	// ibanRE, phoneRE, awsKeyIDRE, knownTokenRE: the ts_common.py patterns; the
-	// lookarounds Python uses are checked by replaceBounded.
+	// lookarounds Python uses are checked in code (replaceBoundedFast).
 	ibanRE       = regexp.MustCompile(ibanPattern)
 	ibanFullRE   = regexp.MustCompile(`^(?:` + ibanPattern + `)$`)
-	phoneRE      = regexp.MustCompile(`(?:\+49|0)(?:[ \t./()-]*\d){8,}`)
-	awsKeyIDRE   = regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`)
-	knownTokenRE = regexp.MustCompile(`(?:ghp_|gho_|ghs_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|xox[abprs]-|AKIA|ASIA|AIza|GOCSPX-|ya29\.|1//|eyJ|glpat-|npm_)[A-Za-z0-9_\-./+=]{8,}`)
+	phoneRE      = regexp.MustCompile(phonePattern)
+	awsKeyIDRE   = regexp.MustCompile(awsKeyIDPattern)
+	knownTokenRE = regexp.MustCompile(knownTokenPattern)
 
 	// emailRE matches email addresses; letters and digits in any script, like
 	// Python's Unicode \w in ts_common.RX_EMAIL (umlauts in local part and domain).
-	emailRE = regexp.MustCompile(`[\p{L}\p{N}_.+-]+@[\p{L}\p{N}_-]+\.[\p{L}\p{N}_.-]+`)
+	emailRE = regexp.MustCompile(emailPattern)
 
 	// opaqueCandidateRE matches candidates for long opaque strings (24+ base64/hex characters).
-	opaqueCandidateRE = regexp.MustCompile(`[A-Za-z0-9_\-+/]{24,}={0,2}`)
+	opaqueCandidateRE = regexp.MustCompile(opaqueCandidatePattern)
 
 	// streetRE matches German street names + house number (e.g. "Musterstraße 12", "Hauptstr. 4b", "Am Markt 1").
 	// The range end is capped at 4 digits so a following 5-digit postcode is never read as a
 	// range end (its PLZ+Ort then gets its own match via plzOrtRE).
-	streetRE = regexp.MustCompile(`\b(?:(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+(?:\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+\s+)*(?:Straße|Strasse|Str\.|Str\b|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:straße|strasse|str\.|str\b|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile|pfad|steig|gäßchen|gaesschen)))\s+\d+[a-zA-Z]?(?:\s*[-/]\s*\d{1,4}[a-zA-Z]?)?\b`)
+	streetRE = regexp.MustCompile(streetPattern)
 
 	// plzOrtRE matches German postal code + city (e.g. "10115 Berlin", "80331 München").
 	// The "am"/"an der" suffix is generic (any capitalized word, matching
 	// ts_common.py's parity behavior, e.g. "12345 Musterstadt am Fluss"); "im"/"ob
 	// der" stay a fixed list so "10115 Berlin im Brief." still leaves "im Brief"
 	// unmasked (typesafe_test.go TestMaskAddresses).
-	plzOrtRE = regexp.MustCompile(`\b\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+(?:\s+(?:(?:am|an der)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+|im Breisgau|ob der Tauber))?\b`)
+	plzOrtRE = regexp.MustCompile(plzOrtPattern)
 )
 
 const ibanPattern = `[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}`
@@ -93,60 +105,6 @@ type MaskCounts struct {
 
 func isASCIIAlnum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
-}
-
-// replaceBounded replaces the matches of re that pass ok(prev, next), the runes
-// before and after the match (utf8.RuneError at the text edges). A rejected match
-// is retried one rune later, as a lookbehind would.
-func replaceBounded(text string, re *regexp.Regexp, ok func(prev, next rune) bool, repl func(m string) string) string {
-	return replaceBoundedShrink(text, re, nil, ok, repl)
-}
-
-// replaceBoundedShrink is replaceBounded for a greedy pattern: when the rune after
-// a match fails ok, the end steps back while full still matches the shorter text,
-// as Python backtracks before a lookahead ("DE89 ... 00 Bank" ends before " B").
-func replaceBoundedShrink(text string, re, full *regexp.Regexp, ok func(prev, next rune) bool, repl func(m string) string) string {
-	var b strings.Builder
-	pos, done := 0, 0
-	for pos <= len(text) {
-		loc := re.FindStringIndex(text[pos:])
-		if loc == nil {
-			break
-		}
-		s, e := pos+loc[0], pos+loc[1]
-		prev, next := utf8.RuneError, utf8.RuneError
-		if s > 0 {
-			prev, _ = utf8.DecodeLastRuneInString(text[:s])
-		}
-		if e < len(text) {
-			next, _ = utf8.DecodeRuneInString(text[e:])
-		}
-		if e > s && !ok(prev, next) && full != nil {
-			for e2 := e - 1; e2 > s; e2-- {
-				if !utf8.RuneStart(text[e2]) {
-					continue
-				}
-				n2, _ := utf8.DecodeRuneInString(text[e2:])
-				if full.MatchString(text[s:e2]) && ok(prev, n2) {
-					e, next = e2, n2
-					break
-				}
-			}
-		}
-		if e > s && ok(prev, next) {
-			b.WriteString(text[done:s])
-			b.WriteString(repl(text[s:e]))
-			done, pos = e, e
-			continue
-		}
-		_, size := utf8.DecodeRuneInString(text[s:])
-		if size == 0 {
-			break
-		}
-		pos = s + size
-	}
-	b.WriteString(text[done:])
-	return b.String()
 }
 
 // getNamesFilePath resolves the path to the names file:
@@ -242,36 +200,56 @@ func loadNames(filePath string) []string {
 // call. It is refreshed when the path, size or modification time changes.
 var nameRegexCache struct {
 	sync.Mutex
-	path string
-	size int64
-	mod  time.Time
-	res  []*regexp.Regexp
-	ok   bool
+	path     string
+	size     int64
+	mod      time.Time
+	res      []*regexp.Regexp
+	matchers []nameMatcher // nil if a name is not valid UTF-8: then the regexps are used
+	ok       bool
 }
 
 // nameRegexps returns one case-insensitive, word-bounded pattern per name of
-// the names file, longest name first (the order loadNames gives).
-func nameRegexps() []*regexp.Regexp {
+// the names file, longest name first (the order loadNames gives), and the
+// same as literal matchers (nil when a name is not valid UTF-8).
+func nameRegexps() ([]*regexp.Regexp, []nameMatcher) {
 	path := getNamesFilePath()
 	if path == "" {
-		return nil
+		return nil, nil
 	}
 	st, err := os.Stat(path)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	c := &nameRegexCache
 	c.Lock()
 	defer c.Unlock()
 	if c.ok && c.path == path && c.size == st.Size() && c.mod.Equal(st.ModTime()) {
-		return c.res
+		return c.res, c.matchers
 	}
 	var res []*regexp.Regexp
+	var matchers []nameMatcher
+	valid := true
 	for _, name := range loadNames(path) {
 		res = append(res, regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(name)+`\b`))
+		valid = valid && utf8.ValidString(name)
+		if valid {
+			matchers = append(matchers, newNameMatcher(name))
+		}
 	}
-	c.path, c.size, c.mod, c.res, c.ok = path, st.Size(), st.ModTime(), res, true
-	return res
+	if !valid {
+		matchers = nil
+	}
+	c.path, c.size, c.mod, c.res, c.matchers, c.ok = path, st.Size(), st.ModTime(), res, matchers, true
+	return res, matchers
+}
+
+// maskLapFn, set only by the profile test, is told when a masking step ends.
+var maskLapFn func(step string)
+
+func maskLap(step string) {
+	if maskLapFn != nil {
+		maskLapFn(step)
+	}
 }
 
 // MaskDetail redacts sensitive patterns in text before transmission, in the same
@@ -282,7 +260,7 @@ func MaskDetail(text string) (string, MaskCounts) {
 	var counts MaskCounts
 
 	// 1. Bearer / Basic
-	text = bearerBasicRE.ReplaceAllStringFunc(text, func(m string) string {
+	text = maskBearer(text, func(m string) string {
 		sub := bearerBasicRE.FindStringSubmatch(m)
 		if len(sub) >= 3 {
 			if sub[2] == "<redacted>" {
@@ -294,9 +272,10 @@ func MaskDetail(text string) (string, MaskCounts) {
 		counts.SecretKW++
 		return "<redacted>"
 	})
+	maskLap("bearer")
 
 	// 2. Secret keywords with = or :; a quoted value is masked as a whole.
-	text = secretKWRE.ReplaceAllStringFunc(text, func(m string) string {
+	text = maskSecretKW(text, func(m string) string {
 		sub := secretKWRE.FindStringSubmatch(m)
 		if len(sub) < 3 {
 			counts.SecretKW++
@@ -318,52 +297,84 @@ func MaskDetail(text string) (string, MaskCounts) {
 		counts.SecretKW++
 		return sub[1] + "<redacted>"
 	})
+	maskLap("secret_kw")
 
 	// 3. email
-	text = emailRE.ReplaceAllStringFunc(text, func(m string) string {
+	text = maskEmail(text, func(m string) string {
 		counts.Email++
 		return "<email>"
 	})
+	maskLap("email")
 
 	// 4. IBAN (no letter or digit directly before or after)
-	text = replaceBoundedShrink(text, ibanRE, ibanFullRE, func(prev, next rune) bool {
+	text = replaceBoundedFast(text, ibanAt, 64, ibanFullRE, ibanCand(text), notASCIIAlnum, func(prev, next rune) bool {
 		return !isASCIIAlnum(prev) && !isASCIIAlnum(next)
-	}, func(string) string {
+	}, false, func(string) string {
 		counts.IBAN++
 		return "<iban>"
 	})
+	maskLap("iban")
 
 	// 5. German phone numbers: +49 or a leading 0, then 8+ digits (no word
 	// character, "+" or "." directly before).
-	text = replaceBounded(text, phoneRE, func(prev, next rune) bool {
-		return !(unicode.IsLetter(prev) || unicode.IsDigit(prev) || prev == '_' || prev == '+' || prev == '.') &&
-			!unicode.IsDigit(next)
-	}, func(string) string {
+	phonePrevOK := func(prev rune) bool {
+		return !(unicode.IsLetter(prev) || unicode.IsDigit(prev) || prev == '_' || prev == '+' || prev == '.')
+	}
+	text = replaceBoundedFast(text, phoneAt, 0, nil, phoneCand(text), phonePrevOK, func(prev, next rune) bool {
+		return phonePrevOK(prev) && !unicode.IsDigit(next)
+	}, true, func(string) string {
 		counts.Phone++
 		return "<phone>"
 	})
+	maskLap("phone")
 
 	// 6. address: Straße + Hausnummer
-	text = streetRE.ReplaceAllStringFunc(text, func(m string) string {
+	text = maskStreet(text, func(m string) string {
 		counts.Address++
 		return "<address>"
 	})
+	maskLap("street")
 
 	// 7. address: PLZ + Ort
-	text = plzOrtRE.ReplaceAllStringFunc(text, func(m string) string {
+	text = maskPlzOrt(text, func(m string) string {
 		counts.Address++
 		return "<address>"
 	})
+	maskLap("plz")
 
 	// 8. names: from TYPESAFE_NAMES_FILE or ~/.config/typesafe/names.txt
 	// Case-insensitive to match ts_common.py's get_name_regex ((?i)), e.g.
 	// "max mustermann" lowercase must also be masked.
-	for _, re := range nameRegexps() {
-		text = re.ReplaceAllStringFunc(text, func(m string) string {
-			counts.Name++
-			return "<name>"
-		})
+	nameRepl := func(m string) string {
+		counts.Name++
+		return "<name>"
 	}
+	res, matchers := nameRegexps()
+	if matchers != nil && utf8.ValidString(text) {
+		// One ASCII-lower-cased copy serves every name until a name changes
+		// the text; names are replaced one after another, as before.
+		anchored := !strings.Contains(text, runeKelvin) && !strings.Contains(text, runeLongS)
+		lower := ""
+		for _, nm := range matchers {
+			if anchored && nm.anchor != "" {
+				if lower == "" {
+					lower = lowerASCII(text)
+				}
+				if next := nm.replaceAnchored(text, lower, nameRepl); next != text {
+					text, lower = next, ""
+				}
+				continue
+			}
+			if next := nm.replace(text, nameRepl); next != text {
+				text, lower = next, ""
+			}
+		}
+	} else {
+		for _, re := range res {
+			text = re.ReplaceAllStringFunc(text, nameRepl)
+		}
+	}
+	maskLap("names")
 
 	// 9. opaque: AWS key IDs and known token prefixes (not inside a word), then
 	// 24+ chars with at least one digit and one letter.
@@ -371,11 +382,14 @@ func MaskDetail(text string) (string, MaskCounts) {
 		counts.Opaque++
 		return "<redacted>"
 	}
-	text = replaceBounded(text, awsKeyIDRE, func(prev, next rune) bool {
+	text = replaceBoundedFast(text, awsKeyIDAt, 20, nil, awsCand(text), notASCIIAlnum, func(prev, next rune) bool {
 		return !isASCIIAlnum(prev) && !isASCIIAlnum(next)
-	}, opaque)
-	text = replaceBounded(text, knownTokenRE, func(prev, _ rune) bool { return !isASCIIAlnum(prev) }, opaque)
-	text = opaqueCandidateRE.ReplaceAllStringFunc(text, func(m string) string {
+	}, false, opaque)
+	maskLap("aws")
+	text = replaceBoundedFast(text, knownTokenAt, 0, nil, knownTokenCand(text), notASCIIAlnum,
+		func(prev, _ rune) bool { return !isASCIIAlnum(prev) }, false, opaque)
+	maskLap("known")
+	text = maskOpaque(text, func(m string) string {
 		hasDigit := false
 		hasLetter := false
 		for _, r := range m {
@@ -391,6 +405,7 @@ func MaskDetail(text string) (string, MaskCounts) {
 		}
 		return m
 	})
+	maskLap("opaque")
 
 	return text, counts
 }
@@ -825,11 +840,11 @@ func SkillSuggestionQuestion() Question {
 			"- session-handover: When closing or ending a session, handing over tasks, preparing wrap-up, context limit reached, committing final work, or saying goodbye ('that's it for today', 'Schluss für heute', 'Übergabe').\n" +
 			"- none: General coding, questions, refactoring, or tasks where none of the specialized imprint governance skills apply.",
 		Criteria: map[string]string{
-			"delegation-contract":     "Task delegation, subagents, reviews, agent arbitration, model choice",
-			"knowledge-keeping":       "Recording facts, decisions, provenance, memory notes, superseding facts",
+			"delegation-contract":      "Task delegation, subagents, reviews, agent arbitration, model choice",
+			"knowledge-keeping":        "Recording facts, decisions, provenance, memory notes, superseding facts",
 			"measure-before-asserting": "Verification before asserting, measuring properties, checking reality vs notes",
-			"session-handover":        "Closing session, handoff, committing runnable work, wrapping up",
-			"none":                    "No specific imprint skill applies",
+			"session-handover":         "Closing session, handoff, committing runnable work, wrapping up",
+			"none":                     "No specific imprint skill applies",
 		},
 	}
 }
