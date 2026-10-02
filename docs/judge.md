@@ -9,9 +9,9 @@
 | Gates | `done`, `foreign_return`, beide Hinweis (`warn`), `fail_mode: open` | gebaut; **in keinem Hook verdrahtet** |
 | Fragen, Schwellen, Fail-Modus | eine Datei, `tools/imprint-dev/judge/gates.json`, ins Binary eingebettet | gebaut; `TestEmbeddedRegistry` |
 | Modell | gepinnt `jev-1.13.0`, nie `jev-latest` | gebaut; `TestRegistryPinningAndVersion`; live 2026-10-02: API nennt `model: jev-1.13.0` |
-| Maskierung | erst kappen (mit Rand), dann maskieren, dann genau kappen; `PostState` maskiert jedes String-Blatt noch einmal | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestMaskCappedCutsAfterMasking` |
-| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage | gebaut; `TestJudgeDeadlineCoversBuild` (20 MB Werkzeugausgabe, 10.000 Aufrufe) |
-| Log | eine JSONL-Zeile je Aufruf, ohne Texte | gebaut; `TestJudgeLogOneLinePerCall` |
+| Maskierung | Fenster maskieren, mit 1024 maskierten Zeichen Abstand zum Fensterrand kappen; `PostState` maskiert jedes String-Blatt noch einmal | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestMaskCappedNoFragmentAtTheEdges` (640 Platzierungen), `TestMaskCappedProperty` (1000 Zufallsläufe) |
+| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage | gebaut; `TestJudgeDeadlineCoversBuild` (15 MB Werkzeugausgabe, 10.000 Aufrufe) |
+| Log | eine JSONL-Zeile je Aufruf, ohne Texte und ohne unbekannte Namen | gebaut; `TestJudgeLogOneLinePerCall`, `TestJudgeNeverEchoesUnknownNames` |
 | Durchsetzung | keine: kein Hook ruft `judge` | **nichts setzt hier etwas durch** |
 
 ```
@@ -58,7 +58,7 @@ imprint-dev version            # auch: imprint-dev --version
 
 | Flag | Bedeutung |
 |---|---|
-| `--gate`, `--host` | optional, wenn der Umschlag sie nennt; nennen beide etwas anderes: Verdikt mit `error_class: call` |
+| `--gate`, `--host` | `--gate` soll ein Adapter **immer** mitgeben (siehe Fail-Modus); nennen Flag und Umschlag etwas anderes: Verdikt mit `error_class: call` |
 | `--deadline-ms` | Gesamt-Deadline ab Start von `judge`, inkl. stdin, Gate-Code und Schlüsselsuche; ohne: die des Ereignisses aus `gates.json` |
 | `--no-ui` | niemand kann gefragt werden: ein kritisches Gate blockt nach einem Fehler, statt zu fragen |
 | `--source` | Feld `source` im Log; Tests und Messläufe setzen `test` bzw. `bench` |
@@ -71,7 +71,10 @@ imprint-dev version            # auch: imprint-dev --version
 - Umschlag: `{"host": "claude", "gate": "done", "payload": {…rohes Hook-JSON…}}`
 - rohes Hook-JSON des Hosts (so, wie ein einzeiliger Hook-Wrapper es durchreicht); dann ist `--gate` Pflicht.
 
-Höchstens 64 MB; mehr ist ein Eingabefehler.
+Höchstens 16 MB; mehr ist ein Eingabefehler (Verdikt, sofort). Speicher, gemessen 2026-10-02 mit
+`/usr/bin/time` (go1.27.1, Linux): 16 MB Fließtext als `tool_response` ≈ 62 MB RSS, 0,05 s; 16 MB aus
+920.000 kleinen JSON-Objekten ≈ 507 MB RSS, 0,7 s (`map[string]any` je Objekt). Mehr Struktur auf
+gleich vielen Bytes braucht mehr Speicher.
 
 Das Ereignis kommt aus `payload.hook_event_name`. Fehlt es und bedient das Gate nur ein Ereignis, gilt dieses.
 
@@ -102,16 +105,19 @@ nicht blockieren.
 | Exit | Wann | Verdikt, Logzeile |
 |---|---|---|
 | 0 | jedes Urteil, auch ein gescheitertes (`failed: true`) | ja |
-| 0 | Aufruf- oder Eingabefehler: Gate, Host, Ereignis, `--emit`, `--source`, `--endpoint`, `--deadline-ms` (`error_class: call`); stdin unlesbar, über 64 MB, kein JSON-Objekt (auch: tiefer als 10.000 Ebenen), kein `hook_event_name` bei mehreren Ereignissen (`error_class: input`) | ja; der `fail_mode` des Gates entscheidet; ist das Gate nicht bestimmbar (fehlt, unbekannt, Flag und Umschlag widersprechen sich, Registry unlesbar), gilt es als Hinweis-Gate: `allow` |
-| 1 | kein Urteil fällig: Flag nicht lesbar, überzähliges Argument, `--list`/`--version` ohne lesbare Registry, stdout nicht schreibbar | nein |
+| 0 | Aufruf- oder Eingabefehler: Gate, Host, Ereignis, `--emit`, `--source`, `--endpoint`, `--deadline-ms` (`error_class: call`); stdin unlesbar, über 16 MB, kein JSON-Objekt (auch: tiefer als 10.000 Ebenen), kein `hook_event_name` bei mehreren Ereignissen (`error_class: input`) | ja; welches Gate entscheidet, steht unter Fail-Modus |
+| 1 | kein Urteil fällig: Flag nicht lesbar, überzähliges Argument, `--list`/`--version` ohne lesbare Registry, stdout nicht schreibbar | kein Verdikt; eine minimale Logzeile (`error_class: usage`, `exit_code: 1`, kein Feld aus dem Payload), wo das Log schreibbar ist |
 
 Ein Gate, das bei einem Ereignis aufgerufen wird, das es nicht bedient (z. B. `done` an SubagentStop),
 nimmt für seinen Fail-Modus, was irgendeines seiner Ereignisse kann.
 
-**Wrapper.** Ein einzeiliger Wrapper wie heute (`command -v imprint-dev >/dev/null 2>&1 || exit 0; exec
-imprint-dev judge …`) reicht 0 und 1 durch; beide blockieren in Claude Code nicht (Hooks-Doku hier
-**nicht geprüft**). Für ein kritisches Gate passt das `|| exit 0` nicht: fehlt `imprint-dev`, wäre das
-Gate offen. Was ein solcher Wrapper dann ausgibt, ist offen (siehe unten).
+**Wrapper und Adapter.** Ein Adapter gibt immer `--gate` mit: nur dann entscheidet bei jedem Fehler
+der Fail-Modus des gemeinten Gates. Ein einzeiliger Wrapper wie heute (`command -v imprint-dev
+>/dev/null 2>&1 || exit 0; exec imprint-dev judge --gate …`) reicht 0 und 1 durch; beide blockieren in
+Claude Code nicht (Hooks-Doku hier **nicht geprüft**). Das passt für Hinweis-Gates. Ein Wrapper für ein
+**kritisches** Gate muss jeden Exit ungleich 0, ein fehlendes oder unlesbares Verdikt und ein fehlendes
+`imprint-dev` selbst als Fehlschlag behandeln und dann fragen (`ask`), ohne Person blocken (`block`);
+`|| exit 0` wäre dort offen. Einen solchen Wrapper gibt es noch nicht.
 
 ## Fail-Modus
 
@@ -126,7 +132,17 @@ Gescheitert heißt: kein Schlüssel, Timeout, Netzfehler, HTTP ≠ 200 (auch ein
 gefolgt), Antwort kein JSON, eine Frage ohne Antwort, oder ein interner Fehler im Gate-Code. Ein
 kritisches Verdikt nach einem Fehler trägt den Grund `core_failed`.
 
-In Stufe 1 ist kein Gate kritisch. Die Tests prüfen den kritischen Pfad mit einer Test-Registry.
+**Welches Gate entscheidet** bei einem Aufruf- oder Eingabefehler:
+
+| Lage | Fail-Modus von |
+|---|---|
+| `--gate` nennt ein Gate der Registry | diesem Gate, immer (auch wenn der Umschlag etwas anderes sagt) |
+| kein bekanntes `--gate`, aber ein bekanntes Gate im Umschlag, ohne Widerspruch | diesem Gate |
+| Gate nicht bestimmbar, die Registry hat kritische Gates | dem strengsten Ergebnis, das das Ereignis über die kritischen Gates erlaubt (die es bedienen, sonst alle): `ask`, sonst `block`, sonst `warn`; nie `allow` |
+| Gate nicht bestimmbar, kein kritisches Gate in der Registry (heute so) | offen: `allow` |
+
+In Stufe 1 ist kein Gate kritisch. Die Tests prüfen den kritischen Pfad mit einer Test-Registry
+(`TestJudgeFailModeTable`, `TestJudgeFailModeWhenTheGateIsUnclear`).
 Nicht in diesem Binary geregelt: was passiert, wenn `imprint-dev` fehlt oder der Host es tötet. Die
 heutigen Wrapper (`hooks/*.sh`) beenden sich dann mit 0, also offen.
 
@@ -142,14 +158,22 @@ entscheidet die Person; heute gilt `block`.
 | `done` | Stop | `claim`, `backed` | `claim>=0.7 && (!local_evidence \|\| backed<=0.5)` → `warn` | 1:1 aus `ts-done-check` (typesafe-dev 8b80f48): Fragen, Schwellen, `CLAIM_RE`, `local_evidence`, letzte 15 Aufrufe, Bash-Befehl ≤ 200 Zeichen, Nachricht: letzte 4000 Zeichen. Einziger Unterschied: `warn` statt `block` |
 | `foreign_return` | PostToolUse (`tool_response`), SubagentStop (`last_assistant_message`) | `instruction_to_agent`, `exfil_request` | je ≥ 0.35 → `warn` | Fragen aus Konzept B §4.2; Schwelle 0.35 laut Konzept B aus dem llm_guardrails-Cookbook, hier nicht nachgelesen; Text ≥ 15 Zeichen; über 8000 Zeichen gehen Anfang und Ende (je knapp 4000, getrennt durch `[…]`) |
 
-Grenze von `foreign_return`: Die String-Blätter eines Objekts werden nach Schlüssel sortiert
-verbunden. Was nur in der Mitte eines Textes über 8000 Zeichen steht, sieht Jev nicht
-(`TestForeignReturnSeesTheTail` prüft das Ende hinter 10 kB Füllung).
+**Grenze von `foreign_return` in Stufe 1:** Die String-Blätter eines Objekts werden nach Schlüssel
+sortiert verbunden. Was nur in der Mitte eines Textes über 8000 Zeichen steht, sieht Jev nicht
+(`TestForeignReturnSeesTheTail` prüft das Ende hinter 10 kB Füllung). Bewusst nicht umgebaut.
 
-**Kappen und Maskieren.** Jedes Textfeld wird zuerst mit 1024 Zeichen Rand gekappt, dann maskiert,
-dann genau gekappt. So wächst die Arbeit nicht mit der Eingabe, und ein Geheimnis, durch das der erste
-Schnitt läuft, ist maskiert, bevor der zweite Schnitt den Rand abwirft (gilt für Geheimnisse bis 1024
-Zeichen). `done` maskiert nur die Befehle der letzten 15 Aufrufe. Die kompilierten Namensmuster
+**Kappen und Maskieren.** Maskiert wird nur ein Fenster vom geschnittenen Ende her, nicht der ganze
+Text: zuerst `cap + 1024` Zeichen. Wo der Fensterrand ein Geheimnis zerschneidet, passt das Bruchstück
+auf kein Muster mehr und bleibt unmaskiert; es liegt dann in den letzten Zeichen des maskierten
+Fensters. Deshalb behält der Schnitt höchstens `min(cap, maskierte Länge − 1024)` Zeichen, also immer
+1024 **maskierte** Zeichen Abstand zum Fensterrand. Schrumpft das Fenster beim Maskieren unter
+`cap + 1024` (lange Tokens, UUIDs, Hashes werden zu `<redacted>`), wächst es (mindestens doppelt, höchstens
+16-fach); reicht auch das nicht, gehen weniger als `cap` Zeichen hinaus. Ein Text bis `2 × (cap + 1024)`
+Zeichen wird ganz maskiert. Garantie: kein Bruchstück eines Geheimnisses bis 1024 Zeichen Länge;
+geprüft mit JWT-, base64-, UUID- und Lockfile-Füllung und Geheimnissen genau an jedem Fensterrand
+(`TestMaskCappedNoFragmentAtTheEdges`) und 1000 Zufallsläufen (`TestMaskCappedProperty`): kein
+Teilstück von 4 Zeichen eines Geheimnisses im Ergebnis. Messung 2026-10-02: Maskieren kostet rund 0,7 µs
+je Zeichen (144.000 Zeichen base64: 118 ms). `done` maskiert nur die Befehle der letzten 15 Aufrufe. Die kompilierten Namensmuster
 (`TYPESAFE_NAMES_FILE`) bleiben je Prozess im Speicher, bis sich die Datei ändert. Fragen gehen in der
 Reihenfolge der Registry hinaus (`done`: `claim`, dann `backed`, wie `ts-done-check`).
 
@@ -178,10 +202,15 @@ Pfad: `$IMPRINT_JUDGE_LOG`, sonst `${XDG_STATE_HOME:-~/.local/state}/imprint/jud
 Aufruf mit Verdikt (auch wenn Code allein entschied oder der Aufruf scheiterte). Felder: `ts` (UTC),
 `source`, `host`, `gate`, `event`, `session` (SHA-256 der Sitzungs-ID, 16 Hex-Zeichen),
 `registry_version`, `core_version`, `model`, `verdict`, `reasons`, `scores`, `code_flags`, `prefilter`,
-`mask_counts`, `latency_ms`, `latency_parts_ms`, `fail_mode`, `failed`, `error_class`, `no_ui`.
-Nie im Log: State, Prompt, Dateiinhalt, Nachricht, Befehl, Schlüssel. `mask_counts` zählt die
-Platzhalter im gesendeten Request (`<email>`, `<redacted>` …), nicht was eine Kappung verworfen hat;
-ohne Request ist es 0. Auch Aufruf- und Eingabefehler schreiben eine Zeile.
+`mask_counts`, `latency_ms`, `latency_parts_ms`, `fail_mode`, `failed`, `error_class`, `no_ui`, und nur
+wenn gesetzt `unknown_gate`, `unknown_event`, `unknown_host`, `exit_code`.
+Nie im Log: State, Prompt, Dateiinhalt, Nachricht, Befehl, Schlüssel. `gate`, `event` und `host` stehen
+in Log und Verdikt nur, wenn die Registry bzw. `judge` sie kennt; ein unbekannter Name wird leer
+geschrieben und `unknown_gate`/`unknown_event`/`unknown_host` gesetzt (der Name selbst könnte alles
+sein, auch personenbezogen). `mask_counts` zählt die Platzhalter im gesendeten Request (`<email>`,
+`<redacted>` …), nicht was eine Kappung verworfen hat; ohne Request ist es 0. Steht ein Platzhalter
+schon wörtlich in der Eingabe, zählt er mit (nicht behoben). Auch Aufruf- und Eingabefehler schreiben
+eine Zeile, Exit-1-Fälle eine minimale.
 
 ## Version
 
