@@ -1279,6 +1279,9 @@ func TestPrePushToolchains(t *testing.T) {
 	// The list of encodings read in full (53), under each awk's regex.
 	encReadTip := r.rawCommit(objHead + "encoding ISO-8859-1\n\nencread: a clean subject\n")
 	encUnreadTip := r.rawCommit(objHead + "encoding UTF-7\n\nencunread: a clean subject\n")
+	// A real NUL and a \001 of the commit's own, told apart by cmp.
+	encNulTip := r.rawCommit(objHead + "encoding ISO-8859-1\n\nencnul: a clean subject\n\nx\x00 y\n")
+	encCtlTip := r.rawCommit(objHead + "encoding ISO-8859-1\n\nencctl: a \x01 control character\n")
 	r.git("checkout", "-q", "-b", "tc-side", "main")
 	r.write("tc-side.txt", "a clean line\n")
 	tcSide := r.commit("tc-side: one clean commit")
@@ -1372,6 +1375,11 @@ func TestPrePushToolchains(t *testing.T) {
 				code, out = c.hookNewBranch("encunread", encUnreadTip)
 				ppWantRefused(t, code, out, "unread encoding: commit "+encUnreadTip+" names the encoding \"UTF-7\"")
 				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("encnul", encNulTip)
+				ppWantRefused(t, code, out, "unread encoding: commit "+encNulTip+" names the encoding \"ISO-8859-1\" and holds a NUL byte")
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("encctl", encCtlTip)
+				ppWantPass(t, code, out)
 				code, out = c.hookNewBranch("merge-tc-mtdeclared", mtDeclared)
 				ppWantPass(t, code, out)
 				code, out = c.hookNewBranch("merge-tc-mtstranger", mtStranger, "LC_ALL=C.UTF-8")

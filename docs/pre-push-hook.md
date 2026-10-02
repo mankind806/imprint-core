@@ -97,9 +97,10 @@ stored, encoding line and all (*both measured with git 2.55.0, 2026-10-02*). `gi
 writes no NUL, but it does store a name as UTF-8 under whatever encoding
 `i18n.commitEncoding` names: with windows-1252, a `user.name` whose UTF-8 bytes include one
 that windows-1252 leaves undefined — 0x81, 0x8D, 0x8F, 0x90 or 0x9D, as in `Ł`, `Á` or `Í` —
-makes every commit such a finding, while `ł` or `ö` do not (*measured with git 2.55.0,
-2026-10-02*). UTF-8 as the commit encoding avoids it. This is the hook's choice of list, made
-2026-10-02, and a name can be added once its conversion is shown to keep to that rule.
+makes every commit such a finding, while `ł` or `ö` do not, and with US-ASCII any name
+outside ASCII does (*measured with git 2.55.0, 2026-10-02*). UTF-8 as the commit encoding
+avoids it. This is the hook's choice of list, made 2026-10-02, and a name can be added once
+its conversion is shown to keep to that rule.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
