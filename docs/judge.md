@@ -118,21 +118,28 @@ der Fail-Modus des gemeinten Gates. Ein einzeiliger Wrapper wie heute (`command 
 >/dev/null 2>&1 || exit 0; exec imprint-dev judge --gate …`) reicht 0 und 1 durch; beide blockieren in
 Claude Code nicht (Hooks-Doku hier **nicht geprüft**). Das passt für Hinweis-Gates. Ein Wrapper für ein
 **kritisches** Gate muss jeden Exit ungleich 0, ein fehlendes oder unlesbares Verdikt und ein fehlendes
-`imprint-dev` selbst als Fehlschlag behandeln und dann fragen (`ask`), ohne Person blocken (`block`);
+`imprint-dev` selbst als Fehlschlag behandeln und dann tun, was die Tabelle unter Fail-Modus für ein
+kritisches Gate sagt (fragen, ohne Person blocken, wo das Ereignis fragen kann; sonst warnen);
 `|| exit 0` wäre dort offen. Einen solchen Wrapper gibt es noch nicht.
 
 ## Fail-Modus
 
-Entscheid der Person vom 2026-10-02 (löst die offene Frage in `jev-kern.md` §6/§10 auf):
+Entscheide der Person vom 2026-10-02 (der erste löst die offene Frage in `jev-kern.md` §6/§10; der
+zweite die Frage, was ein kritisches Gate an Stop tut):
 
-| Gate | Aufruf gescheitert, Person fragbar | … niemand fragbar (`--no-ui`, oder Ereignis kann nicht fragen) | … Ereignis kann weder fragen noch blocken |
+| Gate, Aufruf gescheitert | Ereignis kann fragen, eine Person ist da (PreToolUse) | Ereignis kann fragen, niemand da (`--no-ui`) | Ereignis kann nicht fragen (Stop, SubagentStop, PostToolUse, UserPromptSubmit) |
 |---|---|---|---|
 | Hinweis-Gate (`fail_mode: open`) | `allow` | `allow` | `allow` |
-| kritisches Gate (`fail_mode: closed`) | `ask` | `block` | `warn` |
+| kritisches Gate (`fail_mode: closed`) | `ask` | `block` (blocken hält dort die Aktion an) | `warn`: „Jev-Kern ausgefallen, nicht geprüft“ |
+
+Warum `warn` an Stop: `block` an Stop hieße, der Agent arbeitet weiter, ohne dass eine Person prüft; der
+Hinweis sagt stattdessen, dass nicht geprüft wurde. Kann ein Ereignis fragen, aber nicht blocken, gilt
+ohne Person ebenfalls `warn`.
 
 Gescheitert heißt: kein Schlüssel, Timeout, Netzfehler, HTTP ≠ 200 (auch eine Umleitung; ihr wird nie
-gefolgt), Antwort kein JSON, eine Frage ohne Antwort, oder ein interner Fehler im Gate-Code. Ein
-kritisches Verdikt nach einem Fehler trägt den Grund `core_failed`.
+gefolgt), Antwort kein JSON, eine Frage ohne Antwort, ein interner Fehler im Gate-Code, oder ein
+Aufruf- bzw. Eingabefehler. Ein kritisches Verdikt nach einem Fehler trägt den Grund `core_failed` und
+eine Meldung, die mit „Jev-Kern ausgefallen, nicht geprüft“ beginnt.
 
 **Welches Gate entscheidet** bei einem Aufruf- oder Eingabefehler:
 
@@ -140,18 +147,13 @@ kritisches Verdikt nach einem Fehler trägt den Grund `core_failed`.
 |---|---|
 | `--gate` nennt ein Gate der Registry | diesem Gate, immer (auch wenn der Umschlag etwas anderes sagt) |
 | kein bekanntes `--gate`, aber ein bekanntes Gate im Umschlag, ohne Widerspruch | diesem Gate |
-| Gate nicht bestimmbar, die Registry hat kritische Gates | dem strengsten Ergebnis, das das Ereignis über die kritischen Gates erlaubt (die es bedienen, sonst alle): `ask`, sonst `block`, sonst `warn`; nie `allow` |
+| Gate nicht bestimmbar, die Registry hat kritische Gates | der Regel für kritische Gates, über das, was das Ereignis bei den kritischen Gates erlaubt (die es bedienen, sonst alle): fragen kann es → `ask`, ohne Person `block`; sonst `warn`; nie `allow` |
 | Gate nicht bestimmbar, kein kritisches Gate in der Registry (heute so) | offen: `allow` |
 
 In Stufe 1 ist kein Gate kritisch. Die Tests prüfen den kritischen Pfad mit einer Test-Registry
 (`TestJudgeFailModeTable`, `TestJudgeFailModeWhenTheGateIsUnclear`).
 Nicht in diesem Binary geregelt: was passiert, wenn `imprint-dev` fehlt oder der Host es tötet. Die
 heutigen Wrapper (`hooks/*.sh`) beenden sich dann mit 0, also offen.
-
-**Offene Frage an die Person:** Ein kritisches Gate am Stop-Ereignis blockt nach einem Fehler, weil
-Stop nicht fragen kann. `block` bei Stop heißt aber: der Agent arbeitet weiter, statt dass eine Person
-gefragt wird. Ob das gewollt ist oder ein kritisches Gate an Stop nach einem Fehler nur warnen soll,
-entscheidet die Person; heute gilt `block`.
 
 ## Gates in Stufe 1
 

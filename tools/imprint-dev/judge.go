@@ -360,24 +360,30 @@ func (g *Gate) downgrade(event, verdict string) string {
 }
 
 // failVerdict is the verdict after a failed call (no key, timeout, network,
-// HTTP status, parse, missing answer, internal error). Owner decision
-// 2026-10-02: an open (advisory) gate allows; a closed (critical) gate asks
-// the person, or blocks where nobody can be asked (--no-ui, or an event where
-// the host cannot ask); where it can do neither, it warns.
+// HTTP status, parse, missing answer, internal error, call or input error).
+// Owner decisions of 2026-10-02: an open (advisory) gate allows. A closed
+// (critical) gate, at an event where the host can ask a person, asks; with
+// nobody to ask (--no-ui) it blocks there, since blocking stops the action
+// (PreToolUse). At an event where the host cannot ask (Stop, SubagentStop,
+// PostToolUse) it warns: blocking at Stop would only make the agent go on,
+// with no person checking.
 func (g *Gate) failVerdict(event string, noUI bool) string {
 	if g.FailMode != failModeClosed {
 		return verdictAllow
 	}
-	chain := []string{verdictAsk, verdictBlock, verdictWarn}
-	if noUI {
-		chain = []string{verdictBlock, verdictWarn}
+	return closedFailVerdict(g.allows(event, verdictAsk), g.allows(event, verdictBlock), noUI)
+}
+
+// closedFailVerdict applies that rule to what the event allows.
+func closedFailVerdict(canAsk, canBlock, noUI bool) string {
+	switch {
+	case canAsk && !noUI:
+		return verdictAsk
+	case canAsk && canBlock:
+		return verdictBlock
+	default:
+		return verdictWarn
 	}
-	for _, v := range chain {
-		if g.allows(event, v) {
-			return v
-		}
-	}
-	return verdictWarn
 }
 
 func failMessage(gate, class, verdict string) string {
@@ -386,11 +392,11 @@ func failMessage(gate, class, verdict string) string {
 	}
 	switch verdict {
 	case verdictAsk:
-		return fmt.Sprintf("imprint judge: Die Prüfung %q konnte nicht laufen (%s). Das Gate ist kritisch: bitte selbst bestätigen.\n(imprint judge: the check %q could not run (%s). This gate is critical: please confirm yourself.)", gate, class, gate, class)
+		return fmt.Sprintf("imprint judge: Jev-Kern ausgefallen, nicht geprüft (Gate %q, %s). Das Gate ist kritisch: bitte selbst bestätigen.\n(imprint judge: Jev core failed, not checked (gate %q, %s). This gate is critical: please confirm yourself.)", gate, class, gate, class)
 	case verdictBlock:
-		return fmt.Sprintf("imprint judge: Die Prüfung %q konnte nicht laufen (%s). Das Gate ist kritisch und niemand kann gefragt werden: blockiert.\n(imprint judge: the check %q could not run (%s). This gate is critical and nobody can be asked: blocked.)", gate, class, gate, class)
+		return fmt.Sprintf("imprint judge: Jev-Kern ausgefallen, nicht geprüft (Gate %q, %s). Das Gate ist kritisch und niemand kann gefragt werden: blockiert.\n(imprint judge: Jev core failed, not checked (gate %q, %s). This gate is critical and nobody can be asked: blocked.)", gate, class, gate, class)
 	default:
-		return fmt.Sprintf("imprint judge: Die Prüfung %q konnte nicht laufen (%s). Das Gate ist kritisch; dieses Ereignis kann weder fragen noch blockieren.\n(imprint judge: the check %q could not run (%s). This gate is critical; this event can neither ask nor block.)", gate, class, gate, class)
+		return fmt.Sprintf("imprint judge: Jev-Kern ausgefallen, nicht geprüft (Gate %q, %s). Das Gate ist kritisch; hier kann niemand gefragt werden: bitte selbst prüfen.\n(imprint judge: Jev core failed, not checked (gate %q, %s). This gate is critical; nobody can be asked here: please check yourself.)", gate, class, gate, class)
 	}
 }
 
@@ -774,9 +780,10 @@ func (r *judgeRun) callFailure(name string, g *Gate, event, class, format string
 
 // strictFallback is the verdict for a failed call whose gate cannot be told,
 // when the registry has closed (critical) gates: it might have been one of
-// them, so the strictest verdict the event allows across the closed gates
-// (those serving the event, else all of them) — ask, else block, else warn,
-// never allow. ok is false when the registry has no closed gate.
+// them, so the closed-gate rule (closedFailVerdict) over what the event
+// allows across the closed gates (those serving the event, else all of them):
+// ask where a person can be asked, block there without one, else warn; never
+// allow. ok is false when the registry has no closed gate.
 func strictFallback(reg *Registry, event string, noUI bool) (verdict string, ok bool) {
 	if reg == nil {
 		return verdictAllow, false
@@ -800,20 +807,17 @@ func strictFallback(reg *Registry, event string, noUI bool) (verdict string, ok 
 	if len(lists) == 0 {
 		lists = all
 	}
-	chain := []string{verdictAsk, verdictBlock, verdictWarn}
-	if noUI {
-		chain = []string{verdictBlock, verdictWarn}
-	}
-	for _, v := range chain {
+	has := func(v string) bool {
 		for _, l := range lists {
 			for _, x := range l {
 				if x == v {
-					return v, true
+					return true
 				}
 			}
 		}
+		return false
 	}
-	return verdictWarn, true
+	return closedFailVerdict(has(verdictAsk), has(verdictBlock), noUI), true
 }
 
 // usageExit writes the minimal log line of a call that gets no verdict (exit
