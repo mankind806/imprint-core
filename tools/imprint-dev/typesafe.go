@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -236,6 +237,43 @@ func loadNames(filePath string) []string {
 	return names
 }
 
+// nameRegexCache holds the compiled name patterns of one names file, so that
+// MaskDetail does not read the file and compile one regex per name on every
+// call. It is refreshed when the path, size or modification time changes.
+var nameRegexCache struct {
+	sync.Mutex
+	path string
+	size int64
+	mod  time.Time
+	res  []*regexp.Regexp
+	ok   bool
+}
+
+// nameRegexps returns one case-insensitive, word-bounded pattern per name of
+// the names file, longest name first (the order loadNames gives).
+func nameRegexps() []*regexp.Regexp {
+	path := getNamesFilePath()
+	if path == "" {
+		return nil
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	c := &nameRegexCache
+	c.Lock()
+	defer c.Unlock()
+	if c.ok && c.path == path && c.size == st.Size() && c.mod.Equal(st.ModTime()) {
+		return c.res
+	}
+	var res []*regexp.Regexp
+	for _, name := range loadNames(path) {
+		res = append(res, regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(name)+`\b`))
+	}
+	c.path, c.size, c.mod, c.res, c.ok = path, st.Size(), st.ModTime(), res, true
+	return res
+}
+
 // MaskDetail redacts sensitive patterns in text before transmission, in the same
 // order as ts_common.py MASK_RES: secret_kw (bearer/basic, keywords), email, iban,
 // phone, address (street, PLZ+Ort), name, opaque (AWS key IDs, known token
@@ -320,14 +358,11 @@ func MaskDetail(text string) (string, MaskCounts) {
 	// 8. names: from TYPESAFE_NAMES_FILE or ~/.config/typesafe/names.txt
 	// Case-insensitive to match ts_common.py's get_name_regex ((?i)), e.g.
 	// "max mustermann" lowercase must also be masked.
-	if names := loadNames(getNamesFilePath()); len(names) > 0 {
-		for _, name := range names {
-			re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
-			text = re.ReplaceAllStringFunc(text, func(m string) string {
-				counts.Name++
-				return "<name>"
-			})
-		}
+	for _, re := range nameRegexps() {
+		text = re.ReplaceAllStringFunc(text, func(m string) string {
+			counts.Name++
+			return "<name>"
+		})
 	}
 
 	// 9. opaque: AWS key IDs and known token prefixes (not inside a word), then
