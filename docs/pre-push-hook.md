@@ -20,6 +20,40 @@ messages are checked alongside the added lines, since a message is as public as 
 trailers are where addresses ride in. A committer may also be GitHub's web-flow identity, the
 one a merge through the web UI records; as an author it is still undeclared.
 
+Every shape is matched twice, under your own locale and under `C`, and a line either match
+finds is a finding. The patterns hold characters outside ASCII, which takes your locale; but
+a byte that is not valid in your locale's encoding matches no bracket expression there, not
+even `[^0-9]`, and such bytes do arrive: a file is stored as it was written, a commit made by
+a tool other than git's own commands can keep them in its message, and a tag object is raw
+bytes. A Latin-1 no-break space right before a phone number hid it from a UTF-8 locale and not
+from `C` (*measured with GNU grep 3.12, 2026-10-01*). Commit messages and the author and
+committer identities are read with `git log --encoding=UTF-8`. Without that flag git
+re-encodes what it prints into `i18n.logOutputEncoding`, or into `i18n.commitEncoding` when
+that is unset. Set to Latin-1, either one hid a postcode before a place that starts with an
+umlaut from both matches, and made a declared name outside ASCII read as undeclared
+(*measured with git 2.55.0, 2026-10-01*). The flag has a cost of its own: git converts from
+whatever encoding a commit's header names, and the header can be wrong. With
+`i18n.commitEncoding` set to Latin-1 and UTF-8 typed in, `git commit` writes UTF-8 under a
+Latin-1 header, and the conversion turns the same umlaut into two characters that neither
+match finds. `git log --format` converts even under `--encoding=none`, so a commit whose header
+names an encoding other than UTF-8 is also read straight from its object: its message is
+matched as stored too, and its author or committer counts as declared when either reading
+does — the stored one only when the header holds a single line for that role, since git shows
+the last of several (*measured with git 2.55.0, 2026-10-01*). A tag object is read byte for
+byte throughout, so a tagger whose name is stored in Latin-1 is read as written.
+
+An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
+a declared identity, as an author has to, and a tag that names no tagger is a finding.
+Everything else in the tag object is checked against the same shapes: the message, a signature
+block, the tag's name, any other header line, and whatever follows the tagger's identity on its
+line. That includes a tag whose header never ends in an empty line, from which git itself reads
+no message although its bytes are published. A pushed ref is followed
+through every tag object it leads to, so the tags inside a nested tag are read as well as the
+outer one; where the chain ends in a commit, that commit's new history is checked as for any
+branch. A new tag on a commit the remote already has adds no commit, and its tag object is
+still read. Tags have no tracking refs, so a tag object the remote already holds is read again
+when it is pushed under another name or inside another tag.
+
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:
 
@@ -48,8 +82,9 @@ behind it. The hook says so itself, in every report it prints.
 It fails closed. Every way it can fail to finish — a git command that errors, an identity
 this clone never set, a temporary directory it cannot create, a line of its own report it
 cannot write down on a full disk — ends in a refused push, because a gate that waves you
-through when it breaks is indistinguishable from one that checked. One empty case is not such a failure and took a refused push to find: git runs the
-hook even when the remote is already up to date, and pipes in an empty ref list. Nothing is
+through when it breaks is indistinguishable from one that checked. One empty case is not
+such a failure and took a refused push to find: git runs the hook even when the remote is
+already up to date, and pipes in an empty ref list. Nothing is
 published in that run, so there is nothing to check, and the hook says so and lets it
 through — but only when git is the one calling, which is a hook invoked with a remote name
 and location and handed a pipe rather than a terminal. An empty list from anything else is
@@ -89,10 +124,25 @@ the URL they were fetched from: with a `pushurl`, a `pushInsteadOf` or a second 
 remote, git hands the hook another location, and then everything the remote's old tip does
 not reach is checked, as for a push to a location.
 
-Some of what a push publishes is not read at all: the message and tagger of an annotated tag,
-and a ref that points straight at a blob or a tree. And the hook diffs lines, with no copy
-detection, so lines copied or moved into another file are reported again even though they are
-already published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
+A ref that points straight at a blob or a tree, or at a tag that ends in one, is refused
+unread, as a finding. Git takes such a ref: a local bare repository accepted a blob under
+`refs/tags/` and a tree under a namespace of its own, and refused a blob under `refs/heads/`
+(*measured with git 2.55.0, 2026-10-01; what a hosted remote accepts was not checked*). A blob
+or a tree carries no history that would tell its new lines from published ones.
+`IMPRINT_PUSH_ANYWAY` with a reason is the way to push one on purpose (the owner's call,
+2026-10-01). The names of refs are not read at all: a branch name, or the name of a tag without
+a tag object, passes whatever it holds; an annotated tag's name is read only as a line of its
+tag object. Matching under `C` as well closes the gap for a byte next to a shape, not inside
+one: the patterns are written in UTF-8, so a place name spelled in Latin-1 still passes, and
+so does a phone number whose separator is a no-break space, in either encoding, since the
+pattern takes only a space, a slash or a hyphen there (*measured with GNU grep 3.12,
+2026-10-01*). The postcode pattern spells each umlaut out as an alternative rather than
+inside a bracket, because under `C` a bracket reads the umlauts' bytes one by one: there, five
+digits before a word that starts with a lowercase umlaut or `ß` were a postcode and place, and
+a place that starts with a capital umlaut was missed. Spelled out, `C` reads each umlaut as a
+UTF-8 locale does (*measured with GNU grep 3.12, 2026-10-02*). And the hook diffs lines, with
+no copy detection, so lines copied or moved into another file are reported again even though
+they are already published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in
