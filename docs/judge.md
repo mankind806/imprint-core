@@ -39,6 +39,10 @@ Ein Live-Aufruf am 2026-10-02 (go1.27.1, Commit 107b79d, `--source test`, eigene
 | Antwortfelder (nur Namen gelesen) | `answers`, `model`, `usage` |
 | `model` in der Antwort | `jev-1.13.0`, gleich dem gesendeten |
 
+Zweiter Aufruf, 2026-10-02 nach den Review-Korrekturen (Commit 365034c, Registry `2026-10-02.2`,
+Fragen jetzt in Registry-Reihenfolge), gleiche Eingabe: `allow`, `claim` 0.97, `backed` 0.93, 271 ms
+(Gate-Code 0 ms, Anfrage 270 ms), Antwortfelder und `model` wie oben.
+
 Nicht gemessen: Aufbau von `usage` (darum noch kein `tokens_in` im Log), Latenz-Verteilung (n = 1),
 `foreign_return` gegen die echte API.
 
