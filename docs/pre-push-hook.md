@@ -102,23 +102,24 @@ outside ASCII does (*measured with git 2.55.0, 2026-10-02*). UTF-8 as the commit
 avoids it. This is the hook's choice of list, made 2026-10-02, and a name can be added once
 its conversion is shown to keep to that rule.
 
-An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
-a declared identity, as an author has to, and a tag that names no tagger is a finding.
-Everything else in the tag object is checked against the same shapes: the message, a signature
-block, the tag's name, any other header line, and whatever follows the tagger's identity on its
-line. That includes a tag whose header never ends in an empty line, from which git itself reads
-no message although its bytes are published. A pushed ref is followed
-through every tag object it leads to, so the tags inside a nested tag are read as well as the
-outer one; where the chain ends in a commit, that commit's new history is checked as for any
-branch. A new tag on a commit the remote already has adds no commit, and its tag object is
-still read. Tags have no tracking refs, so a tag object the remote already holds is read again
-when it is pushed under another name or inside another tag.
+An annotated tag is read as well, since it carries what a commit carries. Its tagger has to
+be a declared identity, as an author has to, and a tag that names no tagger is a finding.
+Everything else in the tag object is checked against the same shapes: the message, a
+signature block but for its base64 lines (below), the tag's name, any other header line, and
+whatever follows the tagger's identity on its line. That includes a tag whose header never
+ends in an empty line, from which git itself reads no message although its bytes are
+published. A pushed ref is followed through every tag object it leads to, so the tags inside
+a nested tag are read as well as the outer one; where the chain ends in a commit, that
+commit's new history is checked as for any branch. A new tag on a commit the remote already
+has adds no commit, and its tag object is still read. Tags have no tracking refs, so a tag
+object the remote already holds is read again when it is pushed under another name or inside
+another tag.
 
 | Where a signature sits | Its base64 lines | Everything else in it |
 |---|---|---|
 | `gpgsig` or `gpgsig-sha256` header of a commit | not matched, inside the last signature armour | matched: armour lines, `Comment:` and other armour headers |
 | `mergetag` header of a merge (the merged tag) | not matched, inside the last signature armour | matched: tag name, message, any other armour, armour lines; tagger held to the declared identities |
-| a tag object pushed as such (the tag check) | matched | matched |
+| a tag object pushed as such (the tag check), at the end of its message | not matched, inside the last signature armour | matched: the message before it, armour lines and headers, any other armour |
 
 A signed commit carries its signature in a `gpgsig` header (`gpgsig-sha256` in a SHA-256
 repository), and a merge of a signed tag carries the tag, tagger and signature, in a
@@ -139,9 +140,10 @@ and left out of the shapes; a tagger line with no `>` in it is a check that coul
 a merge read as converted, a tagger git shows counts as declared when the one stored in its
 place is — for an encoding outside the list above, only when the two differ in nothing but
 characters outside ASCII, as for an author. A merged tag that names no tagger brings no
-identity along and is no finding, unlike a pushed tag with none. The tag check makes no such
-exception, so a signed tag pushed as a tag object still meets those odds. Whether it should
-leave its base64 lines out as well is open, for the owner to decide.
+identity along and is no finding, unlike a pushed tag with none. A signed tag pushed as a tag
+object is read the same way: from the last line in it that opens a signature, as git finds
+one in a tag, to its END line, a line made only of base64 characters is not matched, and
+everything else is (the owner's call, 2026-10-02).
 
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:

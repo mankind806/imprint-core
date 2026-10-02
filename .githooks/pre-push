@@ -7,28 +7,28 @@
 # commits carry an identity this clone has not declared - as author, as
 # committer, as the tagger of a tag a merge carries - and it refuses a push
 # whose new commits add a line, or carry one in their message or header, that
-# matches a shape that personal data takes - phone numbers, bank account
-# numbers and postal addresses in the formats the patterns below spell out. An
-# annotated tag is held to the same: its tagger has to be a declared identity,
-# and nothing else in it - the message above all - may match a shape. A ref
-# that ends in a blob or a tree is refused unread.
+# matches a shape that personal data takes - phone numbers, bank account numbers
+# and postal addresses in the formats the patterns below spell out. An annotated
+# tag is held to the same: its tagger has to be a declared identity, and nothing
+# else in it - the message above all, a signature's base64 lines aside - may
+# match a shape. A ref that ends in a blob or a tree is refused unread.
 #
 # WHAT IT READS. The new commits: each commit object as stored, all of it but
-# for the identities the identity check reads - a merged tag's tagger
-# included - and a signature's base64 lines, and of their content only the
-# lines they add; and every tag object a pushed
-# ref leads to, all of it. A commit is new unless the remote's old tip for that
-# ref reaches it, or one of this clone's tracking refs for the destination
-# remote does (refs/remotes/<remote>/*, only when the push goes to the URL they
-# are fetched from, and only while no other remote stores refs under that
-# prefix). Those refs are what this clone last fetched, not what the remote
-# holds now: after pointing a remote at another repository, run
-# `git fetch --prune` first. A line already on it was checked on its way there,
-# or predates the hook; reading it again would refuse every push for what is
-# already published. A new commit whose header names an encoding other than
-# UTF-8, or names none on its encoding line, is read as git converts it, too;
-# one that names an encoding this hook cannot read in full, holds a NUL where
-# git stops converting, or that git could not convert is a finding.
+# for the identities the identity check reads - a merged tag's tagger included -
+# and a signature's base64 lines, and of their content only the lines they add;
+# and every tag object a pushed ref leads to, all of it but a signature's base64
+# lines. A commit is new unless the remote's old tip for that ref reaches it, or
+# one of this clone's tracking refs for the destination remote does
+# (refs/remotes/<remote>/*, only when the push goes to the URL they are fetched
+# from, and only while no other remote stores refs under that prefix). Those
+# refs are what this clone last fetched, not what the remote holds now: after
+# pointing a remote at another repository, run `git fetch --prune` first. A line
+# already on it was checked on its way there, or predates the hook; reading it
+# again would refuse every push for what is already published. A new commit
+# whose header names an encoding other than UTF-8, or names none on its encoding
+# line, is read as git converts it, too; one that names an encoding this hook
+# cannot read in full, holds a NUL where git stops converting, or that git could
+# not convert is a finding.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -506,6 +506,41 @@ grep_both() {
 # last byte; git then reads no message from it, but the bytes are published all
 # the same. A part this hook skipped would be a place to hide a line in.
 #
+# But for a signature's base64 lines, as in a commit's gpgsig and mergetag
+# headers (see prepare): encoded bytes, in which no shape can be read, yet a
+# run of their letters and digits takes the IBAN pattern's form in about one
+# RSA-4096 signature in 425 (simulated, 2026-10-02). From the last line that
+# opens a signature, as git finds one in a tag, to the -----END ...----- line
+# after it, a line made only of base64 characters is not matched (the owner's
+# call, 2026-10-02). The hole is the same as there: an IBAN without spaces, or
+# a phone number with a slash, alone on such a line.
+#
+# tagprep reads one tag object, any NUL turned into \001, twice: the first
+# pass finds that last line, the second prints every line as it read it, but
+# for the identity on a tagger line of the header - everything up to its last
+# ">" - and a base64 line of the signature, printed empty so that line numbers
+# stay those of the object. It writes the lines it printed to IMPRINT_OBJCNT.
+tagprep='
+BEGIN {
+  pass = 0; k = 0; last = 0; hd = 0; armour = 0
+  b64 = "^[A-Za-z0-9+/=]*$"; armend = "^-----END [A-Z ]*-----$"
+  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----$"
+}
+FNR == 1 { pass++ }
+pass == 1 { if ($0 ~ sigbegin) last = FNR; next }
+{
+  line = $0
+  if (!hd && line == "") hd = 1
+  else if (!hd && match(line, /^tagger .*>/)) line = "tagger" substr(line, RLENGTH + 1)
+  if (armour && line ~ b64) line = ""
+  else if (FNR == last) armour = 1
+  else if (armour && line ~ armend) armour = 0
+  print line; k++
+}
+END { cnt = ENVIRON["IMPRINT_OBJCNT"]; print k > cnt }
+'
+
+#
 # Each shape is matched twice: under your own locale, since a pattern holds
 # characters outside ASCII, and under C, since a tag object is raw bytes that
 # git does not re-encode, and a byte that is not valid in your locale's
@@ -561,8 +596,13 @@ TAGGERS
       note errors 'sed could not read the tagger of tag %s\n' "$t_name"
     fi
     # The object as it is, but for the identity on each tagger line of the
-    # header, checked above; line numbers stay those of the object.
-    if LC_ALL=C sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext"; then
+    # header, checked above, and the signature's base64 lines; line numbers
+    # stay those of the object, and a line awk lost is a check that could
+    # not run.
+    true >"$work/objcnt" || refuse "$cannot_write"
+    if IMPRINT_OBJCNT="$work/objcnt" LC_ALL=C awk "$tagprep" "$t_file" "$t_file" >"$work/tagtext" </dev/null \
+      && t_k="$(cat "$work/objcnt")" && [ -n "$t_k" ] \
+      && [ "$t_k" = "$(wc -l <"$work/tagtext" | tr -d ' ')" ]; then
       n_done=0
       while IFS="$tab" read -r name pattern; do
         t_state=clean
@@ -611,7 +651,7 @@ TAGGERS
       [ "$n_done" = "$n_shapes" ] || note errors \
         'ran %s of %s shape(s) over tag %s\n' "$n_done" "$n_shapes" "$t_name"
     else
-      note errors 'sed could not read tag %s\n' "$t_name"
+      note errors 'awk could not read tag %s whole\n' "$t_name"
     fi
   done <"$work/tags" || refuse "could not read back the tag list."
   [ "$n_tags_read" = "$n_tags" ] || refuse "read back $n_tags_read of $n_tags tag object(s)."

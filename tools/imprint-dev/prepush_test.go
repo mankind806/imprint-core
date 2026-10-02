@@ -1142,7 +1142,7 @@ func TestPrePushNULOnShapeLine(t *testing.T) {
 
 // 23. A few cases under every shell and awk found on PATH: sh, dash and
 // busybox sh, each with the default awk, mawk, busybox awk and original-awk.
-// The tag and tree cases (28-37 below) and some commit object cases (45, 46,
+// The tag and tree cases (28-37, 54) and some commit object cases (45, 46,
 // 48, 49, 53) run here too, for the seds, greps and awks those shells come
 // with.
 // CI runs on Ubuntu, where sh is dash and awk may be mawk; the combinations
@@ -1279,6 +1279,12 @@ func TestPrePushToolchains(t *testing.T) {
 	// The list of encodings read in full (53), under each awk's regex.
 	encReadTip := r.rawCommit(objHead + "encoding ISO-8859-1\n\nencread: a clean subject\n")
 	encUnreadTip := r.rawCommit(objHead + "encoding UTF-7\n\nencunread: a clean subject\n")
+	// A signed tag's base64 lines (54), and an IBAN-shaped one in its
+	// message, under each awk.
+	tagSigned := r.rawTag("object " + tagged + "\ntype commit\ntag tc-signed\ntagger " + ppAuthorName + " <" + ccTestAuthorEmail +
+		"> 1767225600 +0000\n\na clean tag\n" + ppArmour("", ""))
+	tagIBAN := r.rawTag("object " + tagged + "\ntype commit\ntag tc-tagiban\ntagger " + ppAuthorName + " <" + ccTestAuthorEmail +
+		"> 1767225600 +0000\n\nnotes\n" + ppIBANLine + "\n" + ppArmour("", ""))
 	// A real NUL and a \001 of the commit's own, told apart by cmp.
 	encNulTip := r.rawCommit(objHead + "encoding ISO-8859-1\n\nencnul: a clean subject\n\nx\x00 y\n")
 	encCtlTip := r.rawCommit(objHead + "encoding ISO-8859-1\n\nencctl: a \x01 control character\n")
@@ -1380,6 +1386,11 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantChecked(t, out)
 				code, out = c.hookNewBranch("encctl", encCtlTip)
 				ppWantPass(t, code, out)
+				code, out = c.hookNewTag("tc-signed", tagSigned)
+				ppWantPass(t, code, out)
+				code, out = c.hookNewTag("tc-tagiban", tagIBAN)
+				ppWantRefused(t, code, out, "IBAN in tag tc-tagiban: 7:"+ppIBANLine)
+				ppWantChecked(t, out)
 				code, out = c.hookNewBranch("merge-tc-mtdeclared", mtDeclared)
 				ppWantPass(t, code, out)
 				code, out = c.hookNewBranch("merge-tc-mtstranger", mtStranger, "LC_ALL=C.UTF-8")
@@ -3117,4 +3128,67 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 		code, out := r.hookNewBranch("big5", tip, "LC_ALL=C.UTF-8")
 		ppWantPass(t, code, out)
 	})
+}
+
+// 54. A signed tag pushed as a tag object holds its signature at the end of
+// its message. Its base64 lines are read as in a commit's gpgsig or
+// mergetag header (48, 49): from the last line that opens a signature to its
+// END line, a line made only of base64 characters is not matched. Every
+// other line is, line numbers those of the object: the message before the
+// armour, an armour of another name or before the last one, an armour
+// header, a line after the END line. An awk that fails, or loses a line
+// without saying so, is a check that could not run.
+func TestPrePushTagSignature(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	me := ppAuthorName + " <" + ccTestAuthorEmail + ">"
+	head := func(name string) string {
+		return "object " + r.head() + "\ntype commit\ntag " + name + "\ntagger " + me + " 1767225600 +0000\n\n"
+	}
+	comment := addr("tag.armour", "example.invalid")
+	fakeIBAN := "DE" + "02" + "1203" + "0000" + "0000" + "2020" + "51"
+	for _, c := range []struct {
+		name, message string
+		wants         []string // nil: the push passes
+	}{
+		{"signed", "a clean tag\n" + ppArmour("", ""), nil},
+		{"ssh-signed", "a clean tag\n" + strings.Replace(ppArmour("", ""), "PGP SIGNATURE", "SSH SIGNATURE", 2), nil},
+		{"before", "release notes\n" + ppIBANLine + "\n" + ppArmour("", ""), []string{"IBAN in tag before: 7:" + ppIBANLine}},
+		{"fake", "-----BEGIN PGP SIGNATURE-----\n" + fakeIBAN + "\n-----END PGP SIGNATURE-----\nmore notes\n" + ppArmour("", ""),
+			[]string{"IBAN in tag fake: 7:" + fakeIBAN}},
+		{"notes", "-----BEGIN NOTES-----\n" + ppIBANLine + "\n-----END NOTES-----\n", []string{"IBAN in tag notes: 7:" + ppIBANLine}},
+		{"comment", "a clean tag\n" + ppArmour("", "Comment: "+comment), []string{"address in tag comment: 8:Comment: " + comment}},
+		{"after", "a clean tag\n" + ppArmour("", "") + ppIBANLine + "\n", []string{"IBAN in tag after: 13:" + ppIBANLine}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawTag(head(c.name) + c.message)
+			code, out := r.hookNewTag(c.name, oid)
+			if c.wants == nil {
+				ppWantPass(t, code, out)
+				return
+			}
+			ppWantRefused(t, code, out, c.wants...)
+			ppWantChecked(t, out)
+			if n := strings.Count(out, "IBAN in tag"); n > 1 {
+				t.Errorf("%d IBAN hits, want at most one: the signature's own line is not read; output:\n%s", n, out)
+			}
+		})
+	}
+	awkBin := ppRealBin(t, "awk")
+	signed := r.rawTag(head("broken") + "a clean tag\n" + ppArmour("", ""))
+	for _, c := range []struct{ name, shim string }{
+		{"awk fails", "exit 2\n"},
+		{"a line lost", "'" + awkBin + "' \"$@\"; rc=$?\nif [ -n \"${IMPRINT_OBJCNT:-}\" ]; then echo 999 >\"$IMPRINT_OBJCNT\"; fi\nexit $rc\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r.with(t)
+			s := ppShimPATH(t, "awk", c.shim)
+			for _, e := range [][]string{{s}, {s, "IMPRINT_PUSH_ANYWAY=only a test"}} {
+				code, out := r.hookNewTag("broken", signed, e...)
+				ppWantRefused(t, code, out, "check(s) could not run", "awk could not read tag broken whole")
+			}
+		})
+	}
 }
