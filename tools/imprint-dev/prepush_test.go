@@ -1230,10 +1230,12 @@ func TestPrePushToolchains(t *testing.T) {
 	rawMsgTip := r.rawCommit("tree " + tree + "\nparent " + tagged + "\nauthor " + tcID + "\ncommitter " + tcID +
 		"\n\nrawmsg: a Latin-1 byte\n\nTel.:\xa0" + "0" + "30" + " " + "1234567\n")
 	// The encoding cases here hold with any grep: busybox sh runs busybox's
-	// own grep, which in CI matched no capital umlaut in a place, so the
-	// umlaut cases stay in tests 40 and 42. A declared name outside ASCII
+	// own grep, which in CI matched no capital umlaut in a place while the
+	// postcode pattern held its umlauts in a bracket, so the encoding cases
+	// that need one stay in tests 40 and 42. A declared name outside ASCII
 	// shows git log's --encoding at work, and a mislabelled commit's
-	// address its message read as stored.
+	// address its message read as stored. umlautplace below runs the
+	// spelled-out pattern (44) under every shell.
 	tcName := "J\u00fcrgen Test"
 	tcDeclared := []string{"GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0=" + tcName + " <" + ccTestSomeoneEmail + ">"}
 	r.git("checkout", "-q", "-b", "encid", "main")
