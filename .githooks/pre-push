@@ -120,15 +120,28 @@ if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no
 # refs/remotes/<name>/, none of those refs is trusted.
 #
 # Two places define remotes that `git remote` and `git config` here do not
-# show, and neither is read: a file in the git directory's legacy remotes/
-# folder, whose Pull: lines git still fetches by (a push by name to a remote
-# that fetches into remotes/<x>/... leaves a plain file there too, which
-# `git remote remove` does not delete), and, with
-# extensions.worktreeConfig on, another worktree's config.worktree, which can
-# add a remote or point this one's fetch elsewhere with url.<base>.insteadOf
-# (both measured with git 2.55.0, 2026-10-01). While either is in use, none of
-# the tracking refs is trusted. A conditional include (includeIf) that differs
-# between worktrees is not covered.
+# show: a file in the git directory's legacy remotes/ folder, whose Pull:
+# lines git still fetches by (a push by name to a remote that fetches into
+# remotes/<x>/... leaves a plain file there too, which `git remote remove`
+# does not delete), and, with extensions.worktreeConfig on, another
+# worktree's config.worktree, which can add a remote or point this one's fetch
+# elsewhere with url.<base>.insteadOf (both measured with git 2.55.0,
+# 2026-10-01). The legacy folder is not read: while it holds anything, none of
+# the tracking refs is trusted. Of the config.worktree files - the git
+# directory's own and each worktrees/<id>/config.worktree - only the key names
+# are read, with `git config --file`: while one of them sets a remote.* key, a
+# url.<base>.insteadOf or pushInsteadOf, an include.path or an includeIf.*
+# key, or exists and cannot be read - or while the worktrees/ folder cannot be
+# listed or one of its worktree folders searched - none of the tracking refs
+# is trusted. Any other key leaves them trusted: distrusting the refs whenever the
+# extension was on refused a new branch's push for fixtures already on the
+# remote, in a clone where every worktree's config.worktree held nothing but
+# core.hooksPath and core.untrackedCache. `git sparse-checkout set` writes
+# core.sparseCheckout and core.sparseCheckoutCone there, and
+# `git worktree add` copies the git directory's own config.worktree into the
+# new worktree's (all measured with git 2.55.0, 2026-10-03). A conditional
+# include (includeIf) in the shared config that differs between worktrees is
+# not covered.
 #
 # And only when the push goes where those refs were fetched from. With a
 # remote.<name>.pushurl, a url.<base>.pushInsteadOf or a second
@@ -138,6 +151,32 @@ if [ "$#" -eq 2 ] && [ ! -t 0 ]; then git_is_calling=yes; else git_is_calling=no
 # insteadOf applied, as git applies it - or the tracking refs are not trusted.
 # The location itself is never printed: a URL can carry a credential.
 #
+# worktree_config_redirects FILE NAME - sets shared when the config.worktree
+# FILE, NAME under the git directory, sets a key that can add a remote or send
+# a fetch or push elsewhere, or exists and cannot be read; leaves it alone
+# otherwise. Only the key's kind is named: url.<base> holds a URL, and a URL
+# can carry a credential. git config prints section and key names in lower
+# case, and with --file follows no include, so include.path is seen as a key.
+worktree_config_redirects() {
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  wc_keys="$(git config --file "$1" --name-only --list 2>/dev/null)" \
+    || { shared="extensions.worktreeConfig is on, and git config could not read the git directory's $2"; return; }
+  while IFS= read -r wc_key; do
+    case "$wc_key" in
+      remote.*) wc_kind='a remote.* key' ;;
+      url.*.insteadof) wc_kind='a url.<base>.insteadOf' ;;
+      url.*.pushinsteadof) wc_kind='a url.<base>.pushInsteadOf' ;;
+      include.path) wc_kind='an include.path' ;;
+      includeif.*) wc_kind='an includeIf.* key' ;;
+      *) continue ;;
+    esac
+    shared="extensions.worktreeConfig is on, and the git directory's $2 sets $wc_kind, which can add a remote or send a fetch or push elsewhere"
+    return
+  done <<EOF
+$wc_keys
+EOF
+}
+
 # shared_by NAME - sets shared to why refs/remotes/NAME/ is not NAME's alone,
 # or cannot be told to be, or to nothing when no other remote writes there.
 shared_by() {
@@ -157,8 +196,26 @@ shared_by() {
   # to /dev/null. git config says nothing for a key that is not set.
   sb_wtc="$(git config --file "$sb_common/config" --type=bool --get extensions.worktreeConfig)"; sb_rc=$?
   [ "$sb_rc" -le 1 ] || { shared="git config could not read extensions.worktreeConfig"; return; }
-  [ "$sb_wtc" != true ] \
-    || { shared="extensions.worktreeConfig is on, and another worktree's config.worktree can define a remote or turn this one's fetch elsewhere"; return; }
+  if [ "$sb_wtc" = true ]; then
+    worktree_config_redirects "$sb_common/config.worktree" "config.worktree"
+    [ -z "$shared" ] || return
+    if [ -e "$sb_common/worktrees" ] || [ -L "$sb_common/worktrees" ]; then
+      sb_ids="$(ls -A "$sb_common/worktrees" 2>/dev/null)" \
+        || { shared="extensions.worktreeConfig is on, and the git directory's worktrees/ folder could not be listed"; return; }
+      while IFS= read -r sb_id; do
+        [ -n "$sb_id" ] || continue
+        sb_wt="$sb_common/worktrees/$sb_id"
+        # A name ls printed that is not there was split at a newline; a
+        # folder that cannot be searched hides whether it holds the file.
+        { [ -e "$sb_wt" ] || [ -L "$sb_wt" ]; } && { [ ! -d "$sb_wt" ] || [ -x "$sb_wt" ]; } \
+          || { shared="extensions.worktreeConfig is on, and the git directory's worktrees/ folder could not be read in full"; return; }
+        worktree_config_redirects "$sb_wt/config.worktree" "worktrees/$sb_id/config.worktree"
+        [ -z "$shared" ] || return
+      done <<EOF
+$sb_ids
+EOF
+    fi
+  fi
   sb_remotes="$(git remote 2>/dev/null)" || { shared="git remote failed"; return; }
   while IFS= read -r sb_r; do
     [ -n "$sb_r" ] && [ "$sb_r" != "$sb_dest" ] || continue
