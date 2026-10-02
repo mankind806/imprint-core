@@ -94,7 +94,9 @@ hook-skill-suggestion  suggests relevant imprint skills for user prompts via Typ
          exit 0 always (fail-open)
 judge    the Jev core: one event as JSON on stdin, one verdict (allow, warn, ask, block) as JSON
          on stdout, one line in $IMPRINT_JUDGE_LOG or ${XDG_STATE_HOME:-~/.local/state}/imprint/judge.jsonl;
-         exit 0 once the verdict is written (also when the call failed), 2 on a call error
+         exit 0 once the verdict is written (also when the call, its flags or its input failed:
+         the gate's fail mode decides); 1 only for an unparsable flag or --list/--version without
+         a registry; never 2
 version  prints the version and the VCS data built into the binary
 `
 

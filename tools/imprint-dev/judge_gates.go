@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,35 +15,46 @@ import (
 )
 
 // A gate's builder is its code half: it reads the host payload, runs the
-// prefilters, computes the code flags and builds the state. It masks the text
-// it caps (mask first, then cap, so a cut never leaves half a secret behind);
-// PostState masks every string leaf once more before sending.
+// prefilters, computes the code flags and builds the state. It runs inside the
+// deadline (ctx). It caps text before it masks it (maskCapped), so its work
+// does not grow with the input; PostState masks every string leaf once more
+// before sending.
 
 type gateCase struct {
-	state  any
-	flags  map[string]bool
-	skip   string // set when code decided and no Jev call is needed
-	masked MaskCounts
+	state any
+	flags map[string]bool
+	skip  string // set when code decided and no Jev call is needed
+}
+
+// capReq says which caps a state field needs in the registry.
+type capReq struct {
+	chars    bool // cap_chars and keep
+	items    bool // max_items
+	minChars bool // min_chars allowed
 }
 
 type gateImpl struct {
-	prefilters []string // names the registry may list under prefilter
-	flags      []string // code flags the builder sets
-	stateKeys  []string // state caps the registry must give
-	build      func(g *Gate, event string, payload map[string]any) (gateCase, error)
+	prefilters []string          // names the registry may list under prefilter
+	flags      []string          // code flags the builder sets
+	state      map[string]capReq // state fields and the caps the registry must give them
+	build      func(ctx context.Context, g *Gate, event string, payload map[string]any) (gateCase, error)
 }
 
 var gateImpls = map[string]gateImpl{
 	"done": {
 		prefilters: []string{"code:stop_hook_active", "code:claim_re"},
 		flags:      []string{"stop_hook_active", "claim_re", "local_evidence"},
-		stateKeys:  []string{"assistant_message", "tool_calls", "cmd"},
-		build:      buildDoneCase,
+		state: map[string]capReq{
+			"assistant_message": {chars: true},
+			"tool_calls":        {items: true},
+			"cmd":               {chars: true},
+		},
+		build: buildDoneCase,
 	},
 	"foreign_return": {
 		prefilters: []string{"code:min_chars"},
 		flags:      []string{},
-		stateKeys:  []string{"foreign_text"},
+		state:      map[string]capReq{"foreign_text": {chars: true, minChars: true}},
 		build:      buildForeignReturnCase,
 	},
 }
@@ -138,15 +150,19 @@ func pyStr(v any) string {
 	return fmt.Sprint(v)
 }
 
-// eachJSONLine calls fn with every line of a JSONL file that decodes.
-func eachJSONLine(path string, fn func(v any)) error {
+// eachJSONLine calls fn with every line of a JSONL file that decodes; it
+// stops with ctx's error once the deadline has passed.
+func eachJSONLine(ctx context.Context, path string, fn func(v any)) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	r := bufio.NewReader(f)
-	for {
+	for n := 0; ; n++ {
+		if n%256 == 0 && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
 			var v any
@@ -164,10 +180,11 @@ func eachJSONLine(path string, fn func(v any)) error {
 }
 
 // doneToolCalls is tool_calls() of ts-done-check: the last maxItems tool calls
-// of the transcript, chronological; the Bash command masked, then cut.
-func doneToolCalls(path string, maxItems, cmdCap int, cmdKeep string) ([]doneCall, MaskCounts, error) {
-	var masked MaskCounts
+// of the transcript, chronological. Only the Bash commands of those calls are
+// masked and cut, not every command of the transcript.
+func doneToolCalls(ctx context.Context, path string, maxItems, cmdCap int, cmdKeep string) ([]doneCall, error) {
 	var calls []*doneCall
+	rawCmd := map[*doneCall]string{}
 	byID := map[string]*doneCall{}
 	idKey := func(v any) string {
 		switch x := v.(type) {
@@ -178,7 +195,7 @@ func doneToolCalls(path string, maxItems, cmdCap int, cmdKeep string) ([]doneCal
 		}
 		return "o:" + fmt.Sprint(v)
 	}
-	err := eachJSONLine(path, func(v any) {
+	err := eachJSONLine(ctx, path, func(v any) {
 		e, ok := v.(map[string]any)
 		if !ok {
 			return
@@ -205,10 +222,7 @@ func doneToolCalls(path string, maxItems, cmdCap int, cmdKeep string) ([]doneCal
 					if raw, ok := inp["command"]; ok {
 						cmd = pyStr(raw)
 					}
-					m, n := MaskDetail(cmd)
-					masked = addMaskCounts(masked, n)
-					m = keepRunes(m, cmdCap, cmdKeep)
-					c.Cmd = &m
+					rawCmd[c] = cmd
 				}
 				calls = append(calls, c)
 				byID[idKey(b["id"])] = c
@@ -221,22 +235,26 @@ func doneToolCalls(path string, maxItems, cmdCap int, cmdKeep string) ([]doneCal
 		}
 	})
 	if err != nil {
-		return nil, masked, err
+		return nil, err
 	}
 	if maxItems > 0 && len(calls) > maxItems {
 		calls = calls[len(calls)-maxItems:]
 	}
 	out := make([]doneCall, 0, len(calls))
 	for _, c := range calls {
+		if cmd, ok := rawCmd[c]; ok {
+			m := maskCapped(cmd, cmdCap, cmdKeep)
+			c.Cmd = &m
+		}
 		out = append(out, *c)
 	}
-	return out, masked, nil
+	return out, nil
 }
 
 // lastAssistantText is last_assistant_text() of ts-done-check.
-func lastAssistantText(path string) string {
+func lastAssistantText(ctx context.Context, path string) string {
 	txt := ""
-	_ = eachJSONLine(path, func(v any) {
+	_ = eachJSONLine(ctx, path, func(v any) {
 		e, ok := v.(map[string]any)
 		if !ok || e["type"] != "assistant" {
 			return
@@ -283,7 +301,7 @@ func doneLocalEvidence(calls []doneCall) bool {
 	return false
 }
 
-func buildDoneCase(g *Gate, _ string, p map[string]any) (gateCase, error) {
+func buildDoneCase(ctx context.Context, g *Gate, _ string, p map[string]any) (gateCase, error) {
 	c := gateCase{flags: map[string]bool{}}
 	if truthy(p["stop_hook_active"]) {
 		c.flags["stop_hook_active"] = true
@@ -295,7 +313,7 @@ func buildDoneCase(g *Gate, _ string, p map[string]any) (gateCase, error) {
 	tp, _ := p["transcript_path"].(string)
 	msg, _ := p["last_assistant_message"].(string)
 	if msg == "" && tp != "" {
-		msg = lastAssistantText(tp)
+		msg = lastAssistantText(ctx, tp)
 	}
 	claim := msg != "" && claimMatch(msg)
 	c.flags["claim_re"] = claim
@@ -309,8 +327,7 @@ func buildDoneCase(g *Gate, _ string, p map[string]any) (gateCase, error) {
 	if tp != "" {
 		if _, err := os.Stat(tp); err == nil {
 			cmd := g.State["cmd"]
-			got, n, err := doneToolCalls(tp, g.State["tool_calls"].MaxItems, cmd.CapChars, cmd.Keep)
-			c.masked = addMaskCounts(c.masked, n)
+			got, err := doneToolCalls(ctx, tp, g.State["tool_calls"].MaxItems, cmd.CapChars, cmd.Keep)
 			if err != nil {
 				return c, err
 			}
@@ -319,10 +336,8 @@ func buildDoneCase(g *Gate, _ string, p map[string]any) (gateCase, error) {
 	}
 	c.flags["local_evidence"] = doneLocalEvidence(calls)
 
-	m, n := MaskDetail(msg)
-	c.masked = addMaskCounts(c.masked, n)
 	am := g.State["assistant_message"]
-	c.state = doneState{AssistantMessage: keepRunes(m, am.CapChars, am.Keep), ToolCalls: calls}
+	c.state = doneState{AssistantMessage: maskCapped(msg, am.CapChars, am.Keep), ToolCalls: calls}
 	return c, nil
 }
 
@@ -361,8 +376,10 @@ func stringLeaves(v any) string {
 // buildForeignReturnCase takes the foreign text: a subagent's return
 // (SubagentStop: last_assistant_message) or a tool's output (PostToolUse:
 // tool_response, a string or the string leaves of an object). Which tools a hook
-// sends here is the hook matcher's business, not the gate's.
-func buildForeignReturnCase(g *Gate, event string, p map[string]any) (gateCase, error) {
+// sends here is the hook matcher's business, not the gate's. The registry keeps
+// head and tail of a long text, so text behind padding at either end is seen;
+// what lies only in the middle of a text longer than the cap is not.
+func buildForeignReturnCase(_ context.Context, g *Gate, event string, p map[string]any) (gateCase, error) {
 	c := gateCase{flags: map[string]bool{}}
 	var text string
 	switch event {
@@ -372,12 +389,10 @@ func buildForeignReturnCase(g *Gate, event string, p map[string]any) (gateCase, 
 		text = stringLeaves(p["tool_response"])
 	}
 	ft := g.State["foreign_text"]
-	if utf8.RuneCountInString(strings.TrimSpace(text)) < ft.MinChars {
+	if utf8.RuneCountInString(headRunes(strings.TrimSpace(text), ft.MinChars)) < ft.MinChars {
 		c.skip = "too_short"
 		return c, nil
 	}
-	m, n := MaskDetail(text)
-	c.masked = n
-	c.state = map[string]string{"foreign_text": keepRunes(m, ft.CapChars, ft.Keep)}
+	c.state = map[string]string{"foreign_text": maskCapped(text, ft.CapChars, ft.Keep)}
 	return c, nil
 }

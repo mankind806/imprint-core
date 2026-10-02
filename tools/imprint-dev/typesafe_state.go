@@ -9,8 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file adds the structured-state call that `imprint-dev judge` uses next to
@@ -55,9 +57,9 @@ func errorClass(err error) string {
 // StateCall is what PostState reports besides the answers. It never holds text
 // that was sent.
 type StateCall struct {
-	Masked        MaskCounts
-	ResponseKeys  []string // top-level key names of the response body, never values
-	ModelResolved string   // a top-level "model" string in the response, if the API sends one
+	Masked        MaskCounts // placeholders in the request body, by kind: only what was sent
+	ResponseKeys  []string   // top-level key names of the response body, never values
+	ModelResolved string     // a top-level "model" string in the response, if the API sends one
 }
 
 // maxResponseBytes caps how much of a response body is read.
@@ -74,7 +76,7 @@ func noRedirectHTTPClient() *http.Client {
 // PostState sends one batched System One request with a structured state.
 // The deadline comes from ctx (judge sets one per event). Every string leaf of
 // state and questions is masked before it leaves the process.
-func (c *Client) PostState(ctx context.Context, state any, questions map[string]Question) (*Response, StateCall, error) {
+func (c *Client) PostState(ctx context.Context, state any, questions QuestionSet) (*Response, StateCall, error) {
 	var call StateCall
 	if c.APIKey == "" {
 		return nil, call, &CallError{errClassNoKey, errors.New("no api key")}
@@ -87,7 +89,7 @@ func (c *Client) PostState(ctx context.Context, state any, questions map[string]
 	if err != nil {
 		return nil, call, &CallError{errClassInternal, fmt.Errorf("marshal state: %w", err)}
 	}
-	maskedState, stateCounts, err := maskJSONLeaves(rawState)
+	maskedState, _, err := maskJSONLeaves(rawState)
 	if err != nil {
 		return nil, call, &CallError{errClassInternal, fmt.Errorf("mask state: %w", err)}
 	}
@@ -95,11 +97,11 @@ func (c *Client) PostState(ctx context.Context, state any, questions map[string]
 	if err != nil {
 		return nil, call, &CallError{errClassInternal, fmt.Errorf("marshal questions: %w", err)}
 	}
-	maskedQuestions, questionCounts, err := maskJSONLeaves(rawQuestions)
+	maskedQuestions, _, err := maskJSONLeaves(rawQuestions)
 	if err != nil {
 		return nil, call, &CallError{errClassInternal, fmt.Errorf("mask questions: %w", err)}
 	}
-	call.Masked = addMaskCounts(stateCounts, questionCounts)
+	call.Masked = addMaskCounts(countPlaceholders(string(maskedState)), countPlaceholders(string(maskedQuestions)))
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -291,18 +293,165 @@ func maskJSONLeaves(raw []byte) ([]byte, MaskCounts, error) {
 	return bytes.TrimSpace(out.Bytes()), total, nil
 }
 
-// keepRunes caps s to n runes, keeping the head or the tail ("tail"), as
-// Python's s[:n] and s[-n:] do on a str. n <= 0 keeps everything.
-func keepRunes(s string, n int, keep string) string {
+// QuestionSet is a gate's questions in registry order, and is sent in that
+// order (ts-done-check sends claim, then backed). A Go map would sort them.
+type QuestionSet struct {
+	IDs  []string
+	ByID map[string]Question
+}
+
+// UnmarshalJSON reads a JSON object of questions, keeping key order; a
+// question with an unknown field or an ID given twice is an error.
+func (q *QuestionSet) UnmarshalJSON(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return errors.New("questions is not an object")
+	}
+	q.IDs, q.ByID = nil, map[string]Question{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		id, _ := t.(string)
+		if _, dup := q.ByID[id]; dup {
+			return fmt.Errorf("question %q given twice", id)
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return err
+		}
+		var one Question
+		d := json.NewDecoder(bytes.NewReader(raw))
+		d.DisallowUnknownFields()
+		if err := d.Decode(&one); err != nil {
+			return fmt.Errorf("question %q: %w", id, err)
+		}
+		q.IDs = append(q.IDs, id)
+		q.ByID[id] = one
+	}
+	_, err = dec.Token()
+	return err
+}
+
+// MarshalJSON writes the questions as one object in registry order.
+func (q QuestionSet) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, id := range q.IDs {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		k, err := json.Marshal(id)
+		if err != nil {
+			return nil, err
+		}
+		v, err := json.Marshal(q.ByID[id])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(k)
+		buf.WriteByte(':')
+		buf.Write(v)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// redactedKWRE finds a <redacted> that MaskDetail's keyword or bearer rule
+// wrote (the keyword and separator stay in front of it), also inside a JSON
+// string where quotes are escaped.
+var redactedKWRE = regexp.MustCompile(`(?i)(?:(?:bearer|basic)\s+|(?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential|private[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*(?:\\?["'])?\s*[=:]\s*(?:\\?["'])?)<redacted>`)
+
+// countPlaceholders counts MaskDetail's placeholders in text, by kind: what
+// was masked and is actually in the text, not what a cut dropped. A
+// <redacted> after a keyword or bearer counts as secret_kw, any other as opaque.
+func countPlaceholders(text string) MaskCounts {
+	c := MaskCounts{
+		Email:   strings.Count(text, "<email>"),
+		IBAN:    strings.Count(text, "<iban>"),
+		Phone:   strings.Count(text, "<phone>"),
+		Address: strings.Count(text, "<address>"),
+		Name:    strings.Count(text, "<name>"),
+	}
+	red := strings.Count(text, "<redacted>")
+	c.SecretKW = len(redactedKWRE.FindAllStringIndex(text, -1))
+	if red > c.SecretKW {
+		c.Opaque = red - c.SecretKW
+	}
+	return c
+}
+
+// maskMargin is how many runes past each cut are masked along with the kept
+// part, so that a secret the cut runs through is masked whole before the
+// final cut drops the margin.
+const maskMargin = 1024
+
+// headTailSeparator stands between head and tail when both are kept.
+const headTailSeparator = "\n[…]\n"
+
+// headRunes is the first n runes of s (all of s if it is shorter), without
+// converting s as a whole; n <= 0 keeps everything.
+func headRunes(s string, n int) string {
 	if n <= 0 {
 		return s
 	}
-	r := []rune(s)
-	if len(r) <= n {
+	i := 0
+	for k := 0; k < n; k++ {
+		if i >= len(s) {
+			return s
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+	}
+	return s[:i]
+}
+
+// tailRunes is the last n runes of s (all of s if it is shorter); n <= 0
+// keeps everything.
+func tailRunes(s string, n int) string {
+	if n <= 0 {
 		return s
 	}
-	if strings.EqualFold(keep, "tail") {
-		return string(r[len(r)-n:])
+	j := len(s)
+	for k := 0; k < n; k++ {
+		if j <= 0 {
+			return s
+		}
+		_, size := utf8.DecodeLastRuneInString(s[:j])
+		j -= size
 	}
-	return string(r[:n])
+	return s[j:]
+}
+
+// maskCapped masks text and keeps at most capChars runes of it: the head, the
+// tail, or both (head_tail, joined by headTailSeparator, which counts toward
+// the cap). It cuts before it masks, with maskMargin runes to spare at each
+// cut, then cuts again: the work does not grow with the input, and the final
+// cut drops the margin, so a secret the first cut ran through is not sent in
+// part. capChars <= 0 masks the whole text.
+func maskCapped(text string, capChars int, keep string) string {
+	if capChars <= 0 || len(headRunes(text, capChars)) == len(text) {
+		m, _ := MaskDetail(text)
+		return m
+	}
+	switch keep {
+	case "tail":
+		m, _ := MaskDetail(tailRunes(text, capChars+maskMargin))
+		return tailRunes(m, capChars)
+	case "head_tail":
+		sep := utf8.RuneCountInString(headTailSeparator)
+		h := (capChars - sep) / 2
+		t := capChars - sep - h
+		mh, _ := MaskDetail(headRunes(text, h+maskMargin))
+		mt, _ := MaskDetail(tailRunes(text, t+maskMargin))
+		return headRunes(mh, h) + headTailSeparator + tailRunes(mt, t)
+	default:
+		m, _ := MaskDetail(headRunes(text, capChars+maskMargin))
+		return headRunes(m, capChars)
+	}
 }

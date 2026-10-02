@@ -1,5 +1,5 @@
 {
-  "registry_version": "2026-10-02.1",
+  "registry_version": "2026-10-02.2",
   "model": "jev-1.13.0",
   "gates": {
     "done": {
@@ -44,7 +44,7 @@
       }
     },
     "foreign_return": {
-      "description": "Text from outside (a tool's output, a subagent's return) that addresses the agent with instructions or asks for data to be sent out. Questions as in konzept-b section 4.2. Stage 1 is advisory: warn from 0.35 on; the ask stage at 0.70 before the next outward action is stage 2.",
+      "description": "Text from outside (a tool's output, a subagent's return) that addresses the agent with instructions or asks for data to be sent out. Questions as in konzept-b section 4.2. Stage 1 is advisory: warn from 0.35 on; the ask stage at 0.70 before the next outward action is stage 2. A text longer than the cap is sent as head and tail; its middle is not seen.",
       "stage": "advisory",
       "events": {
         "PostToolUse": ["allow", "warn"],
@@ -53,7 +53,7 @@
       "prefilter": ["code:min_chars"],
       "code_flags": [],
       "state": {
-        "foreign_text": {"cap_chars": 8000, "keep": "head", "min_chars": 15}
+        "foreign_text": {"cap_chars": 8000, "keep": "head_tail", "min_chars": 15}
       },
       "questions": {
         "instruction_to_agent": {
