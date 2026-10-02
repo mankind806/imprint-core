@@ -5,7 +5,8 @@ The detail behind [The pre-push hook](../README.md#the-pre-push-hook) in the REA
 One rule here has a mechanical half, and a clone runs it only once it has opted in: nothing
 leaves this repository except its git identity. `.githooks/pre-push` refuses a push whose
 commits carry an identity this clone has not declared, and it refuses a push whose new
-commits add a line, or carry a message, that matches a shape that personal data takes — an
+commits add a line, or carry one in their message or header, that matches a shape that
+personal data takes — an
 address of the kind mail uses, a phone number, a bank account number, a postal address, each
 only in the format its pattern spells out, so a format it was not written for passes. It
 reads every new commit rather than the tip alone, because a push publishes them all, and a
@@ -15,10 +16,21 @@ for the destination remote does. Of a new commit it reads only the lines it adds
 line of its tree was added by another new commit or is already on the remote, checked on its
 way there. A merge adds a line only when the line is new against every parent: each commit
 is diffed once per parent, as text even where a file holds a NUL byte or is marked binary,
-and a line counts only when every one of those diffs adds it. Commit
-messages are checked alongside the added lines, since a message is as public as a blob and
-trailers are where addresses ride in. A committer may also be GitHub's web-flow identity, the
-one a merge through the web UI records; as an author it is still undeclared.
+and a line counts only when every one of those diffs adds it. A committer may also be
+GitHub's web-flow identity, the one a merge through the web UI records; as an author it is
+still undeclared.
+
+Each new commit's object is read as well, as stored, the way a tag object is: the message,
+since a message is as public as a blob and trailers are where addresses ride in, and every
+line of the header. `git log` shows neither a header line git does not know nor anything
+after a NUL byte in the message, and a push publishes both. A local bare repository took an
+extra header line after the committer even with `receive.fsckObjects` on; it refused one
+between the author and the committer or before the tree, and a NUL anywhere in a commit
+object (*measured with git 2.55.0, 2026-10-02; what GitHub's receiving end accepts was not
+checked*). Left out is only what the identity check reads: the author's and the committer's
+`Name <address>` as git splits it — up to the first `<` and on to the first `>` after it — on
+the one header line of that role, before any NUL. Whatever follows on that line is read, a
+second address included.
 
 Every shape is matched twice, under your own locale and under `C`, and a line either match
 finds is a finding. The patterns hold characters outside ASCII, which takes your locale; but
@@ -26,21 +38,26 @@ a byte that is not valid in your locale's encoding matches no bracket expression
 even `[^0-9]`, and such bytes do arrive: a file is stored as it was written, a commit made by
 a tool other than git's own commands can keep them in its message, and a tag object is raw
 bytes. A Latin-1 no-break space right before a phone number hid it from a UTF-8 locale and not
-from `C` (*measured with GNU grep 3.12, 2026-10-01*). Commit messages and the author and
-committer identities are read with `git log --encoding=UTF-8`. Without that flag git
-re-encodes what it prints into `i18n.logOutputEncoding`, or into `i18n.commitEncoding` when
-that is unset. Set to Latin-1, either one hid a postcode before a place that starts with an
-umlaut from both matches, and made a declared name outside ASCII read as undeclared
-(*measured with git 2.55.0, 2026-10-01*). The flag has a cost of its own: git converts from
-whatever encoding a commit's header names, and the header can be wrong. With
-`i18n.commitEncoding` set to Latin-1 and UTF-8 typed in, `git commit` writes UTF-8 under a
-Latin-1 header, and the conversion turns the same umlaut into two characters that neither
-match finds. `git log --format` converts even under `--encoding=none`, so a commit whose header
-names an encoding other than UTF-8 is also read straight from its object: its message is
-matched as stored too, and its author or committer counts as declared when either reading
-does — the stored one only when the header holds a single line for that role, since git shows
-the last of several (*measured with git 2.55.0, 2026-10-01*). A tag object is read byte for
-byte throughout, so a tagger whose name is stored in Latin-1 is read as written.
+from `C` (*measured with GNU grep 3.12, 2026-10-01*). The author and committer identities
+are read with `git log --encoding=UTF-8`. Without that flag git re-encodes what it prints into
+`i18n.logOutputEncoding`, or into `i18n.commitEncoding` when that is unset; set to Latin-1,
+either one made a declared name outside ASCII read as undeclared, and hid a postcode before a
+place that starts with an umlaut in a message read through `git log` from both matches
+(*measured with git 2.55.0, 2026-10-01*). The message is read from the object, where neither
+setting reaches. git converts a commit from the encoding its header names, though, and in
+Latin-1 a place with an umlaut matches no pattern, so a commit whose header names an encoding
+other than UTF-8 has its message read as `git log --encoding=UTF-8` converts it, too. An
+encoding line that names nothing counts as such a header: git takes the locale's character
+set for it, and under a Latin-1 locale it turned a UTF-8 place into characters no pattern
+holds (*measured with git 2.55.0, 2026-10-02*), which the object as stored still has as
+written. The header can also be wrong: with `i18n.commitEncoding` set to Latin-1 and UTF-8
+typed in, `git commit` writes UTF-8 under a Latin-1 header, the conversion turns the same
+umlaut into two characters that neither match finds, and `git log --format` converts even
+under `--encoding=none`. The object as stored holds the umlaut as typed, and the author or
+committer of such a commit counts as declared when either reading does — the stored one only
+when the header holds a single line for that role, since git shows the last of several
+(*measured with git 2.55.0, 2026-10-01*). A tag object is read byte for byte throughout, so a
+tagger whose name is stored in Latin-1 is read as written.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
@@ -53,6 +70,27 @@ outer one; where the chain ends in a commit, that commit's new history is checke
 branch. A new tag on a commit the remote already has adds no commit, and its tag object is
 still read. Tags have no tracking refs, so a tag object the remote already holds is read again
 when it is pushed under another name or inside another tag.
+
+| Where a signature sits | Its base64 lines | Everything else in it |
+|---|---|---|
+| `gpgsig` header of a commit | not matched, inside the armour | matched: armour lines, `Comment:` and other armour headers |
+| `mergetag` header of a merge (the merged tag) | not matched, inside the armour | matched: tag name, message, armour lines; tagger held to the declared identities |
+| a tag object pushed as such (the tag check) | matched | matched |
+
+A signed commit carries its signature in a `gpgsig` header, and a merge of a signed tag
+carries the tag, tagger and signature, in a `mergetag` header; git writes one only for a tag
+whose message holds a signature (*measured with git 2.55.0, 2026-10-02*). A signature's base64
+lines are encoded bytes in which no shape can be read, yet a run of their letters and digits
+takes the IBAN pattern's form now and then: in random bytes the size of a signature, base64
+encoded and wrapped as git stores them, about one OpenPGP Ed25519 signature in 2,400, one SSH
+Ed25519 signature in 900, one OpenPGP RSA-4096 signature in 425 and one 3 KB X.509 signature
+in 85 (*simulated, 200,000 runs each and 50,000 for X.509, 2026-10-02; the 43 signed commits
+in this repository's history held none*). So in those two headers, from a `-----BEGIN …-----`
+line to its `-----END …-----` line, a line made only of base64 characters is not matched.
+The merged tag's tagger is held to the declared identities as a pushed tag's tagger is, and
+left out of the shapes; a tagger line with no `<…>` in it is a check that could not run. The
+tag check makes no such exception, so a signed tag pushed as a tag object still meets those
+odds. Whether it should leave its base64 lines out as well is open, for the owner to decide.
 
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:
@@ -143,6 +181,19 @@ a place that starts with a capital umlaut was missed. Spelled out, `C` reads eac
 UTF-8 locale does (*measured with GNU grep 3.12, 2026-10-02*). And the hook diffs lines, with
 no copy detection, so lines copied or moved into another file are reported again even though
 they are already published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
+
+Shapes are matched line by line, in a commit object as in a file or a tag, so one broken
+across a line end passes; that includes the first paragraph of a message, whose lines `git
+log`'s subject would join. The signature rule above leaves a hole of its own: a line made only
+of base64 characters can be an IBAN written without spaces, or a phone number with a slash,
+and on its own line inside the armour of a `gpgsig` or `mergetag` header it passes. git puts
+nothing there but the signature; a commit object made by hand can. A merge of a tag signed by
+someone this clone has not declared is refused for its tagger: `IMPRINT_PUSH_ANYWAY` with a
+reason is the way past, or a merge of the commit the tag points at rather than of the tag. And
+`git merge --no-edit` of a signed tag writes the tag's signature and gpg's report on it into
+the merge's message, as lines that start with `#` (*measured with git 2.55.0 and a signature
+gpg could not read, 2026-10-02*); they are matched as the rest of the message is, base64
+included. A message given with `-m` leaves them out.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in

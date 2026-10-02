@@ -1141,8 +1141,8 @@ func TestPrePushNULOnShapeLine(t *testing.T) {
 
 // 23. A few cases under every shell and awk found on PATH: sh, dash and
 // busybox sh, each with the default awk, mawk, busybox awk and original-awk.
-// The tag and tree cases (28-37 below) run here too, for the seds and greps
-// those shells come with.
+// The tag and tree cases (28-37 below) and the commit object cases (45-49)
+// run here too, for the seds, greps and awks those shells come with.
 // CI runs on Ubuntu, where sh is dash and awk may be mawk; the combinations
 // that ran are logged (go test -v), so the log says which were exercised. A
 // combination that resolves to one already listed runs once.
@@ -1262,6 +1262,25 @@ func TestPrePushToolchains(t *testing.T) {
 	umlautPlaceTip := r.commit("umlautplace: a place with a capital umlaut")
 	latin1Tagger := r.rawTag("object " + tagged + "\ntype commit\ntag tc-latin1tagger\ntagger Gr\xfcn Fremd <" +
 		ccTestSomeoneEmail + "> 1767225600 +0000\n\na clean tag\n")
+	// Commit objects read as stored (45-49): a shape after a NUL in the
+	// message and in an extra header line, a signature whose base64 holds
+	// an IBAN's form, and merges of a signed-looking tag by a declared
+	// tagger and by a stranger. prepare's \001 brackets and armour rule run
+	// in each awk here, and every clean case before shows its identity
+	// strip at work.
+	objHead := "tree " + tree + "\nparent " + tagged + "\nauthor " + tcID + "\ncommitter " + tcID + "\n"
+	tcNul := addr("tc.nul", "example.invalid")
+	objNulTip := r.rawCommit(objHead + "\nobjnul: a clean subject\n\nbefore\x00 after " + tcNul + "\n")
+	tcHdr := addr("tc.header", "example.invalid")
+	objHdrTip := r.rawCommit(objHead + "x-note " + tcHdr + "\n\nobjhdr: a clean subject\n")
+	objSigTip := r.rawCommit(objHead + "gpgsig " + ppArmour(" ", "") + "\nobjsig: a clean subject\n")
+	r.git("checkout", "-q", "-b", "tc-side", "main")
+	r.write("tc-side.txt", "a clean line\n")
+	tcSide := r.commit("tc-side: one clean commit")
+	r.ppSignedLookingTag("tc-mtdeclared", tcSide, ppAuthorName+" <"+ccTestAuthorEmail+">", "a clean tag")
+	r.ppSignedLookingTag("tc-mtstranger", tcSide, stranger, "a clean tag by a stranger")
+	mtDeclared := r.ppMergeTag("tc-mtdeclared")
+	mtStranger := r.ppMergeTag("tc-mtstranger")
 
 	for _, sh := range shells {
 		for _, aw := range awks {
@@ -1335,6 +1354,22 @@ func TestPrePushToolchains(t *testing.T) {
 				code, out = c.hookNewTag("tc-latin1tagger", latin1Tagger, "LC_ALL=C.UTF-8")
 				ppWantRefused(t, code, out, ", tagger of tag tc-latin1tagger")
 				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("objnul", objNulTip, "LC_ALL=C.UTF-8")
+				ppWantRefused(t, code, out, "address in a commit object: "+objNulTip+":8:before\x01 after "+tcNul)
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("objhdr", objHdrTip)
+				ppWantRefused(t, code, out, "address in a commit object: "+objHdrTip+":5:x-note "+tcHdr)
+				ppWantChecked(t, out)
+				code, out = c.hookNewBranch("objsig", objSigTip)
+				ppWantPass(t, code, out)
+				code, out = c.hookNewBranch("merge-tc-mtdeclared", mtDeclared)
+				ppWantPass(t, code, out)
+				code, out = c.hookNewBranch("merge-tc-mtstranger", mtStranger, "LC_ALL=C.UTF-8")
+				ppWantRefused(t, code, out, "undeclared identity: "+stranger+", tagger of the tag commit "+mtStranger+" merges")
+				ppWantChecked(t, out)
+				if strings.Contains(out, "in a commit object") {
+					t.Errorf("the merged tag's tagger was read as a shape; output:\n%s", out)
+				}
 
 				// A file a shape grep writes to cannot be opened: a grep
 				// before the shape loops - the one over the declared
@@ -2262,4 +2297,265 @@ func TestPrePushPostcodeUmlauts(t *testing.T) {
 		ppWantRefused(t, code, out, "postcode and place: "+placeTip+":place.txt:2:")
 		ppWantChecked(t, out)
 	}
+}
+
+// ppRawHead is the header of a commit object on top of r's HEAD, author and
+// committer the declared identity, for rawCommit to take more lines after.
+func (r *ppRepo) ppRawHead() string {
+	r.t.Helper()
+	id := ppAuthorName + " <" + ccTestAuthorEmail + "> 1767225600 +0000"
+	return "tree " + r.git("rev-parse", "HEAD^{tree}") + "\nparent " + r.head() + "\nauthor " + id + "\ncommitter " + id + "\n"
+}
+
+// 45. git log stops at a NUL byte in a commit message. git's own commands
+// write none, but a commit object made by hand can hold one, and a push
+// publishes it: the shape after it is read from the object as stored -
+// after a NUL in the body, in the subject, and on a line of its own.
+func TestPrePushCommitObjectNUL(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	shape := addr("after.nul", "example.invalid")
+	for _, c := range []struct {
+		name, message, want string
+	}{
+		{"body", "nul: a clean subject\n\nbody before\x00 after " + shape + "\n", ":8:body before\x01 after " + shape},
+		{"subject", "nul\x00 " + shape + "\n", ":6:nul\x01 " + shape},
+		{"a line after a NUL line", "nul: a clean subject\n\n\x00\n" + shape + "\n", ":9:" + shape},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawCommit(r.ppRawHead() + "\n" + c.message)
+			if strings.Contains(r.git("log", "-1", "--format=%B", oid), shape) {
+				t.Fatalf("git log shows the shape after the NUL, so this case proves nothing")
+			}
+			code, out := r.hookNewBranch("nul", oid)
+			ppWantRefused(t, code, out, "address in a commit object: "+oid+c.want)
+			ppWantChecked(t, out)
+		})
+	}
+}
+
+// 46. A header line git does not know is published with the commit - a
+// local bare repository took one after the committer even with
+// receive.fsckObjects on - and git log shows none of it. Every header line
+// is read, but for the author's and the committer's identity, as git splits
+// it: up to the first < and on to the first > after it. Whatever follows on
+// the line is read, a second address included. That identity is left out
+// only where check 1 has read it: on the one line of its role, and before
+// any NUL. A clean header line of git's own or not passes.
+func TestPrePushCommitObjectHeader(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	me := ppAuthorName + " <" + ccTestAuthorEmail + ">"
+	date := " 1767225600 +0000"
+	shape := addr("extra.header", "example.invalid")
+	second := addr("second.address", "example.invalid")
+	tree := r.git("rev-parse", "HEAD^{tree}")
+	parent := "tree " + tree + "\nparent " + r.head() + "\n"
+	for _, c := range []struct {
+		name, object string
+		wants        []string
+	}{
+		{"extra header line", r.ppRawHead() + "x-note mail " + shape + "\n\nhdr: a clean subject\n",
+			[]string{":5:x-note mail " + shape}},
+		{"no empty line", r.ppRawHead() + "x-note mail " + shape,
+			[]string{":5:x-note mail " + shape}},
+		{"after the identity", parent + "author " + me + " " + ppPostcode + "\ncommitter " + me + date + "\n\nafter: a clean subject\n",
+			[]string{"postcode and place in a commit object: ", ":3:author " + ppPostcode}},
+		{"a second address", parent + "author " + me + " <" + second + ">" + date + "\ncommitter " + me + date + "\n\nsecond: a clean subject\n",
+			[]string{":3:author <" + second + ">" + date}},
+		{"two author lines", parent + "author " + me + date + "\nauthor " + me + date + "\ncommitter " + me + date + "\n\ntwo: a clean subject\n",
+			[]string{":3:author " + me, ":4:author " + me}},
+		{"a NUL before the identity", parent + "x-n\x00ul\nauthor " + me + date + "\ncommitter " + me + date + "\n\nnul: a clean subject\n",
+			[]string{":4:author " + me, ":5:committer " + me}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawCommit(c.object)
+			code, out := r.hookNewBranch("hdr", oid)
+			wants := []string{"in a commit object: " + oid + ":"}
+			ppWantRefused(t, code, out, append(wants, c.wants...)...)
+			ppWantChecked(t, out)
+			if strings.Contains(out, "undeclared identity") {
+				t.Errorf("check 1 read an identity other than the declared one; output:\n%s", out)
+			}
+		})
+	}
+	t.Run("a clean extra header line", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawCommit(r.ppRawHead() + "x-note a clean note\n\nclean: a clean subject\n")
+		code, out := r.hookNewBranch("clean", oid)
+		ppWantPass(t, code, out)
+	})
+}
+
+// ppLatin1Locale returns the name of a locale whose character set is
+// ISO-8859-1, or "" when there is none here.
+func ppLatin1Locale() string {
+	for _, l := range []string{"de_DE.ISO-8859-1", "de_DE.iso88591", "en_US.ISO-8859-1", "en_US.iso88591"} {
+		cmd := exec.Command("locale", "charmap")
+		cmd.Env = []string{"LC_ALL=" + l, "PATH=" + os.Getenv("PATH")}
+		if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) == "ISO-8859-1" {
+			return l
+		}
+	}
+	return ""
+}
+
+// 47. An encoding header that names no encoding: git takes the locale's
+// character set for it, and under a Latin-1 locale it turns a UTF-8 message
+// into one no pattern matches (measured with git 2.55.0, 2026-10-02). The
+// object as stored still holds the message as written. Under C.UTF-8 git
+// leaves it as it is; under a Latin-1 locale this case needs one installed,
+// and is skipped, saying so, where there is none.
+func TestPrePushEmptyEncodingHeader(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	place := "10115" + " " + "Übungsstadt"
+	oid := r.rawCommit(r.ppRawHead() + "encoding \n\nenc: deliver to " + place + "\n")
+	run := func(t *testing.T, locale string) {
+		r := r.with(t)
+		code, out := r.hookNewBranch("enc", oid, "LC_ALL="+locale)
+		ppWantRefused(t, code, out, "postcode and place in a commit object: "+oid+":7:enc: deliver to "+place)
+		ppWantChecked(t, out)
+	}
+	t.Run("C.UTF-8", func(t *testing.T) { run(t, "C.UTF-8") })
+	t.Run("Latin-1", func(t *testing.T) {
+		l := ppLatin1Locale()
+		if l == "" {
+			t.Skip("no locale with the ISO-8859-1 character set here, so git's conversion from it is not exercised")
+		}
+		cmd := exec.Command("git", "-C", r.dir, "log", "-1", "--encoding=UTF-8", "--format=%B", oid)
+		cmd.Env = ccIsolatedGitEnv("LC_ALL=" + l)
+		got, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), place) {
+			t.Skip("git did not convert from " + l + "'s character set here, so the case proves nothing")
+		}
+		run(t, l)
+	})
+}
+
+// ppIBANLine is a line made only of base64 characters that matches the IBAN
+// pattern, as one in about 400 RSA-4096 signatures holds by chance.
+var ppIBANLine = "DE" + "89" + "3704" + "0044" + "0532" + "0130" + "00"
+
+// ppArmour is an armoured signature block, each line after the first
+// starting with prefix, as git stores one in a header; extra goes in before
+// the base64 lines.
+func ppArmour(prefix, extra string) string {
+	b64 := strings.Repeat("Ab+/", 16)
+	return "-----BEGIN PGP SIGNATURE-----\n" + prefix + extra + "\n" + prefix + b64 + "\n" +
+		prefix + ppIBANLine + "\n" + prefix + "=Ab+/\n" + prefix + "-----END PGP SIGNATURE-----\n"
+}
+
+// 48. A signed commit carries its signature in a gpgsig header. Its base64
+// lines are encoded bytes, in which no shape can be read, but a run of their
+// letters and digits can take the IBAN pattern's form: inside the armour,
+// such a line is not matched. Every other line of the header is - an armour
+// header such as Comment:, a line after the armour - and the same line in a
+// header of another name is a finding.
+func TestPrePushGpgsigHeader(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	comment := addr("armour.comment", "example.invalid")
+	for _, c := range []struct {
+		name, header string
+		wants        []string // nil: the push passes
+	}{
+		{"gpgsig", "gpgsig " + ppArmour(" ", ""), nil},
+		{"gpgsig-sha256", "gpgsig-sha256 " + ppArmour(" ", ""), nil},
+		{"an armour header", "gpgsig " + ppArmour(" ", "Comment: "+comment), []string{"address in a commit object: ", ":6: Comment: " + comment}},
+		{"after the armour", "gpgsig " + ppArmour(" ", "") + " " + ppIBANLine + "\n", []string{"IBAN in a commit object: ", ":11: " + ppIBANLine}},
+		{"another header", "x-note " + ppArmour(" ", ""), []string{"IBAN in a commit object: ", ":8: " + ppIBANLine}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawCommit(r.ppRawHead() + c.header + "\nsig: " + c.name + "\n")
+			code, out := r.hookNewBranch("sig", oid)
+			if c.wants == nil {
+				ppWantPass(t, code, out)
+				return
+			}
+			ppWantRefused(t, code, out, c.wants...)
+			ppWantChecked(t, out)
+		})
+	}
+}
+
+// ppSignedLookingTag writes a tag object on target whose message ends in an
+// armoured block, which is all git looks for before it records a merge of
+// the tag in a mergetag header, and points refs/tags/NAME at it.
+func (r *ppRepo) ppSignedLookingTag(name, target, tagger, message string) string {
+	r.t.Helper()
+	oid := r.rawTag("object " + target + "\ntype commit\ntag " + name + "\ntagger " + tagger +
+		" 1767225600 +0000\n\n" + message + "\n" + ppArmour("", ""))
+	r.git("update-ref", "refs/tags/"+name, oid)
+	return oid
+}
+
+// ppMergeTag merges the tag NAME into a new branch off main with git merge,
+// which copies the tag into the merge's mergetag header, and returns the
+// merge. The message is given: with --no-edit, git also writes the tag's
+// signature and gpg's report on it into the message, as lines that start
+// with "#" (measured with git 2.55.0, 2026-10-02), and those are a message.
+func (r *ppRepo) ppMergeTag(name string) string {
+	r.t.Helper()
+	r.git("checkout", "-q", "-b", "merge-"+name, "main")
+	r.git("merge", "-q", "--no-ff", "-m", "merge: tag "+name, name)
+	if !strings.Contains(r.git("cat-file", "commit", "HEAD"), "\nmergetag object ") {
+		r.t.Fatalf("git merge %s recorded no mergetag header", name)
+	}
+	return r.head()
+}
+
+// 49. A merge of a signed tag carries the tag in its mergetag header, read as
+// the tag check reads a tag: its tagger has to be a declared identity, and is
+// left out of the shapes; the rest is matched, but for the signature's
+// base64 lines. A tagger line with no "<...>" is a check that could not run.
+func TestPrePushMergetagHeader(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	me := ppAuthorName + " <" + ccTestAuthorEmail + ">"
+	stranger := "Someone Else <" + ccTestSomeoneEmail + ">"
+	shape := addr("merged.tag", "example.invalid")
+	r.git("checkout", "-q", "-b", "side", "main")
+	r.write("side.txt", "a clean line\n")
+	side := r.commit("side: one clean commit")
+	r.ppSignedLookingTag("t-declared", side, me, "a clean tag")
+	r.ppSignedLookingTag("t-stranger", side, stranger, "a clean tag by a stranger")
+	r.ppSignedLookingTag("t-shape", side, me, "release, contact "+shape)
+	declared := r.ppMergeTag("t-declared")
+	strangerMerge := r.ppMergeTag("t-stranger")
+	shapeMerge := r.ppMergeTag("t-shape")
+
+	code, out := r.hookNewBranch("merge-t-declared", declared)
+	ppWantPass(t, code, out)
+	if !strings.Contains(out, "1 tagger(s) of merged tags, 0 undeclared") {
+		t.Errorf("the merged tag's tagger was not checked; output:\n%s", out)
+	}
+	code, out = r.hookNewBranch("merge-t-stranger", strangerMerge)
+	ppWantRefused(t, code, out, "undeclared identity: "+stranger+", tagger of the tag commit "+strangerMerge+" merges")
+	ppWantChecked(t, out)
+	if strings.Contains(out, "in a commit object") {
+		t.Errorf("the merged tag's tagger was read as a shape; output:\n%s", out)
+	}
+	code, out = r.hookNewBranch("merge-t-shape", shapeMerge)
+	ppWantRefused(t, code, out, "address in a commit object: "+shapeMerge+":", " release, contact "+shape)
+	ppWantChecked(t, out)
+
+	// A tagger line that ends no identity in ">", made by hand.
+	r.git("checkout", "-q", "main")
+	mt := "mergetag object " + side + "\n type commit\n tag t-broken\n tagger nobody at all\n \n a clean tag\n"
+	oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.head() + "\nparent " + side +
+		"\nauthor " + me + " 1767225600 +0000\ncommitter " + me + " 1767225600 +0000\n" + mt + "\nbroken: merge\n")
+	code, out = r.hookNewBranch("broken", oid)
+	ppWantRefused(t, code, out, "check(s) could not run", "could not read the tagger of the tag commit "+oid+" merges")
 }
