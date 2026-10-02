@@ -81,7 +81,7 @@ byte for byte throughout, so a tagger whose name is stored in Latin-1 is read as
 | The header's encoding line names … | read as stored | read as git converts it | finding of its own |
 |---|---|---|---|
 | nothing (no line), UTF-8 or utf8 | yes | — | — |
-| an empty value, US-ASCII or ASCII, ISO-8859-*, latin*, windows-125* or CP125*, KOI8-R/U, EUC-JP/KR/CN/TW, GB2312, GBK, GB18030, Big5, Big5-HKSCS, Shift_JIS, SJIS, CP932, Windows-31J | yes | yes | — |
+| an empty value, US-ASCII or ASCII, ISO-8859-*, latinN, windows-125* or CP125*, KOI8-R/U, EUC-JP/KR/CN/TW, GB2312, GBK, GB18030, Big5, Big5-HKSCS, Shift_JIS, SJIS, CP932, Windows-31J | yes | yes | — |
 | any other encoding: UTF-7, UTF-16, UTF-32, EBCDIC (IBM037 …), ISO-2022-* … | yes | yes | `unread encoding` |
 
 Reading both ways covers what git shows only where a conversion makes an ASCII character from
@@ -94,12 +94,12 @@ same finding, for a listed encoding too, since a Latin-1 place matches nothing a
 commit that holds a NUL byte, where `git log` stops converting, and a conversion git cannot
 finish — one byte the encoding leaves undefined is enough, and git prints the commit as
 stored, encoding line and all (*both measured with git 2.55.0, 2026-10-02*). `git commit`
-writes no NUL, but it does write a name the commit encoding cannot hold: with
-`i18n.commitEncoding` set to windows-1252 and a `user.name` holding a character windows-1252
-lacks, every commit is such a finding — `git commit` stored a `Ł` as its two UTF-8 bytes, the
-second of which windows-1252 leaves undefined (*measured with git 2.55.0, 2026-10-02*). A
-commit encoding that holds the name, or UTF-8, avoids it. This is the hook's choice of list,
-made 2026-10-02, and a name can be added once its conversion is shown to keep to that rule.
+writes no NUL, but it does store a name as UTF-8 under whatever encoding
+`i18n.commitEncoding` names: with windows-1252, a `user.name` whose UTF-8 bytes include one
+that windows-1252 leaves undefined — 0x81, 0x8D, 0x8F, 0x90 or 0x9D, as in `Ł`, `Á` or `Í` —
+makes every commit such a finding, while `ł` or `ö` do not (*measured with git 2.55.0,
+2026-10-02*). UTF-8 as the commit encoding avoids it. This is the hook's choice of list, made
+2026-10-02, and a name can be added once its conversion is shown to keep to that rule.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.

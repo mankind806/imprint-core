@@ -3004,6 +3004,19 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8")
 		ppWantRefused(t, code, out, "unread encoding: commit "+oid+" names the encoding \"ISO-8859-1\" and holds a NUL byte, where git stops converting it")
 	})
+	// The hook reads a NUL as \001, but a \001 of the commit's own - a
+	// control character git commit takes in a message - is no NUL.
+	t.Run("a control character, not a NUL", func(t *testing.T) {
+		r := r.with(t)
+		r.git("checkout", "-q", "-b", "ctl", "main")
+		r.git("-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "--allow-empty", "-m", "ctl: a \x01 control character")
+		tip := r.head()
+		if !strings.Contains(r.git("cat-file", "commit", tip), "\x01") {
+			t.Fatal("the commit holds no \\001, so the case proves nothing")
+		}
+		code, out := r.hookNewBranch("ctl", tip, "LC_ALL=C.UTF-8")
+		ppWantPass(t, code, out)
+	})
 	// color.ui=always colours the commit line git log --pretty=raw starts
 	// with, and git -p does the same in a terminal.
 	t.Run("color.ui=always", func(t *testing.T) {
