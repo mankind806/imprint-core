@@ -136,6 +136,12 @@ Warum `warn` an Stop: `block` an Stop hieße, der Agent arbeitet weiter, ohne da
 Hinweis sagt stattdessen, dass nicht geprüft wurde. Kann ein Ereignis fragen, aber nicht blocken, gilt
 ohne Person ebenfalls `warn`.
 
+Wo niemand gefragt werden kann, steht fest im Code (`hostCannotAsk`), nicht in der Registry: Stop,
+SubagentStop, PostToolUse, UserPromptSubmit, SessionStart, SessionEnd, SubagentStart, PreCompact,
+Notification (Claude Code; für Codex angenommen, nicht gemessen). Nennt die Registry `ask` an einem dieser
+Ereignisse, gilt es trotzdem nicht: ein Fehlschlag ergibt `warn`, eine Regel mit `ask` wird herabgestuft
+(`TestHostCannotAskOverridesRegistry`).
+
 Gescheitert heißt: kein Schlüssel, Timeout, Netzfehler, HTTP ≠ 200 (auch eine Umleitung; ihr wird nie
 gefolgt), Antwort kein JSON, eine Frage ohne Antwort, ein interner Fehler im Gate-Code, oder ein
 Aufruf- bzw. Eingabefehler. Ein kritisches Verdikt nach einem Fehler trägt den Grund `core_failed` und
@@ -189,9 +195,14 @@ versucht, mit dem Zeichen davor als Kontext für `\b`, auf kleinen Fenstern, dam
 des NFA läuft. Kandidaten, deren Zeichen davor ein Lookbehind ablehnt, werden übersprungen statt gefunden,
 verworfen und ein Zeichen weiter neu gesucht: das war quadratisch. Namen werden weiter einzeln nacheinander
 ersetzt (eine gemeinsame Alternation ersetzte anders, z. B. bei „Hans Max“ und „Max Mustermann“), aber über
-`strings.Index` auf einer ASCII-kleingeschriebenen Kopie. Wo das nicht exakt ginge, läuft der alte Weg:
-ungültiges UTF-8, und für die Schritte ohne Groß-/Kleinschreibung Text mit K (U+212A), ſ (U+017F) oder ẞ
-(U+1E9E), den einzigen Zeichen, die Go auf ASCII-Buchstaben bzw. ß faltet.
+`strings.Index` auf einer faltungs-kanonischen Kopie des Textes: jedes Zeichen wird durch das kleinste
+Zeichen seiner Groß-/Kleinschreibungs-Klasse ersetzt, so wie `(?i)` vergleicht, in jeder Schrift
+(Griechisch, Kyrillisch …). Die Kopie wird einmal gebildet und mit jeder Ersetzung mitgeführt; jeder
+Fundort wird exakt nachgeprüft (Faltung und `\b`). Wo das nicht exakt ginge, läuft der alte Weg:
+ungültiges UTF-8; für die Schritte ohne Groß-/Kleinschreibung Text mit K (U+212A), ſ (U+017F) oder ẞ
+(U+1E9E), den einzigen Zeichen, die Go auf ASCII-Buchstaben bzw. ß faltet; für die Namen außerdem Text mit
+einem Zeichen, dessen kanonisches Zeichen eine andere Byte-Länge hat (dieselben drei, das Ohm- und das
+Angström-Zeichen …): dann wird Name für Name gesucht.
 
 Gemessen 2026-10-02, go1.27.1, `GOMAXPROCS=2`, dieser Rechner, Namensdatei mit 2 Namen,
 `TestMaskProfile` (Laufanleitung im Test), alt = Stand 301db1c:
@@ -209,33 +220,45 @@ Gemessen 2026-10-02, go1.27.1, `GOMAXPROCS=2`, dieser Rechner, Namensdatei mit 2
 
 Alt mit Namensdatei auf 16 MB Personendaten: nicht gemessen (Lauf abgebrochen). Der ungünstigste Fall neu
 sind dichte Straßenadressen: 2,1 s für 16 MB, rund 127 ns je Byte. Jedes Muster der Namensdatei kostet
-etwa 0,3 ns je Byte dazu (50 Namen, 85 Muster, 8 MiB: 0,21 s statt 0,87 s mit der Schleife je Byte), auf
-dem Rückfallweg (siehe unten) etwa 1,25 ns.
+dazu, je Byte: auf der kanonischen Kopie bis 0,9 ns (50 griechische und kyrillische Namen auf Text ihrer
+Schrift; vorher 15 ns mit der Suche Zeichen für Zeichen), Name für Name bis 15,7 ns, mit den Regexps
+(ungültiges UTF-8) bis 21 ns.
 
 Gleichheit: `TestMaskDifferential` lässt die alte Fassung (`mask_reference_test.go`, nur in Tests) und
-die neue auf dieselben Texte los, mit 4 Namensdateien (keine, 2 Namen, 9 Namen mit Überlappungen und
-Platzhalter-Namen wie `name`, 50 Namen); Ausgabe und Zählung müssen Byte für Byte gleich sein. Im
-normalen Lauf 3.205 Texte, 3,0 MB, 12.820 Vergleiche; einmal mit `IMPRINT_MASK_DIFF_SEEDS=400`:
-41.080 Texte, 40 MB, 164.320 Vergleiche, alle gleich. Die Python-Parität (`mask-test.py`, 13/13) läuft
+die neue auf dieselben Texte los, mit 5 Namensdateien (keine, 2 Namen, 9 Namen mit Überlappungen und
+Platzhalter-Namen wie `name`, 50 Namen, griechische und kyrillische Namen mit Angström); Ausgabe und
+Zählung müssen Byte für Byte gleich sein. Im normalen Lauf 3.247 Texte, 3,0 MB, 16.235 Vergleiche;
+einmal mit `IMPRINT_MASK_DIFF_SEEDS=400`: 41.122 Texte, 39 MB, 205.610 Vergleiche, alle gleich. Die Python-Parität (`mask-test.py`, 13/13) läuft
 unverändert.
 
-**Maskier-Budget.** Ein Aufruf maskiert höchstens so viel Text, wie im ungünstigsten Fall in der Hälfte
-der verbleibenden Deadline maskiert ist: Bytes = halbe Restzeit / (200 ns + 1,5 ns × Namensmuster),
-höchstens 16 MB (`maskBudgetBytes`). 200 ns liegen über den gemessenen 127 ns: bei Last (Lastmittel 10
-durch andere Arbeit auf dem Rechner) kamen 156 ns vor, einmal 232 ns; 1,5 ns je Namensmuster decken auch
-den Rückfallweg der Namen. Mit 2 Namen: 3 s (PostToolUse, SubagentStop) → 7,2 MB, ungünstigster Fall
-gemessen 0,90–0,95 s (31 %); 6 s (Stop) → 14,4 MB, 1,79 s (30 %). Mit 127 ns statt 200 ns wäre das
-Budget für 3 s etwa 11 MB (50 % auf einem ruhigen Rechner); 200 ns lassen Spielraum für Last.
+**Maskier-Budget.** Ein Aufruf darf für das Maskieren im ungünstigsten Fall höchstens die Hälfte der
+verbleibenden Deadline brauchen. Jedes Feld kostet seine Länge mal den ungünstigsten Preis je Byte auf
+dem Weg, den es nimmt (`maskNsPerByte`):
 
-Ein Feld mit ſ, K oder ẞ (oder ungültigem UTF-8) nimmt für einige Schritte den alten Weg und kostet
-bis 705 ns je Byte (gemessen: dichte Adressen nach einem ſ). Es zählt deshalb mit 900/200 seiner Länge
-gegen das Budget (`maskCost`): bei 3 s also bis etwa 1,6 MB; gemessen 1,4 MB in 0,40–0,77 s, 6,5 MB
-sofort `too_large`, nie `timeout` (`TestJudgeBudgetCoversFallbackRunes`). Mehr endet mit `error_class: too_large`, ohne Anfrage, und der Fail-Modus entscheidet;
-bei einem Hinweis-Gate heißt das `allow`. **Grenze, nicht behoben:** Wer einen fremden Text über das
-Budget aufbläht, entgeht `foreign_return`. Rohen Text vor dem Maskieren zu kürzen, kommt nicht in Frage
-(ein Schnitt kann Passphrasen, IBANs und Adressen teilen). Läuft Maskieren doch länger (langsamerer
-Rechner), wartet `judge` nur bis zum Ende der Deadline und antwortet `timeout`; die Maskier-Goroutine
-läuft dann im Hintergrund aus, bis der Prozess endet (ein Prozess je Aufruf).
+| Feld | Preis je Byte | gemessen höchstens |
+|---|---|---|
+| gültiges UTF-8 ohne Sonderzeichen (schneller Weg) | 200 ns + 1,5 ns je Namensmuster | 127 ns (bei Last 156, einmal 232) + 0,9 ns |
+| mit K, ſ, ẞ, Ohm-, Angström-Zeichen … | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns |
+| ungültiges UTF-8 | 900 ns + 25 ns je Namensmuster | 705 ns + 21 ns |
+
+Für reinen Text heißt das mit 2 Namen: 3 s (PostToolUse, SubagentStop) → 7,2 MB, ungünstigster Fall
+gemessen 0,90–0,95 s (31 %); 6 s (Stop) → 14,4 MB, 1,79 s (30 %) (`maskBudgetBytes`). Mit 127 ns statt
+200 ns wäre das Budget für 3 s etwa 11 MB; 200 ns lassen Spielraum für Last. Mit einem ſ davor gemessen:
+1,3 MB in 0,46–0,92 s geurteilt, 6,5 MB sofort `too_large` (`TestJudgeBudgetCoversFallbackRunes`); 50
+griechische Namen auf griechischem Text: 5,9 MB in 0,3 s, mit Ohm-Zeichen 3,6 MB sofort `too_large`
+(`TestJudgeBudgetCoversNamesWithoutASCII`); nie `timeout`. Mehr endet mit `error_class: too_large`, ohne
+Anfrage, und der Fail-Modus entscheidet; bei einem Hinweis-Gate heißt das `allow`. **Grenze, nicht
+behoben:** Wer einen fremden Text über das Budget aufbläht, entgeht `foreign_return`. Rohen Text vor dem
+Maskieren zu kürzen, kommt nicht in Frage (ein Schnitt kann Passphrasen, IBANs und Adressen teilen).
+
+Jedes Maskieren (auch kurze Felder und das zweite Maskieren in `PostState`) wartet höchstens bis zum Ende
+der Deadline; läuft es länger (langsamerer Rechner), antwortet `judge` mit `timeout`, und die
+Maskier-Goroutine läuft im Hintergrund aus, bis der Prozess endet (ein Prozess je Aufruf;
+`TestJudgeMaskingStopsAtTheDeadline`, `TestMaskingStopsAtTheDeadlineOnSmallFields`).
+
+**Namensdatei.** Namen, die kein gültiges UTF-8 sind (eine Datei in Latin-1), werden weggelassen; vorher
+ließ ein solcher Name jedes Maskieren abbrechen. Die Logzeile zählt sie in `names_skipped`, die Namen
+selbst stehen nie im Log (`TestNamesFileNotUTF8`).
 
 Kalibrierung, wie in `gates.json` vermerkt: `done` auf 8 synthetischen Fällen am 2026-09-29 mit dem
 Alias `jev-latest` (welche Version er damals war: nicht festgehalten), nicht neu für `jev-1.13.0`.
@@ -263,7 +286,7 @@ Aufruf mit Verdikt (auch wenn Code allein entschied oder der Aufruf scheiterte).
 `source`, `host`, `gate`, `event`, `session` (SHA-256 der Sitzungs-ID, 16 Hex-Zeichen),
 `registry_version`, `core_version`, `model`, `verdict`, `reasons`, `scores`, `code_flags`, `prefilter`,
 `mask_counts`, `latency_ms`, `latency_parts_ms`, `fail_mode`, `failed`, `error_class`, `no_ui`, und nur
-wenn gesetzt `unknown_gate`, `unknown_event`, `unknown_host`, `exit_code`.
+wenn gesetzt `unknown_gate`, `unknown_event`, `unknown_host`, `exit_code`, `names_skipped`.
 Nie im Log: State, Prompt, Dateiinhalt, Nachricht, Befehl, Schlüssel. `gate`, `event` und `host` stehen
 in Log und Verdikt nur, wenn die Registry bzw. `judge` sie kennt; ein unbekannter Name wird leer
 geschrieben und `unknown_gate`/`unknown_event`/`unknown_host` gesetzt (der Name selbst könnte alles
