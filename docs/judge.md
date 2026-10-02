@@ -158,6 +158,11 @@ Modulversion `(devel)` und `vcs.revision`, `vcs.time`, `vcs.modified`.
 | Code-Gates aus Konzept B §9 (Roster-Datum, Alter-Liste, SessionStart-Zustand, Pfadpräfix) | Pfadliste und Ablöse-Marker-Format sind nicht festgelegt |
 | CL-001…004 als Registry-Gates | die Hooks senden `jev-latest` und einen Text-State; ein Umzug änderte ihr Verhalten |
 | Choice-Fragen | erst mit `skill_suggestion` oder `method` nötig |
+| Check in `imprint-dev check` (jede Frage hat Kriterien; `calibration.model` = `model`, mit Datum) | die heutige Registry fiele auf beiden Gates durch: keine Kriterien, `done` auf `jev-latest` kalibriert, `foreign_return` gar nicht; ob Warnung oder Verstoß, ist offen |
+
+**Exit 2 beim Verdrahten:** In Claude Code kann ein Hook mit Exit 2 blockieren (Hooks-Doku hier
+**nicht geprüft**). Ein Wrapper muss Exit 2 von `judge` also abfangen. Und ein Wrapper für ein
+kritisches Gate darf nicht mit 0 enden, wenn `imprint-dev` fehlt.
 
 Re-check by 2027-01-02: ob `jev-1.13.0` noch angeboten wird und die Schwellen noch tragen.
 
