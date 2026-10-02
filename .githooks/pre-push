@@ -689,7 +689,7 @@ report() {
   refuse "$(wc -l <"$work/findings" | tr -d ' ') finding(s) above."
 }
 
-# No new commit, so no commit identity, added line or commit message to check.
+# No new commit, so no commit identity, added line or commit object to check.
 # This has to come before any `git log --stdin`: handed an empty list, git log
 # falls back to HEAD and would check a commit nobody is pushing (measured with
 # git 2.55.0, 2026-10-01). With no tag object and no blob or tree either,
@@ -698,14 +698,27 @@ if [ "$n_commits" -eq 0 ]; then
   if [ "$n_tags" -eq 0 ] && [ "$n_objects" -eq 0 ]; then
     say "pre-push: $n_refs ref(s), 0 new commit(s), 0 tag object(s); $scope."
     say "pre-push: checks that ran: none needed."
-    say "pre-push:   skipped: declared identity, tracked content, commit messages - no new commit, so no commit identity, added line or commit message to check"
+    say "pre-push:   skipped: declared identity, tracked content, commit objects - no new commit, so no commit identity, added line or commit object to check"
     while read -r s; do say "pre-push:   skipped: $s"; done <"$work/skipped"
     say "pre-push:   not checked by anything here: whether the prose is abstract."
     exit 0
   fi
-  note skipped 'declared identity, tracked content, commit messages - no new commit, so no commit identity, added line or commit message to check\n'
+  note skipped 'declared identity, tracked content, commit objects - no new commit, so no commit identity, added line or commit object to check\n'
   report
 fi
+
+# --- the committers check 1 accepts ------------------------------------------
+# A committer may also be GitHub's web-flow identity, which a merge through the
+# web UI or API records: the mergeCommitter entry in .imprint/commit.conf. It is
+# put together from parts, as there, so this file carries no address-shaped
+# literal for its own check to flag. As an author it is still undeclared.
+web_flow_name='GitHub'
+web_flow_user='noreply'
+web_flow_domain='github.com'
+at=@
+web_flow="$web_flow_name <$web_flow_user$at$web_flow_domain>"
+cp "$work/allowed" "$work/committers" || refuse "could not copy the declared identities."
+note committers '%s\n' "$web_flow"
 
 # --- the new commits' objects, as stored -------------------------------------
 # git log shows a commit as it parses it, and part of what a push publishes
@@ -719,34 +732,45 @@ fi
 # first > after it, so whatever follows on the line is read. It is left out
 # only on a line that is the only one of its role in the header - git shows
 # the last of several - and only while no NUL came before it in the object.
+# git log converts the header too, from the encoding it names, and a
+# conversion can make lines: in UTF-7, +AAo- is a newline, and one author line
+# as stored became two to git, the declared one last (measured with git
+# 2.55.0, 2026-10-02). So in a commit whose header names an encoding other
+# than UTF-8, an identity is left out only when it is declared as stored.
 #
 # A signed commit carries its signature in a gpgsig header, and a merge of a
 # signed tag carries that tag, tagger and signature, in a mergetag header; git
 # writes one only for a tag that holds a signature (measured with git 2.55.0,
 # 2026-10-02). A signature's base64 lines are encoded bytes, in which no shape
 # can be read, yet a run of their letters and digits takes the IBAN pattern's
-# form in about one RSA-4096 signature in 400 (simulated, 2026-10-02). So in
-# these two headers, from a -----BEGIN ...----- line to its -----END ...-----
-# line, a line made only of base64 characters is not matched. Every other line
-# of them is: the armour lines, an armour header such as Comment:, the merged
-# tag's name and message. The merged tag's tagger is left out the way the tag
-# check leaves a tagger out, everything up to the last > on the line, and
-# check 1 holds it to the declared identities as the tag check does.
+# form in about one RSA-4096 signature in 425 (simulated, 2026-10-02). So in
+# these two headers a signature's base64 lines are not matched: from the last
+# line of the header that opens a signature, as git finds one - -----BEGIN PGP
+# SIGNATURE-----, PGP MESSAGE, SSH SIGNATURE or SIGNED MESSAGE - to the
+# -----END ...----- line after it, a line made only of base64 characters is
+# skipped. Every other line of them is matched: the armour lines, an armour
+# header such as Comment:, the merged tag's name and message, any armour of
+# another name or before the last one. The merged tag's tagger is left out the
+# way the tag check leaves a tagger out, everything up to the last > on the
+# line, and check 1 holds it to the declared identities as the tag check does.
 #
 # git log converts a commit from the encoding its header names, and the
-# patterns are UTF-8: a Latin-1 place read as stored matches nothing. So a
-# commit whose header names another encoding - or none at all on its encoding
-# line, which git takes for the locale's - is read as git log converts it too,
-# in check 3, and checks 1 reads its identities both ways. A header can name an
-# encoding the bytes are not in: with i18n.commitEncoding set to Latin-1 and
-# UTF-8 typed in, git commit writes UTF-8 under a Latin-1 header, and the
-# conversion turns each character outside ASCII into two that no pattern and
-# no declared name holds. git log --format converts even under
-# --encoding=none (both measured with git 2.55.0, 2026-10-01).
+# patterns are UTF-8: a Latin-1 place read as stored matches nothing under a
+# UTF-8 locale or C. So a commit whose header names another encoding - or none
+# at all on its encoding line, which git takes for the locale's - is read as
+# git log converts it too, in check 3, and check 1 reads its identities both
+# ways. A header can name an encoding the bytes are not in: with
+# i18n.commitEncoding set to Latin-1 and UTF-8 typed in, git commit writes
+# UTF-8 under a Latin-1 header, and the conversion turns each character
+# outside ASCII into two that no pattern and no declared name holds. git log
+# --format converts even under --encoding=none (both measured with git 2.55.0,
+# 2026-10-01).
 #
 # prepare reads one object, any NUL turned into \001, twice. The first pass
-# counts the author and committer lines of the header and finds its encoding
-# line. The second prints the lines to match - each line it does not change as
+# counts the author and committer lines of the header, finds its encoding line
+# and the last line that opens a signature in each header field. It reads the
+# declared identities from IMPRINT_ALLOWED and IMPRINT_COMMITTERS. The second
+# prints the lines to match - each line it does not change as
 # it read it - and appends where each comes from, "commit:N" with N its line
 # in the object, to IMPRINT_COMMITLOC, and each merged tag's tagger identity
 # to IMPRINT_MTTAGGERS as "commit<TAB>identity", empty when the tagger line
@@ -757,18 +781,35 @@ prepare='
 BEGIN {
   c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_COMMITLOC"]; mt = ENVIRON["IMPRINT_MTTAGGERS"]
   soh = sprintf("%c", 1); ident = "^[^<" soh "]*<[^>" soh "]*>"
-  b64 = "^[A-Za-z0-9+/=]*$"; armbegin = "^-----BEGIN [A-Z ]*-----$"; armend = "^-----END [A-Z ]*-----$"
-  pass = 0; k = 0; m = 0; na = 0; nc = 0; hd = 0; enc = 0; ev = ""
-  body = 0; nul = 0; field = ""; armour = 0; inner = 0
+  b64 = "^[A-Za-z0-9+/=]*$"; armend = "^-----END [A-Z ]*-----$"
+  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----$"
+  pass = 0; k = 0; m = 0; na = 0; nc = 0; hd = 0; enc = 0; ev = ""; conv = 0
+  body = 0; nul = 0; field = ""; fstart = 0; armour = 0; inner = 0
+  if (!slurp(ENVIRON["IMPRINT_ALLOWED"], allowed) || !slurp(ENVIRON["IMPRINT_COMMITTERS"], committers)) exit 2
+}
+function slurp(f, a,   l, r) {
+  while ((r = (getline l < f)) > 0) a[l] = 1
+  close(f)
+  return r == 0
 }
 function put(s) { print s; print c ":" FNR >> loc; k++ }
-FNR == 1 { pass++ }
+function signed(f) { return f == "gpgsig" || f == "gpgsig-sha256" || f == "mergetag" }
+FNR == 1 {
+  pass++
+  if (pass == 2 && enc && tolower(ev) !~ /^utf-?8$/) conv = 1
+}
 pass == 1 {
   if (hd) next
   if ($0 == "") { hd = 1; next }
-  if (substr($0, 1, 7) == "author ") na++
-  else if (substr($0, 1, 10) == "committer ") nc++
-  else if (!enc && substr($0, 1, 9) == "encoding ") { enc = 1; ev = substr($0, 10) }
+  if (substr($0, 1, 1) == " ") {
+    t1 = substr($0, 2)
+  } else {
+    f1 = $0; sub(/ .*/, "", f1); t1 = substr($0, length(f1) + 2); s1 = FNR
+    if (substr($0, 1, 7) == "author ") na++
+    else if (substr($0, 1, 10) == "committer ") nc++
+    else if (!enc && f1 == "encoding" && substr($0, 9, 1) == " ") { enc = 1; ev = t1 }
+  }
+  if (signed(f1) && t1 ~ sigbegin) lastsig[s1] = FNR
   next
 }
 body { put($0); next }
@@ -780,12 +821,12 @@ $0 == "" { body = 1; next }
     cont = 1; text = substr($0, 2)
   } else {
     cont = 0; field = $0; sub(/ .*/, "", field); text = substr($0, length(field) + 2)
-    armour = 0; inner = (field == "mergetag")
+    fstart = FNR; armour = 0; inner = (field == "mergetag")
   }
-  if (field == "gpgsig" || field == "gpgsig-sha256" || field == "mergetag") {
+  if (signed(field)) {
     if (armour && text ~ b64) next
-    if (text ~ armbegin) armour = 1
-    else if (text ~ armend) armour = 0
+    if ((fstart in lastsig) && lastsig[fstart] == FNR) armour = 1
+    else if (armour && text ~ armend) armour = 0
     if (inner && text == "") inner = 0
     else if (inner && substr(text, 1, 7) == "tagger ") {
       r = substr(text, 8)
@@ -798,17 +839,17 @@ $0 == "" { body = 1; next }
     }
     put($0); next
   }
-  if (!cont && !before && field == "author" && na == 1 && match(substr($0, 8), ident)) {
+  if (!cont && !before && field == "author" && na == 1 && match(substr($0, 8), ident) &&
+    (!conv || (substr($0, 8, RLENGTH) in allowed))) {
     put("author" substr($0, 8 + RLENGTH)); next
   }
-  if (!cont && !before && field == "committer" && nc == 1 && match(substr($0, 11), ident)) {
+  if (!cont && !before && field == "committer" && nc == 1 && match(substr($0, 11), ident) &&
+    (!conv || (substr($0, 11, RLENGTH) in committers))) {
     put("committer" substr($0, 11 + RLENGTH)); next
   }
   put($0)
 }
 END {
-  conv = 0
-  if (enc && tolower(ev) !~ /^utf-?8$/) conv = 1
   cnt = ENVIRON["IMPRINT_OBJCNT"]
   print k > cnt; print conv > cnt; print m > cnt
 }
@@ -833,6 +874,7 @@ while read -r o_oid; do
     || refuse "could not copy commit $o_oid whole."
   true >"$work/objcnt" || refuse "$cannot_write"
   IMPRINT_COMMIT="$o_oid" IMPRINT_COMMITLOC="$work/commitloc" IMPRINT_MTTAGGERS="$work/mttaggers" \
+    IMPRINT_ALLOWED="$work/allowed" IMPRINT_COMMITTERS="$work/committers" \
     IMPRINT_OBJCNT="$work/objcnt" LC_ALL=C awk "$prepare" "$work/raw.t" "$work/raw.t" \
     >>"$work/committext" </dev/null || refuse "awk could not read commit $o_oid."
   o_k=''; o_conv=''; o_m=''
@@ -856,17 +898,8 @@ for f in committext:"$n_lines" commitloc:"$n_lines" mttaggers:"$n_mt"; do
 done
 
 # --- check 1: every author and committer is a declared identity --------------
-# A committer may also be GitHub's web-flow identity, which a merge through the
-# web UI or API records: the mergeCommitter entry in .imprint/commit.conf. It is
-# put together from parts, as there, so this file carries no address-shaped
-# literal for its own check to flag. As an author it is still undeclared.
-web_flow_name='GitHub'
-web_flow_user='noreply'
-web_flow_domain='github.com'
-at=@
-web_flow="$web_flow_name <$web_flow_user$at$web_flow_domain>"
-cp "$work/allowed" "$work/committers" || refuse "could not copy the declared identities."
-note committers '%s\n' "$web_flow"
+# The declared identities, and the committers it accepts, are written down
+# above.
 
 # git log re-encodes what it prints into i18n.logOutputEncoding, or into
 # i18n.commitEncoding when that is unset (measured with git 2.55.0,
@@ -874,8 +907,14 @@ note committers '%s\n' "$web_flow"
 # longer equal the UTF-8 one in the declared list, so git is asked for UTF-8,
 # which is what git config holds. An author or committer of a commit read as
 # converted as well (above) is declared when either reading of it is.
-git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%H A %an <%ae>%n%H C %cn <%ce>' \
-  <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
+git log --no-walk=unsorted --stdin --no-show-signature --encoding=UTF-8 \
+  --format='%H A %an <%ae>%n%H C %cn <%ce>' <"$work/commits" >"$work/ids" \
+  || refuse "git log failed reading the identities of the new commits."
+# Two lines a commit, and nothing else: with log.showSignature on, git log
+# prints what verifying a signature says in between, unless told not to.
+n_idlines="$(wc -l <"$work/ids" | tr -d ' ')"
+[ "$n_idlines" = $((2 * n_commits)) ] || refuse \
+  "git log listed ${n_idlines:-no} identity line(s) for $n_commits new commit(s), not two each."
 true >"$work/undeclared" || refuse "$cannot_write"
 while IFS= read -r line; do
   i_oid="${line%% *}"; line="${line#* }"
@@ -910,8 +949,11 @@ n_ids="$(sed 's/^[^ ]* . //' "$work/ids" | sort -u | wc -l | tr -d ' ')"
 # web-flow identity is not one, and a tagger line that does not end its
 # identity in "<...>" is a check that could not run.
 n_read=0; n_mt_undeclared=0
-while IFS="$tab" read -r m_oid m_id; do
+while IFS= read -r m_line; do
   n_read=$((n_read + 1))
+  # Split at the first TAB by hand: read would trim one that starts the
+  # identity, and the identity is compared as written.
+  m_oid="${m_line%%"$tab"*}"; m_id="${m_line#*"$tab"}"
   if [ -z "$m_id" ]; then
     note errors 'could not read the tagger of the tag commit %s merges as "Name <address>"\n' "$m_oid"
     continue
@@ -1169,8 +1211,8 @@ note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
 # as stored, but for the identities check 1 reads and a signature's base64
 # lines. A commit whose header names an encoding other than UTF-8 has its
 # message read here as git log converts it, too: in Latin-1, a place that
-# starts with an umlaut matches the pattern under neither locale. The shapes
-# are matched line by line, as everywhere in this hook.
+# starts with an umlaut matches the pattern neither under a UTF-8 locale nor
+# under C. The shapes are matched line by line, as everywhere in this hook.
 true >"$work/convtext" && true >"$work/convloc" || refuse "$cannot_write"
 number='
 BEGIN { c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_LOC"]; k = 0 }
@@ -1180,7 +1222,7 @@ END { cnt = ENVIRON["IMPRINT_OBJCNT"]; print k > cnt }
 n_read=0; n_conv=0
 while read -r r_oid r_n; do
   n_read=$((n_read + 1))
-  git log -1 --encoding=UTF-8 --format=%B "$r_oid" >"$work/conv.tmp" </dev/null \
+  git log -1 --no-show-signature --encoding=UTF-8 --format=%B "$r_oid" >"$work/conv.tmp" </dev/null \
     || refuse "git log failed reading the message of $r_oid as converted."
   true >"$work/objcnt" || refuse "$cannot_write"
   IMPRINT_COMMIT="$r_oid" IMPRINT_LOC="$work/convloc" IMPRINT_OBJCNT="$work/objcnt" \

@@ -6,9 +6,9 @@ One rule here has a mechanical half, and a clone runs it only once it has opted 
 leaves this repository except its git identity. `.githooks/pre-push` refuses a push whose
 commits carry an identity this clone has not declared, and it refuses a push whose new
 commits add a line, or carry one in their message or header, that matches a shape that
-personal data takes — an
-address of the kind mail uses, a phone number, a bank account number, a postal address, each
-only in the format its pattern spells out, so a format it was not written for passes. It
+personal data takes — an address of the kind mail uses, a phone number, a bank account
+number, a postal address, each only in the format its pattern spells out, so a format it was
+not written for passes. It
 reads every new commit rather than the tip alone, because a push publishes them all, and a
 line removed in a later commit stays reachable by its hash for anyone who clones. A commit is
 new unless the remote's old tip for that ref reaches it, or one of this clone's tracking refs
@@ -23,14 +23,24 @@ still undeclared.
 Each new commit's object is read as well, as stored, the way a tag object is: the message,
 since a message is as public as a blob and trailers are where addresses ride in, and every
 line of the header. `git log` shows neither a header line git does not know nor anything
-after a NUL byte in the message, and a push publishes both. A local bare repository took an
-extra header line after the committer even with `receive.fsckObjects` on; it refused one
-between the author and the committer or before the tree, and a NUL anywhere in a commit
-object (*measured with git 2.55.0, 2026-10-02; what GitHub's receiving end accepts was not
-checked*). Left out is only what the identity check reads: the author's and the committer's
-`Name <address>` as git splits it — up to the first `<` and on to the first `>` after it — on
-the one header line of that role, before any NUL. Whatever follows on that line is read, a
-second address included.
+after a NUL byte in the message, and a push publishes both.
+
+| A hand-made commit object holds … | local bare repository, `receive.fsckObjects` off (git's default) | on |
+|---|---|---|
+| an extra header line after the committer | accepted | accepted |
+| an extra header line between the author and the committer | accepted | refused |
+| a NUL byte in the message | accepted | refused |
+| an extra header line before the tree | refused by the sending git itself | refused |
+
+(*measured with git 2.55.0, 2026-10-02; what GitHub's receiving end accepts was not
+checked.*) Left out of the object are what the identity check reads, and a signature's
+base64 lines (below). The identity is the author's or the committer's `Name <address>` as git
+splits it — up to the first `<` and on to the first `>` after it — on the one header line of
+that role, before any NUL. Whatever follows on that line is read, a second address included.
+`git log` converts the header from the encoding it names as well, and in UTF-7 that turned
+one author line as stored into two, the declared one last (*measured with git 2.55.0,
+2026-10-02*): in a commit whose header names an encoding other than UTF-8, the identity is
+left out only when it is declared as stored.
 
 Every shape is matched twice, under your own locale and under `C`, and a line either match
 finds is a finding. The patterns hold characters outside ASCII, which takes your locale; but
@@ -73,22 +83,28 @@ when it is pushed under another name or inside another tag.
 
 | Where a signature sits | Its base64 lines | Everything else in it |
 |---|---|---|
-| `gpgsig` header of a commit | not matched, inside the armour | matched: armour lines, `Comment:` and other armour headers |
-| `mergetag` header of a merge (the merged tag) | not matched, inside the armour | matched: tag name, message, armour lines; tagger held to the declared identities |
+| `gpgsig` or `gpgsig-sha256` header of a commit | not matched, inside the last signature armour | matched: armour lines, `Comment:` and other armour headers |
+| `mergetag` header of a merge (the merged tag) | not matched, inside the last signature armour | matched: tag name, message, any other armour, armour lines; tagger held to the declared identities |
 | a tag object pushed as such (the tag check) | matched | matched |
 
-A signed commit carries its signature in a `gpgsig` header, and a merge of a signed tag
+A signed commit carries its signature in a `gpgsig` header (`gpgsig-sha256` in a SHA-256
+repository), and a merge of a signed tag
 carries the tag, tagger and signature, in a `mergetag` header; git writes one only for a tag
 whose message holds a signature (*measured with git 2.55.0, 2026-10-02*). A signature's base64
 lines are encoded bytes in which no shape can be read, yet a run of their letters and digits
 takes the IBAN pattern's form now and then: in random bytes the size of a signature, base64
 encoded and wrapped as git stores them, about one OpenPGP Ed25519 signature in 2,400, one SSH
 Ed25519 signature in 900, one OpenPGP RSA-4096 signature in 425 and one 3 KB X.509 signature
-in 85 (*simulated, 200,000 runs each and 50,000 for X.509, 2026-10-02; the 43 signed commits
-in this repository's history held none*). So in those two headers, from a `-----BEGIN …-----`
-line to its `-----END …-----` line, a line made only of base64 characters is not matched.
-The merged tag's tagger is held to the declared identities as a pushed tag's tagger is, and
-left out of the shapes; a tagger line with no `<…>` in it is a check that could not run. The
+in 85 (*simulated, 200,000 runs each and 50,000 for X.509, 2026-10-02; none of the signed
+commits in this repository's history held such a line that day*). So in those headers a
+signature's base64 lines are not matched: from the last line that opens a signature, as git
+finds one — `-----BEGIN PGP SIGNATURE-----`, `PGP MESSAGE`, `SSH SIGNATURE` or
+`SIGNED MESSAGE` — to the `-----END …-----` line after it, a line made only of base64
+characters is skipped. An armour of another name, or one before the last, is matched like any
+text. The merged tag's tagger is held to the declared identities as a pushed tag's tagger is,
+and left out of the shapes; a tagger line with no `>` in it is a check that could not run. A
+merged tag that names no tagger brings no identity along and is no finding, unlike a pushed
+tag with none. The
 tag check makes no such exception, so a signed tag pushed as a tag object still meets those
 odds. Whether it should leave its base64 lines out as well is open, for the owner to decide.
 
