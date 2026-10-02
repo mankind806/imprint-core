@@ -136,11 +136,14 @@ Warum `warn` an Stop: `block` an Stop hieße, der Agent arbeitet weiter, ohne da
 Hinweis sagt stattdessen, dass nicht geprüft wurde. Kann ein Ereignis fragen, aber nicht blocken, gilt
 ohne Person ebenfalls `warn`.
 
-Wo niemand gefragt werden kann, steht fest im Code (`hostCannotAsk`), nicht in der Registry: Stop,
-SubagentStop, PostToolUse, UserPromptSubmit, SessionStart, SessionEnd, SubagentStart, PreCompact,
-Notification (Claude Code; für Codex angenommen, nicht gemessen). Nennt die Registry `ask` an einem dieser
-Ereignisse, gilt es trotzdem nicht: ein Fehlschlag ergibt `warn`, eine Regel mit `ask` wird herabgestuft
-(`TestHostCannotAskOverridesRegistry`).
+Wo gefragt werden kann, steht fest im Code als Erlaubnisliste (`hostCanAsk`), nicht in der Registry: nur
+PreToolUse, das einzige solche Ereignis, das die Hooks dieses Repositorys kennen (Claude Code; für Codex
+angenommen, nicht gemessen). An jedem anderen Ereignis (Stop, SubagentStop, PostToolUse,
+UserPromptSubmit, auch ein später hinzukommendes wie PostToolUseFailure) kann niemand gefragt werden:
+nennt die Registry dort `ask`, gilt es nicht; ein Fehlschlag ergibt `warn`, eine Regel mit `ask` wird
+herabgestuft (`TestHostCannotAskOverridesRegistry`, `TestHostCanAskAllowlist`). Ist das Ereignis
+unbekannt (stdin unlesbar), zählt jedes Ereignis des Gates nach derselben Liste. PermissionRequest steht
+nicht auf der Liste: das Repository kennt es nicht, die Hooks-Doku ist hier **nicht geprüft**.
 
 Gescheitert heißt: kein Schlüssel, Timeout, Netzfehler, HTTP ≠ 200 (auch eine Umleitung; ihr wird nie
 gefolgt), Antwort kein JSON, eine Frage ohne Antwort, ein interner Fehler im Gate-Code, oder ein
@@ -221,13 +224,31 @@ Gemessen 2026-10-02, go1.27.1, `GOMAXPROCS=2`, dieser Rechner, Namensdatei mit 2
 Alt mit Namensdatei auf 16 MB Personendaten: nicht gemessen (Lauf abgebrochen). Der ungünstigste Fall neu
 sind dichte Straßenadressen: 2,1 s für 16 MB, rund 127 ns je Byte. Jedes Muster der Namensdatei kostet
 dazu, je Byte: auf der kanonischen Kopie bis 0,9 ns (50 griechische und kyrillische Namen auf Text ihrer
-Schrift; vorher 15 ns mit der Suche Zeichen für Zeichen), Name für Name bis 15,7 ns, mit den Regexps
-(ungültiges UTF-8) bis 21 ns.
+Schrift; vorher 15 ns mit der Suche Zeichen für Zeichen), Name für Name (Text mit einem solchen Zeichen
+oder ungültigem UTF-8) bis 15,7 ns.
+
+**Namen: Wortgrenzen wie in Python (seit 2026-10-02, absichtlich anders als vorher).** Bis dahin nutzte
+der Namens-Schritt Gos `\b`, das nur ASCII-Buchstaben als Wortzeichen kennt: ein Name, der mit einem
+Buchstaben außerhalb von ASCII beginnt oder endet, wurde nur neben einem ASCII-Wortzeichen maskiert.
+„Herr Özil kommt“, „Frau Strauß“, „Herr Weiß“, „Σωκράτης“ und „Владимир“ gingen unmaskiert hinaus, aus
+„Jürgen Weiß“ wurde „<name> Weiß“. Jetzt ist ein Wortzeichen, was Pythons `\w` in `ts_common.py` ist: ein
+Buchstabe, eine Zahl (jeder Schrift) oder `_`; Kombinationszeichen nicht. Ein Name in einem längeren Wort
+(„Weißbier“, „Владимирович“, „x_Weiß“) bleibt wie in Python unmaskiert. Das ist eine Datenschutz-Korrektur
+und gilt für alle, die `MaskDetail` nutzen, also auch `hook-typesafe-check` und den Skill-Vorschlag.
+Geprüft gegen Python selbst: `TestNamePythonParity` lässt `ts_common.mask_detail` (python3) und
+`MaskDetail` auf 57 Texte mit deutschen Umlauten und ß, Griechisch (auch Schluss-Sigma), Kyrillisch,
+Namen am Anfang und Ende, neben Satzzeichen und in längeren Wörtern los: Ausgabe und Namenszahl gleich.
+Bekannte Unterschiede zu Python, nicht im Korpus: Python setzt das türkische İ/ı mit i gleich, Go nicht;
+Python ersetzt alle Namen in einer Alternation, Go Name für Name, längster zuerst (gleich, solange sich
+Namen nicht überlappen); Python verwirft bei einem Dekodierfehler die ganze Namensdatei, Go liest die Zeile
+als Latin-1 (siehe Namensdatei).
 
 Gleichheit: `TestMaskDifferential` lässt die alte Fassung (`mask_reference_test.go`, nur in Tests) und
 die neue auf dieselben Texte los, mit 5 Namensdateien (keine, 2 Namen, 9 Namen mit Überlappungen und
 Platzhalter-Namen wie `name`, 50 Namen, griechische und kyrillische Namen mit Angström); Ausgabe und
-Zählung müssen Byte für Byte gleich sein. Im normalen Lauf 3.247 Texte, 3,0 MB, 16.235 Vergleiche;
+Zählung müssen Byte für Byte gleich sein. Der Namens-Schritt der alten Fassung ist seit der Wortgrenzen-
+Korrektur eine eigene, schlichte Fassung der neuen Regel (`refNamesStep`); alle anderen Schritte sind
+die alten. Im normalen Lauf 3.247 Texte, 3,0 MB, 16.235 Vergleiche;
 einmal mit `IMPRINT_MASK_DIFF_SEEDS=400`: 41.122 Texte, 39 MB, 205.610 Vergleiche, alle gleich. Die Python-Parität (`mask-test.py`, 13/13) läuft
 unverändert.
 
@@ -239,7 +260,7 @@ dem Weg, den es nimmt (`maskNsPerByte`):
 |---|---|---|
 | gültiges UTF-8 ohne Sonderzeichen (schneller Weg) | 200 ns + 1,5 ns je Namensmuster | 127 ns (bei Last 156, einmal 232) + 0,9 ns |
 | mit K, ſ, ẞ, Ohm-, Angström-Zeichen … | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns |
-| ungültiges UTF-8 | 900 ns + 25 ns je Namensmuster | 705 ns + 21 ns |
+| ungültiges UTF-8 | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns |
 
 Für reinen Text heißt das mit 2 Namen: 3 s (PostToolUse, SubagentStop) → 7,2 MB, ungünstigster Fall
 gemessen 0,90–0,95 s (31 %); 6 s (Stop) → 14,4 MB, 1,79 s (30 %) (`maskBudgetBytes`). Mit 127 ns statt
@@ -256,9 +277,13 @@ der Deadline; läuft es länger (langsamerer Rechner), antwortet `judge` mit `ti
 Maskier-Goroutine läuft im Hintergrund aus, bis der Prozess endet (ein Prozess je Aufruf;
 `TestJudgeMaskingStopsAtTheDeadline`, `TestMaskingStopsAtTheDeadlineOnSmallFields`).
 
-**Namensdatei.** Namen, die kein gültiges UTF-8 sind (eine Datei in Latin-1), werden weggelassen; vorher
-ließ ein solcher Name jedes Maskieren abbrechen. Die Logzeile zählt sie in `names_skipped`, die Namen
-selbst stehen nie im Log (`TestNamesFileNotUTF8`).
+**Namensdatei.** Eine Zeile, die kein gültiges UTF-8 ist (eine Datei in Latin-1 gespeichert), wird als
+Latin-1 gelesen, was immer gelingt; ihre Namen maskieren also weiter. Vorher ließ ein solcher Name jedes
+Maskieren abbrechen. Die Logzeile zählt diese Zeilen in `names_latin1`, die Namen selbst stehen nie im
+Log. Übersprungen werden nur leere Zeilen und Zeilen nur aus Steuerzeichen (`TestNamesFileLatin1`).
+Groß-/Kleinschreibung: zwei Zeichen gelten als gleich, wenn sie in derselben Klasse von
+`unicode.SimpleFold` liegen; die kanonische Kopie nimmt das Minimum der ganzen Klasse, für jedes Zeichen
+geprüft (`TestFoldCanonExhaustive`, mit „Laΐs“/„LaΐS“ und „Steﬅn“/„Steﬆn“).
 
 Kalibrierung, wie in `gates.json` vermerkt: `done` auf 8 synthetischen Fällen am 2026-09-29 mit dem
 Alias `jev-latest` (welche Version er damals war: nicht festgehalten), nicht neu für `jev-1.13.0`.
@@ -286,7 +311,7 @@ Aufruf mit Verdikt (auch wenn Code allein entschied oder der Aufruf scheiterte).
 `source`, `host`, `gate`, `event`, `session` (SHA-256 der Sitzungs-ID, 16 Hex-Zeichen),
 `registry_version`, `core_version`, `model`, `verdict`, `reasons`, `scores`, `code_flags`, `prefilter`,
 `mask_counts`, `latency_ms`, `latency_parts_ms`, `fail_mode`, `failed`, `error_class`, `no_ui`, und nur
-wenn gesetzt `unknown_gate`, `unknown_event`, `unknown_host`, `exit_code`, `names_skipped`.
+wenn gesetzt `unknown_gate`, `unknown_event`, `unknown_host`, `exit_code`, `names_latin1`.
 Nie im Log: State, Prompt, Dateiinhalt, Nachricht, Befehl, Schlüssel. `gate`, `event` und `host` stehen
 in Log und Verdikt nur, wenn die Registry bzw. `judge` sie kennt; ein unbekannter Name wird leer
 geschrieben und `unknown_gate`/`unknown_event`/`unknown_host` gesetzt (der Name selbst könnte alles
