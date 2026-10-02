@@ -2651,6 +2651,30 @@ func TestPrePushMergetagHeader(t *testing.T) {
 		code, out := r.hookNewBranch("merge-t-latin1", merge,
 			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestAuthorEmail+">")
 		ppWantPass(t, code, out)
+		if !strings.Contains(out, "1 tagger(s) of merged tags, 0 undeclared") {
+			t.Errorf("the tagger was not counted once; output:\n%s", out)
+		}
+	})
+	// Two merged tags in a merge read as converted: a stranger's, then the
+	// declared name outside ASCII. Each tagger git shows is set against the
+	// one stored in its place, so the second is vouched for by the second,
+	// and the stranger is reported once.
+	t.Run("two merged tags, read as converted", func(t *testing.T) {
+		r := r.with(t)
+		name := "J\u00f6rg T\u00e4ster"
+		date := " 1767225600 +0000"
+		mt := func(tag, tagger string) string {
+			return "mergetag object " + side + "\n type commit\n tag " + tag + "\n tagger " + tagger + date + "\n \n a clean tag\n"
+		}
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") + "\nparent " + side +
+			"\nauthor " + me + date + "\ncommitter " + me + date + "\nencoding ISO-8859-1\n" +
+			mt("t-one", stranger) + mt("t-two", name+" <"+ccTestAuthorEmail+">") + "\ntwo: merge\n")
+		code, out := r.hookNewBranch("two", oid,
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestAuthorEmail+">")
+		ppWantRefused(t, code, out, "undeclared identity: "+stranger+", tagger of the tag commit "+oid+" merges")
+		if n := strings.Count(out, ", tagger of the tag commit "); n != 1 {
+			t.Errorf("%d undeclared taggers reported, want the stranger once; output:\n%s", n, out)
+		}
 	})
 
 	// A tagger that only the conversion shows: in UTF-7, the merged tag's
@@ -2944,12 +2968,33 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8")
 		ppWantRefused(t, code, out, "unread encoding: commit "+oid+" names the encoding \"windows-1252\", which git could not convert in full")
 	})
-	// git converts from the first encoding line, and so does the hook.
-	t.Run("two encoding lines", func(t *testing.T) {
+	// git converts from the first encoding line, and so does the hook. git
+	// drops only that one from what it converts, so a second one left over
+	// does not say that git did not convert.
+	for _, second := range []string{"UTF-8", "ISO-8859-1"} {
+		t.Run("two encoding lines, then "+second, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawCommit(head + "encoding ISO-8859-1\nencoding " + second + "\n\ntwo: deliver to " + "10115" + " \xdcbungsstadt\n")
+			code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8")
+			ppWantRefused(t, code, out, "postcode and place in a commit converted to UTF-8: "+oid+":")
+			ppWantAbsent(t, out, "could not convert")
+		})
+	}
+	// git stops at a NUL in what it converts: a Latin-1 place after one is
+	// read only as stored, where it matches nothing.
+	t.Run("a NUL before a Latin-1 place", func(t *testing.T) {
 		r := r.with(t)
-		oid := r.rawCommit(head + "encoding ISO-8859-1\nencoding UTF-8\n\ntwo: deliver to " + "10115" + " \xdcbungsstadt\n")
+		oid := r.rawCommit(head + "encoding ISO-8859-1\n\nnul: a clean subject\n\nx\x00 deliver to " + "10115" + " \xdcbungsstadt\n")
 		code, out := r.hookNewBranch("enc", oid, "LC_ALL=C.UTF-8")
-		ppWantRefused(t, code, out, "postcode and place in a commit converted to UTF-8: "+oid+":")
+		ppWantRefused(t, code, out, "unread encoding: commit "+oid+" names the encoding \"ISO-8859-1\" and holds a NUL byte, where git stops converting it")
+	})
+	// color.ui=always colours the commit line git log --pretty=raw starts
+	// with, and git -p does the same in a terminal.
+	t.Run("color.ui=always", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawCommit(head + "encoding ISO-8859-1\n\ncolour: a clean subject\n")
+		code, out := r.hookNewBranch("enc", oid, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=color.ui", "GIT_CONFIG_VALUE_0=always")
+		ppWantPass(t, code, out)
 	})
 	// Shift_JIS, Big5 and GBK keep bytes in the ASCII range inside a
 	// character, so a declared name stored in one of them differs in ASCII

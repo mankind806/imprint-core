@@ -82,21 +82,25 @@ byte for byte throughout, so a tagger whose name is stored in Latin-1 is read as
 | The header's encoding line names … | read as stored | read as git converts it | finding of its own |
 |---|---|---|---|
 | nothing (no line), UTF-8 or utf8 | yes | — | — |
-| an empty value, US-ASCII, ISO-8859-*, latin*, windows-125* or CP125*, KOI8-R/U, EUC-JP/KR/CN/TW, GB2312, GBK, GB18030, Big5, Big5-HKSCS, Shift_JIS, SJIS, CP932, Windows-31J | yes | yes | — |
+| an empty value, US-ASCII or ASCII, ISO-8859-*, latin*, windows-125* or CP125*, KOI8-R/U, EUC-JP/KR/CN/TW, GB2312, GBK, GB18030, Big5, Big5-HKSCS, Shift_JIS, SJIS, CP932, Windows-31J | yes | yes | — |
 | any other encoding: UTF-7, UTF-16, UTF-32, EBCDIC (IBM037 …), ISO-2022-* … | yes | yes | `unread encoding` |
 
-Reading both ways covers what git shows only where a conversion makes an ASCII character
-from that same byte alone and never makes a newline or a NUL. In UTF-7 neither holds: an
-extra header line became an author line once converted, and an escaped NUL ended git's
-converted text before a shape that is only encoded as stored (*measured with git 2.55.0,
-2026-10-02*). So a commit whose header names an encoding outside the list is a finding, as a
-ref to a blob or a tree is; `IMPRINT_PUSH_ANYWAY` with a reason is the way past. `git log`
-stops at a NUL in what it converts as well, so for a listed encoding such a NUL was stored
-as one, and the stored reading reads past it. A conversion git cannot finish — one byte the
-encoding leaves undefined is enough — has git print the commit as stored, encoding line and
-all, where a Latin-1 place matches neither reading; that is an `unread encoding` finding too
-(*measured with git 2.55.0, 2026-10-02*). This is the hook's choice of list, made 2026-10-02,
-and a name can be added once its conversion is shown to keep to that rule.
+Reading both ways covers what git shows only where a conversion makes an ASCII character from
+that same byte alone and never makes a newline or a NUL. In UTF-7 neither holds: an extra
+header line became an author line once converted, and an escaped NUL ended git's converted
+text before a shape that is only encoded as stored (*measured with git 2.55.0, 2026-10-02*).
+So a commit whose header names an encoding outside the list is a finding, as a ref to a blob
+or a tree is; `IMPRINT_PUSH_ANYWAY` with a reason is the way past. Two more cases are the
+same finding, for a listed encoding too, since a Latin-1 place matches nothing as stored: a
+commit that holds a NUL byte, where `git log` stops converting, and a conversion git cannot
+finish — one byte the encoding leaves undefined is enough, and git prints the commit as
+stored, encoding line and all (*both measured with git 2.55.0, 2026-10-02*). `git commit`
+writes no NUL, but it does write a name the commit encoding cannot hold: with
+`i18n.commitEncoding` set to windows-1252 and a `user.name` holding a character windows-1252
+lacks, every commit is such a finding — `git commit` stored a `Ł` as its two UTF-8 bytes, the
+second of which windows-1252 leaves undefined (*measured with git 2.55.0, 2026-10-02*). A
+commit encoding that holds the name, or UTF-8, avoids it. This is the hook's choice of list,
+made 2026-10-02, and a name can be added once its conversion is shown to keep to that rule.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
