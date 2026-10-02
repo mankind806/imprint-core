@@ -136,12 +136,13 @@ tag object. Matching under `C` as well closes the gap for a byte next to a shape
 one: the patterns are written in UTF-8, so a place name spelled in Latin-1 still passes, and
 so does a phone number whose separator is a no-break space, in either encoding, since the
 pattern takes only a space, a slash or a hyphen there (*measured with GNU grep 3.12,
-2026-10-01*). Matching under `C` also reports more: there the umlauts in the postcode pattern
-are read byte by byte, so five digits followed by a word that starts with a lowercase umlaut
-are reported as a postcode and place, under any locale (*measured through the hook,
-2026-10-01*). And the hook diffs lines, with no copy detection, so lines copied or moved into
-another file are reported again even though they are already published. For both,
-`IMPRINT_PUSH_ANYWAY` with a reason is the way past.
+2026-10-01*). The postcode pattern spells each umlaut out as an alternative rather than
+inside a bracket, because under `C` a bracket reads the umlauts' bytes one by one: five digits
+before a word that starts with a lowercase umlaut were then a postcode and place, and a place
+that starts with a capital one was missed. Spelled out, `C` reads each umlaut as a UTF-8 locale
+does (*measured with GNU grep 3.12, 2026-10-02*). And the hook diffs lines, with no copy
+detection, so lines copied or moved into another file are reported again even though they are
+already published; `IMPRINT_PUSH_ANYWAY` with a reason is the way past that.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in
