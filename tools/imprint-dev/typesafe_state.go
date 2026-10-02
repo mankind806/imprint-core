@@ -386,10 +386,19 @@ func countPlaceholders(text string) MaskCounts {
 	return c
 }
 
-// maskMargin is how many runes past each cut are masked along with the kept
-// part, so that a secret the cut runs through is masked whole before the
-// final cut drops the margin.
+// maskMargin is how many runes of masked text lie between a final cut and
+// the edge of the raw window that was masked. Text the window edge ran
+// through stays unmasked (a cut-off address, IBAN or quoted password no
+// longer matches), and it sits in the last runes of the masked window; the
+// final cut keeps at least maskMargin masked runes away from that edge, so
+// such a fragment is never sent, as long as the secret is shorter than
+// maskMargin runes.
 const maskMargin = 1024
+
+// maskGrowSteps bounds how far a raw window may grow when masking shrinks it
+// below cap+maskMargin runes: to 2^maskGrowSteps times cap+maskMargin runes at
+// most, so the work stays bounded whatever the input.
+const maskGrowSteps = 4
 
 // headTailSeparator stands between head and tail when both are kept.
 const headTailSeparator = "\n[…]\n"
@@ -428,30 +437,100 @@ func tailRunes(s string, n int) string {
 	return s[j:]
 }
 
-// maskCapped masks text and keeps at most capChars runes of it: the head, the
-// tail, or both (head_tail, joined by headTailSeparator, which counts toward
-// the cap). It cuts before it masks, with maskMargin runes to spare at each
-// cut, then cuts again: the work does not grow with the input, and the final
-// cut drops the margin, so a secret the first cut ran through is not sent in
-// part. capChars <= 0 masks the whole text.
-func maskCapped(text string, capChars int, keep string) string {
-	if capChars <= 0 || len(headRunes(text, capChars)) == len(text) {
-		m, _ := MaskDetail(text)
+// cutRunes keeps the first (tail=false) or last (tail=true) n runes of s;
+// n <= 0 keeps nothing.
+func cutRunes(s string, n int, tail bool) string {
+	if n <= 0 {
+		return ""
+	}
+	if tail {
+		return tailRunes(s, n)
+	}
+	return headRunes(s, n)
+}
+
+// maskSide masks one side of text and keeps at most n runes of it. It masks
+// a raw window of n+maskMargin runes and, while masking shrank that window
+// below n+maskMargin runes, grows the window (at least doubling it, to the
+// size the shrinkage so far suggests, at most 2^maskGrowSteps times
+// n+maskMargin). The final cut keeps min(n, masked length - maskMargin) runes,
+// so it stays maskMargin masked runes away from the window edge. If a window
+// reaches the whole text, whole is true and out is the whole text masked.
+func maskSide(text string, n int, tail bool) (out string, whole bool) {
+	maxWindow := (1 << maskGrowSteps) * (n + maskMargin)
+	window := n + maskMargin
+	for {
+		raw := cutRunes(text, window, tail)
+		m, _ := MaskDetail(raw)
+		if len(raw) == len(text) {
+			return m, true
+		}
+		ml := utf8.RuneCountInString(m)
+		if ml >= n+maskMargin || window >= maxWindow {
+			return cutRunes(m, min(n, ml-maskMargin), tail), false
+		}
+		next := 2 * window
+		if ml > 0 {
+			next = max(next, int(float64(window)*float64(n+maskMargin)/float64(ml)*1.25))
+		} else {
+			next = maxWindow
+		}
+		window = min(next, maxWindow)
+	}
+}
+
+// capMasked cuts already masked text to capChars runes; every cut here runs
+// through text that was masked as a whole, so no edge fragment can arise.
+func capMasked(m string, capChars int, keep string) string {
+	if len(headRunes(m, capChars)) == len(m) {
 		return m
 	}
 	switch keep {
 	case "tail":
-		m, _ := MaskDetail(tailRunes(text, capChars+maskMargin))
 		return tailRunes(m, capChars)
 	case "head_tail":
 		sep := utf8.RuneCountInString(headTailSeparator)
 		h := (capChars - sep) / 2
-		t := capChars - sep - h
-		mh, _ := MaskDetail(headRunes(text, h+maskMargin))
-		mt, _ := MaskDetail(tailRunes(text, t+maskMargin))
-		return headRunes(mh, h) + headTailSeparator + tailRunes(mt, t)
+		return headRunes(m, h) + headTailSeparator + tailRunes(m, capChars-sep-h)
 	default:
-		m, _ := MaskDetail(headRunes(text, capChars+maskMargin))
 		return headRunes(m, capChars)
+	}
+}
+
+// maskCapped masks text and keeps at most capChars runes of it: the head, the
+// tail, or both (head_tail, joined by headTailSeparator, which counts toward
+// the cap). It masks only windows of the text, not all of it (bounded work
+// for any input), and never sends a fragment of a secret that a window edge
+// cut (see maskSide). capChars <= 0 masks the whole text.
+func maskCapped(text string, capChars int, keep string) string {
+	if capChars <= 0 || len(headRunes(text, 2*(capChars+maskMargin))) == len(text) {
+		m, _ := MaskDetail(text)
+		return capMasked(m, capChars, keep)
+	}
+	switch keep {
+	case "tail":
+		out, whole := maskSide(text, capChars, true)
+		if whole {
+			return capMasked(out, capChars, keep)
+		}
+		return out
+	case "head_tail":
+		sep := utf8.RuneCountInString(headTailSeparator)
+		h := (capChars - sep) / 2
+		head, whole := maskSide(text, h, false)
+		if whole {
+			return capMasked(head, capChars, keep)
+		}
+		tail, whole := maskSide(text, capChars-sep-h, true)
+		if whole {
+			return capMasked(tail, capChars, keep)
+		}
+		return head + headTailSeparator + tail
+	default:
+		out, whole := maskSide(text, capChars, false)
+		if whole {
+			return capMasked(out, capChars, keep)
+		}
+		return out
 	}
 }
