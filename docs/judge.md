@@ -176,7 +176,8 @@ ihrem Anteil an der Kappung; fängt die Mutationen „Rückblick 8“, „leer�
 `TestMaskCappedIsCutOfWholeMask`, die Regressionen `TestForeignReturnKeepsInjectionBesideBlob`,
 `TestDoneKeepsMessageBesideBlob`, `TestMaskCappedLongMatch`. `done` maskiert nur die Befehle der letzten
 15 Aufrufe; Werkzeugnamen sind Blätter wie andere: maskiert, auf 100 Zeichen gekappt, im Budget
-(`TestDoneCapsToolNames`).
+(`TestDoneCapsToolNames`); `local_evidence` entscheidet über die Namen, wie das Transkript sie hat
+(`TestDoneEvidenceUsesRawToolNames`).
 
 **Maskier-Geschwindigkeit.** Gos `regexp` hat keinen DFA: eine Suche ohne Anker läuft mit dem NFA über
 jedes Byte. Die Muster sind deshalb unverändert, gesucht wird aber anders (`tools/imprint-dev/mask_fast.go`):
@@ -198,14 +199,16 @@ Gemessen 2026-10-02, go1.27.1, `GOMAXPROCS=2`, dieser Rechner, Namensdatei mit 2
 | Fließtext | 16,6 s | 0,64 s | `secret_kw` 0,20 s |
 | Großbuchstaben + Ziffern | 25,7 s | 0,95 s | `iban` 0,25 s |
 | UUIDs, Hashes | 15,7 s | 0,85 s | `opaque` 0,16 s |
-| Personendaten dicht | 10,0 s (ohne Namen) | 1,26 s | `secret_kw` 0,26 s |
+| Personendaten dicht (ohne Namensdatei) | 10,0 s | 1,13 s | `secret_kw` 0,25 s |
 | Straßenadressen dicht (2 MB) | 1,52 s | 0,26 s | `street` 0,21 s |
 | `schluessel=wert` dicht (2 MB) | 0,91 s | 0,15 s | `secret_kw` 0,11 s |
 | `a` + 32 KiB Nullen | 26,7 s | 0,6 ms | – |
 | 64 KiB `aeyJ` / `XAKIA` | 18,7 s / 13,6 s | 2,7 ms / 2,3 ms | – |
 
-Der ungünstigste Fall neu sind dichte Straßenadressen: 2,1 s für 16 MB, rund 127 ns je Byte; jedes Muster
-der Namensdatei kostet etwa 0,3 ns je Byte dazu (50 Namen, 85 Muster, 8 MiB: 0,21 s statt 0,87 s alt).
+Alt mit Namensdatei auf 16 MB Personendaten: nicht gemessen (Lauf abgebrochen). Der ungünstigste Fall neu
+sind dichte Straßenadressen: 2,1 s für 16 MB, rund 127 ns je Byte. Jedes Muster der Namensdatei kostet
+etwa 0,3 ns je Byte dazu (50 Namen, 85 Muster, 8 MiB: 0,21 s statt 0,87 s mit der Schleife je Byte), auf
+dem Rückfallweg (siehe unten) etwa 1,25 ns.
 
 Gleichheit: `TestMaskDifferential` lässt die alte Fassung (`mask_reference_test.go`, nur in Tests) und
 die neue auf dieselben Texte los, mit 4 Namensdateien (keine, 2 Namen, 9 Namen mit Überlappungen und
@@ -217,9 +220,15 @@ unverändert.
 **Maskier-Budget.** Ein Aufruf maskiert höchstens so viel Text, wie im ungünstigsten Fall in der Hälfte
 der verbleibenden Deadline maskiert ist: Bytes = halbe Restzeit / (200 ns + 1,5 ns × Namensmuster),
 höchstens 16 MB (`maskBudgetBytes`). 200 ns liegen über den gemessenen 127 ns: bei Last (Lastmittel 10
-durch andere Arbeit auf dem Rechner) kamen 156 ns vor, einmal 232 ns. Mit 2 Namen: 3 s (PostToolUse,
-SubagentStop) → 7,2 MB, ungünstigster Fall gemessen 0,90–0,95 s (31 %); 6 s (Stop) → 14,4 MB,
-1,79 s (30 %). Mehr endet mit `error_class: too_large`, ohne Anfrage, und der Fail-Modus entscheidet;
+durch andere Arbeit auf dem Rechner) kamen 156 ns vor, einmal 232 ns; 1,5 ns je Namensmuster decken auch
+den Rückfallweg der Namen. Mit 2 Namen: 3 s (PostToolUse, SubagentStop) → 7,2 MB, ungünstigster Fall
+gemessen 0,90–0,95 s (31 %); 6 s (Stop) → 14,4 MB, 1,79 s (30 %). Mit 127 ns statt 200 ns wäre das
+Budget für 3 s etwa 11 MB (50 % auf einem ruhigen Rechner); 200 ns lassen Spielraum für Last.
+
+Ein Feld mit ſ, K oder ẞ (oder ungültigem UTF-8) nimmt für einige Schritte den alten Weg und kostet
+bis 705 ns je Byte (gemessen: dichte Adressen nach einem ſ). Es zählt deshalb mit 900/200 seiner Länge
+gegen das Budget (`maskCost`): bei 3 s also bis etwa 1,6 MB; gemessen 1,4 MB in 0,40–0,77 s, 6,5 MB
+sofort `too_large`, nie `timeout` (`TestJudgeBudgetCoversFallbackRunes`). Mehr endet mit `error_class: too_large`, ohne Anfrage, und der Fail-Modus entscheidet;
 bei einem Hinweis-Gate heißt das `allow`. **Grenze, nicht behoben:** Wer einen fremden Text über das
 Budget aufbläht, entgeht `foreign_return`. Rohen Text vor dem Maskieren zu kürzen, kommt nicht in Frage
 (ein Schnitt kann Passphrasen, IBANs und Adressen teilen). Läuft Maskieren doch länger (langsamerer

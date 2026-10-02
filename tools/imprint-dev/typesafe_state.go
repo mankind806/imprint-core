@@ -407,7 +407,22 @@ var errTooLarge = errors.New("text too large to mask within the deadline")
 const (
 	maskWorstNsPerByte        = 200.0
 	maskNsPerBytePerNameRegex = 1.5
+	// A field holding U+017F, U+212A or U+1E9E (or invalid UTF-8) sends
+	// some steps back to the old regex (mask_fast.go): measured up to 705 ns
+	// per byte (dense addresses after one long s), rounded up.
+	maskFallbackNsPerByte = 900.0
 )
+
+// maskCost is what masking text takes from the budget: its length, or, for a
+// text that takes the old regex for some steps, its length scaled by how much
+// slower that is.
+func maskCost(text string) int {
+	if strings.Contains(text, runeLongS) || strings.Contains(text, runeKelvin) || strings.Contains(text, runeCapSharp) ||
+		!utf8.ValidString(text) {
+		return int(float64(len(text)) * maskFallbackNsPerByte / maskWorstNsPerByte)
+	}
+	return len(text)
+}
 
 // maskBudgetBytes is how many bytes one call may mask so that the worst case
 // takes at most half of the time left until the deadline; capped at the
@@ -444,10 +459,11 @@ func (b *maskBudget) maskCapped(ctx context.Context, text string, capChars int, 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if len(text) > b.left {
+	cost := maskCost(text)
+	if cost > b.left {
 		return "", errTooLarge
 	}
-	b.left -= len(text)
+	b.left -= cost
 	if len(text) < 64<<10 {
 		m, _ := maskDetailFn(text)
 		return cutMasked(m, capChars, keep), nil

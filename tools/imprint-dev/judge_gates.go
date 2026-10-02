@@ -183,7 +183,10 @@ func eachJSONLine(ctx context.Context, path string, fn func(v any)) error {
 // doneToolCalls is tool_calls() of ts-done-check: the last maxItems tool calls
 // of the transcript, chronological. Only the Bash commands of those calls are
 // masked and cut, not every command of the transcript.
-func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems int, cmdCap, toolCap StateCap) ([]doneCall, error) {
+//
+// local is local_evidence() of ts-done-check over those calls, decided on
+// the raw tool names, before they are masked and capped.
+func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems int, cmdCap, toolCap StateCap) ([]doneCall, bool, error) {
 	var calls []*doneCall
 	rawCmd := map[*doneCall]string{}
 	byID := map[string]*doneCall{}
@@ -236,11 +239,16 @@ func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems int
 		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if maxItems > 0 && len(calls) > maxItems {
 		calls = calls[len(calls)-maxItems:]
 	}
+	raw := make([]doneCall, 0, len(calls))
+	for _, c := range calls {
+		raw = append(raw, *c)
+	}
+	local := doneLocalEvidence(raw)
 	out := make([]doneCall, 0, len(calls))
 	for _, c := range calls {
 		// A tool name is a leaf like any other: masked and capped within the
@@ -248,20 +256,20 @@ func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems int
 		if name, ok := c.Tool.(string); ok {
 			m, err := b.maskCapped(ctx, name, toolCap.CapChars, toolCap.Keep)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			c.Tool = m
 		}
 		if cmd, ok := rawCmd[c]; ok {
 			m, err := b.maskCapped(ctx, cmd, cmdCap.CapChars, cmdCap.Keep)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			c.Cmd = &m
 		}
 		out = append(out, *c)
 	}
-	return out, nil
+	return out, local, nil
 }
 
 // lastAssistantText is last_assistant_text() of ts-done-check.
@@ -338,17 +346,18 @@ func buildDoneCase(ctx context.Context, g *Gate, _ string, p map[string]any) (ga
 	// ts-done-check: tool_calls(tp) if tp and os.path.exists(tp) else []
 	budget := newMaskBudget(ctx)
 	calls := []doneCall{}
+	local := false
 	if tp != "" {
 		if _, err := os.Stat(tp); err == nil {
 			cmd := g.State["cmd"]
-			got, err := doneToolCalls(ctx, budget, tp, g.State["tool_calls"].MaxItems, cmd, g.State["tool"])
+			got, ev, err := doneToolCalls(ctx, budget, tp, g.State["tool_calls"].MaxItems, cmd, g.State["tool"])
 			if err != nil {
 				return c, err
 			}
-			calls = got
+			calls, local = got, ev
 		}
 	}
-	c.flags["local_evidence"] = doneLocalEvidence(calls)
+	c.flags["local_evidence"] = local
 
 	am := g.State["assistant_message"]
 	masked, err := budget.maskCapped(ctx, msg, am.CapChars, am.Keep)

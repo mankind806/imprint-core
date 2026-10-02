@@ -461,3 +461,57 @@ func TestDoneCapsToolNames(t *testing.T) {
 			utf8.RuneCountInString(req.State.ToolCalls[0].Tool), req.State.ToolCalls[1].Tool)
 	}
 }
+
+// TestJudgeBudgetCoversFallbackRunes: one long s, Kelvin sign or capital
+// sharp s sends some steps back to the old, slower regex. Such a text is
+// charged at the slower rate: at the plain budget it is refused (too_large),
+// at the scaled budget it is judged inside the deadline; it never times out.
+func TestJudgeBudgetCoversFallbackRunes(t *testing.T) {
+	setupJudge(t, "test-key")
+	ts := newFakeTS(t, answers(map[string]float64{"instruction_to_agent": 0.1, "exfil_request": 0.1}))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	budget := maskBudgetBytes(ctx)
+	cancel()
+	for _, trig := range []string{"ſ", "K", "ẞ"} {
+		for _, size := range []int{budget * 9 / 10, int(float64(budget) * maskWorstNsPerByte / maskFallbackNsPerByte * 0.9)} {
+			text := trig + " " + maskCorpus(rand.New(rand.NewSource(3)), "addresses", size)
+			p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": text})
+			start := time.Now()
+			_, stdout, stderr := runJudgeCLI(t, string(p), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
+			el := time.Since(start)
+			v := decodeObject(t, stdout)
+			if v["error_class"] == "timeout" || el >= 3*time.Second {
+				t.Errorf("%q, %d bytes: %v after %v; %s", trig, size, v["error_class"], el, stderr)
+			}
+			if size > budget/2 && v["error_class"] != "too_large" {
+				t.Errorf("%q, %d bytes (plain budget %d): %v, want too_large", trig, size, budget, v["error_class"])
+			}
+			if size < budget/2 && v["failed"] != false {
+				t.Errorf("%q, %d bytes: %v, want judged", trig, size, v)
+			}
+			t.Logf("%q %d bytes: %v in %v", trig, size, map[bool]string{true: "failed " + v["error_class"].(string), false: "judged"}[v["failed"] == true], el.Round(time.Millisecond))
+		}
+	}
+}
+
+// TestDoneEvidenceUsesRawToolNames: local_evidence looks at the tool names as
+// the transcript has them, not as masked for sending (a names file holding
+// "Edit" must not hide an edit).
+func TestDoneEvidenceUsesRawToolNames(t *testing.T) {
+	setupJudge(t, "test-key")
+	names := filepath.Join(t.TempDir(), "names.txt")
+	if err := os.WriteFile(names, []byte("Edit\nBash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TYPESAFE_NAMES_FILE", names)
+	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9}))
+	tr := writeDoneTranscript(t, []tcall{{tool: "Bash", cmd: "go test ./..."}, {tool: "Edit"}})
+	_, stdout, _ := runJudgeCLI(t, stopPayload(t, "Fertig.", tr), "--gate", "done", "--endpoint", ts.srv.URL)
+	v := decodeObject(t, stdout)
+	if v["code_flags"].(map[string]any)["local_evidence"] != false || v["verdict"] != "warn" {
+		t.Errorf("[Bash ok, Edit]: %v", v)
+	}
+	if !strings.Contains(string(ts.lastBody(t)), `"tool":"<name>"`) {
+		t.Errorf("tool names not masked: %s", ts.lastBody(t))
+	}
+}
