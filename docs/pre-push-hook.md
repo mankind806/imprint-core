@@ -8,17 +8,16 @@ commits carry an identity this clone has not declared, and it refuses a push who
 commits add a line, or carry one in their message or header, that matches a shape that
 personal data takes — an address of the kind mail uses, a phone number, a bank account
 number, a postal address, each only in the format its pattern spells out, so a format it was
-not written for passes. It
-reads every new commit rather than the tip alone, because a push publishes them all, and a
-line removed in a later commit stays reachable by its hash for anyone who clones. A commit is
-new unless the remote's old tip for that ref reaches it, or one of this clone's tracking refs
-for the destination remote does. Of a new commit it reads only the lines it adds: every other
-line of its tree was added by another new commit or is already on the remote, checked on its
-way there. A merge adds a line only when the line is new against every parent: each commit
-is diffed once per parent, as text even where a file holds a NUL byte or is marked binary,
-and a line counts only when every one of those diffs adds it. A committer may also be
-GitHub's web-flow identity, the one a merge through the web UI records; as an author it is
-still undeclared.
+not written for passes. It reads every new commit rather than the tip alone, because a push
+publishes them all, and a line removed in a later commit stays reachable by its hash for
+anyone who clones. A commit is new unless the remote's old tip for that ref reaches it, or
+one of this clone's tracking refs for the destination remote does. Of a new commit it reads
+only the lines it adds: every other line of its tree was added by another new commit or is
+already on the remote, checked on its way there. A merge adds a line only when the line is
+new against every parent: each commit is diffed once per parent, as text even where a file
+holds a NUL byte or is marked binary, and a line counts only when every one of those diffs
+adds it. A committer may also be GitHub's web-flow identity, the one a merge through the web
+UI records; as an author it is still undeclared.
 
 Each new commit's object is read as well, as stored, the way a tag object is: the message,
 since a message is as public as a blob and trailers are where addresses ride in, and every
@@ -121,28 +120,27 @@ when it is pushed under another name or inside another tag.
 | a tag object pushed as such (the tag check) | matched | matched |
 
 A signed commit carries its signature in a `gpgsig` header (`gpgsig-sha256` in a SHA-256
-repository), and a merge of a signed tag
-carries the tag, tagger and signature, in a `mergetag` header; git writes one only for a tag
-whose message holds a signature (*measured with git 2.55.0, 2026-10-02*). A signature's base64
-lines are encoded bytes in which no shape can be read, yet a run of their letters and digits
-takes the IBAN pattern's form now and then: in random bytes the size of a signature, base64
-encoded and wrapped as git stores them, about one OpenPGP Ed25519 signature in 2,400, one SSH
-Ed25519 signature in 900, one OpenPGP RSA-4096 signature in 425 and one 3 KB X.509 signature
-in 85 (*simulated, 200,000 runs each and 50,000 for X.509, 2026-10-02; none of the signed
-commits in this repository's history held such a line that day*). So in those headers a
-signature's base64 lines are not matched: from the last line that opens a signature, as git
-finds one — `-----BEGIN PGP SIGNATURE-----`, `PGP MESSAGE`, `SSH SIGNATURE` or
-`SIGNED MESSAGE` — to the `-----END …-----` line after it, a line made only of base64
+repository), and a merge of a signed tag carries the tag, tagger and signature, in a
+`mergetag` header; git writes one only for a tag whose message holds a signature (*measured
+with git 2.55.0, 2026-10-02*). A signature's base64 lines are encoded bytes in which no shape
+can be read, yet a run of their letters and digits takes the IBAN pattern's form now and
+then: in random bytes the size of a signature, base64 encoded and wrapped as git stores them,
+about one OpenPGP Ed25519 signature in 2,400, one SSH Ed25519 signature in 1,450, one OpenPGP
+RSA-4096 signature in 425 and one 3 KB X.509 signature in 85 (*simulated, 200,000 runs each,
+400,000 for SSH at the 232 characters of a real one and 50,000 for X.509, 2026-10-02; none of
+the signed commits in this repository's history held such a line that day*). So in those
+headers a signature's base64 lines are not matched: from the last line that opens a
+signature, as git finds one — `-----BEGIN PGP SIGNATURE-----`, `PGP MESSAGE`, `SSH SIGNATURE`
+or `SIGNED MESSAGE` — to the `-----END …-----` line after it, a line made only of base64
 characters is skipped. An armour of another name, or one before the last, is matched like any
 text. The merged tag's tagger is held to the declared identities as a pushed tag's tagger is,
 and left out of the shapes; a tagger line with no `>` in it is a check that could not run. In
 a merge read as converted, a tagger git shows counts as declared when the one stored in its
 place is — for an encoding outside the list above, only when the two differ in nothing but
-characters outside ASCII, as for an author. A
-merged tag that names no tagger brings no identity along and is no finding, unlike a pushed
-tag with none. The
-tag check makes no such exception, so a signed tag pushed as a tag object still meets those
-odds. Whether it should leave its base64 lines out as well is open, for the owner to decide.
+characters outside ASCII, as for an author. A merged tag that names no tagger brings no
+identity along and is no finding, unlike a pushed tag with none. The tag check makes no such
+exception, so a signed tag pushed as a tag object still meets those odds. Whether it should
+leave its base64 lines out as well is open, for the owner to decide.
 
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:

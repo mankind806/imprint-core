@@ -787,26 +787,26 @@ note committers '%s\n' "$web_flow"
 # matches nothing as stored, so a commit read as converted that holds a NUL
 # is the same finding, as is one git could not convert at all (below).
 #
-# prepare reads one object, any NUL turned into \001, twice - or a commit as
-# git log --pretty=raw converts and prints it, whose identities are the ones
-# git shows; git drops the encoding line from what it has converted. The first pass
+# prepare reads one object, any NUL turned into \001, twice - or a commit as git
+# log --pretty=raw converts and prints it, whose identities are the ones git
+# shows; git drops the encoding line from what it has converted. The first pass
 # counts the author and committer lines of the header, finds its encoding line
 # and the last line that opens a signature in each header field. It reads the
 # declared identities from IMPRINT_ALLOWED and IMPRINT_COMMITTERS. The second
-# prints the lines to match - each line it does not change as
-# it read it - and appends where each comes from, "commit:N" with N its line
-# in the object, to IMPRINT_COMMITLOC, and each merged tag's tagger identity
-# to IMPRINT_MTTAGGERS as "commit<TAB>identity", empty when the tagger line
-# holds no ">"; reading a commit as converted, a tagger is not written when
-# the one in its place in the object as stored, from IMPRINT_RAWTAGGERS, is
-# the same, or is declared - and, with IMPRINT_UNREAD above 0, differs from it
-# in nothing but characters outside ASCII. It writes four counts to
-# IMPRINT_OBJCNT, one to a line: the lines it printed; 1 when the header
-# names an encoding other than UTF-8 - reading a commit as converted, when it
-# holds as many encoding lines as IMPRINT_ENCLINES says the object does, so
-# git did not convert it - else 0; the taggers; and 1 when that encoding is
-# not one it reads in full, 2 when it is but the object holds a NUL, else 0;
-# and the encoding lines of the header.
+# prints the lines to match - each line it does not change as it read it - and
+# appends where each comes from, "commit:N" with N its line in what it reads -
+# the object, or git's printout - to IMPRINT_COMMITLOC, and each merged tag's
+# tagger identity to IMPRINT_MTTAGGERS as "commit<TAB>identity", empty when the
+# tagger line holds no ">"; reading a commit as converted, a tagger is not
+# written when the one in its place in the object as stored, from
+# IMPRINT_RAWTAGGERS, is the same, or is declared - and, with IMPRINT_UNREAD
+# above 0, differs from it in nothing but characters outside ASCII. It writes
+# five counts to IMPRINT_OBJCNT, one to a line: the lines it printed; 1 when the
+# header names an encoding other than UTF-8 - reading a commit as converted,
+# when it holds at least as many encoding lines as IMPRINT_ENCLINES says the
+# object does, so git did not convert it - else 0; the taggers; and 1 when that
+# encoding is not one it reads in full, 2 when it is but the object holds a NUL,
+# else 0; and the encoding lines of the header.
 prepare='
 BEGIN {
   c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_COMMITLOC"]; mt = ENVIRON["IMPRINT_MTTAGGERS"]
@@ -1332,14 +1332,14 @@ note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
 
 # --- check 3: commit objects -------------------------------------------------
 # A message is as public as a blob, and trailers are where addresses ride in; a
-# header line is published as much. Each new commit's object was read above,
-# as stored, but for the identities check 1 reads, a merged tag's tagger
-# included, and a signature's base64 lines. A commit whose header names an encoding other than UTF-8 was read as
-# git log converts it, too, header and message: in Latin-1, a place that
-# starts with an umlaut matches the pattern neither under a UTF-8 locale nor
-# under C, and in UTF-7 a header line read as stored shows no shape that git
-# shows in it. The shapes are matched line by line, as everywhere in this
-# hook.
+# header line is published as much. Each new commit's object was read above, as
+# stored, but for the identities check 1 reads, a merged tag's tagger included,
+# and a signature's base64 lines. A commit whose header names an encoding other
+# than UTF-8 was read as git log converts it, too, header and message: in
+# Latin-1, a place that starts with an umlaut matches the pattern neither under
+# a UTF-8 locale nor under C, and in UTF-7 a header line read as stored shows no
+# shape that git shows in it. The shapes are matched line by line, as everywhere
+# in this hook.
 n_done=0
 while IFS="$tab" read -r name pattern; do
   if grep_both "$name" "$pattern" "$work/committext" "the commit objects"; then

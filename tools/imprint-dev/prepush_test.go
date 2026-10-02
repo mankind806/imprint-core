@@ -2379,6 +2379,10 @@ func TestPrePushCommitObjectHeader(t *testing.T) {
 			[]string{":3:author <" + second + ">" + date}},
 		{"two author lines", parent + "author " + me + date + "\nauthor " + me + date + "\ncommitter " + me + date + "\n\ntwo: a clean subject\n",
 			[]string{":3:author " + me, ":4:author " + me}},
+		{"two committer lines", parent + "author " + me + date + "\ncommitter " + me + date + "\ncommitter " + me + date + "\n\ntwo: committers\n",
+			[]string{":4:committer " + me, ":5:committer " + me}},
+		{"a NUL inside the identity", parent + "author " + ppAuthorName + "\x00 <" + ccTestAuthorEmail + ">" + date + "\ncommitter " + me + date + "\n\nnul: identity\n",
+			[]string{":3:author " + ppAuthorName + "\x01 <" + ccTestAuthorEmail + ">"}},
 		{"a NUL before the identity", parent + "x-n\x00ul\nauthor " + me + date + "\ncommitter " + me + date + "\n\nnul: a clean subject\n",
 			[]string{":4:author " + me, ":5:committer " + me}},
 	} {
@@ -2389,7 +2393,8 @@ func TestPrePushCommitObjectHeader(t *testing.T) {
 			wants := []string{"in a commit object: " + oid + ":"}
 			ppWantRefused(t, code, out, append(wants, c.wants...)...)
 			ppWantChecked(t, out)
-			if strings.Contains(out, "undeclared identity") {
+			// git shows no identity where a NUL ends the name.
+			if c.name != "a NUL inside the identity" && strings.Contains(out, "undeclared identity") {
 				t.Errorf("check 1 read an identity other than the declared one; output:\n%s", out)
 			}
 		})
@@ -2509,6 +2514,8 @@ func TestPrePushGpgsigHeader(t *testing.T) {
 		wants        []string // nil: the push passes
 	}{
 		{"gpgsig", "gpgsig " + ppArmour(" ", ""), nil},
+		{"an SSH signature", "gpgsig " + strings.Replace(strings.Replace(ppArmour(" ", ""), "PGP SIGNATURE", "SSH SIGNATURE", 2), " \n", "", 1), nil},
+		{"an X.509 signature", "gpgsig " + strings.Replace(ppArmour(" ", ""), "PGP SIGNATURE", "SIGNED MESSAGE", 2), nil},
 		{"gpgsig-sha256", "gpgsig-sha256 " + ppArmour(" ", ""), nil},
 		{"an armour header", "gpgsig " + ppArmour(" ", "Comment: "+comment), []string{"address in a commit object: ", ":6: Comment: " + comment}},
 		{"after the armour", "gpgsig " + ppArmour(" ", "") + " " + ppIBANLine + "\n", []string{"IBAN in a commit object: ", ":11: " + ppIBANLine}},
@@ -2905,6 +2912,15 @@ func TestPrePushConvertedIdentity(t *testing.T) {
 			ppWantChecked(t, out)
 		})
 	}
+	// GitHub's web-flow identity is a committer check 1 accepts, under an
+	// encoding header as anywhere.
+	t.Run("the web-flow committer", func(t *testing.T) {
+		r := r.with(t)
+		web := "GitHub <" + ccTestWebFlowEmail + ">" + date
+		oid := r.rawCommit(head + "author " + me + date + "\ncommitter " + web + "\nencoding ISO-8859-1\n\nweb: a clean subject\n")
+		code, out := r.hookNewBranch("web", oid)
+		ppWantPass(t, code, out)
+	})
 	t.Run("a name stored in Latin-1", func(t *testing.T) {
 		r := r.with(t)
 		name := "J\u00f6rg T\u00e4ster"
