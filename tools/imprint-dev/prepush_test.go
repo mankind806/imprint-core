@@ -1230,10 +1230,12 @@ func TestPrePushToolchains(t *testing.T) {
 	rawMsgTip := r.rawCommit("tree " + tree + "\nparent " + tagged + "\nauthor " + tcID + "\ncommitter " + tcID +
 		"\n\nrawmsg: a Latin-1 byte\n\nTel.:\xa0" + "0" + "30" + " " + "1234567\n")
 	// The encoding cases here hold with any grep: busybox sh runs busybox's
-	// own grep, which in CI matched no capital umlaut in a place, so the
-	// umlaut cases stay in tests 40 and 42. A declared name outside ASCII
+	// own grep, which in CI matched no capital umlaut in a place while the
+	// postcode pattern held its umlauts in a bracket; the encoding cases
+	// that need one are in tests 40 and 42. A declared name outside ASCII
 	// shows git log's --encoding at work, and a mislabelled commit's
-	// address its message read as stored.
+	// address its message read as stored. umlautplace below runs the
+	// spelled-out pattern (44) under every shell.
 	tcName := "J\u00fcrgen Test"
 	tcDeclared := []string{"GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0=" + tcName + " <" + ccTestSomeoneEmail + ">"}
 	r.git("checkout", "-q", "-b", "encid", "main")
@@ -1248,6 +1250,9 @@ func TestPrePushToolchains(t *testing.T) {
 	r.git("-c", "user.name="+tcName, "-c", "user.email="+ccTestSomeoneEmail, "-c", "i18n.commitEncoding=ISO-8859-1",
 		"commit", "-q", "-m", "mislabel: write to "+tcMislabelAddr)
 	mislabelTip := r.head()
+	r.git("checkout", "-q", "-b", "umlautplace", "main")
+	r.write("up.txt", "head\ndeliver to "+"10115"+" "+"\u00dcbungsstadt\n")
+	umlautPlaceTip := r.commit("umlautplace: a place with a capital umlaut")
 	latin1Tagger := r.rawTag("object " + tagged + "\ntype commit\ntag tc-latin1tagger\ntagger Gr\xfcn Fremd <" +
 		ccTestSomeoneEmail + "> 1767225600 +0000\n\na clean tag\n")
 
@@ -1314,6 +1319,11 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantChecked(t, out)
 				if strings.Contains(out, "undeclared identity") {
 					t.Errorf("the stored reading did not vouch for the declared name; output:\n%s", out)
+				}
+				for _, lc := range []string{"LC_ALL=C", "LC_ALL=C.UTF-8"} {
+					code, out = c.hookNewBranch("umlautplace", umlautPlaceTip, lc)
+					ppWantRefused(t, code, out, "postcode and place: ", ":up.txt:2:")
+					ppWantChecked(t, out)
 				}
 				code, out = c.hookNewTag("tc-latin1tagger", latin1Tagger, "LC_ALL=C.UTF-8")
 				ppWantRefused(t, code, out, ", tagger of tag tc-latin1tagger")
@@ -2208,5 +2218,29 @@ func TestPrePushTaggerLatin1Name(t *testing.T) {
 	ppWantChecked(t, out)
 	if strings.Contains(out, "address in tag") {
 		t.Errorf("the tagger's identity was read as a shape; output:\n%s", out)
+	}
+}
+
+// 44. Under C a bracket expression reads a pattern's umlauts byte by byte:
+// five digits before a word that starts with a lowercase umlaut matched the
+// postcode pattern, and a place that starts with a capital one did not. The
+// pattern spells each umlaut out as an alternative, which C reads as the same
+// character a UTF-8 locale does. Each case runs under C.UTF-8 and under C.
+func TestPrePushPostcodeUmlauts(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	r.git("checkout", "-q", "-b", "count", "main")
+	r.write("count.txt", "head\nnur "+"12345"+" "+"übrig\n")
+	countTip := r.commit("count: a number before a word")
+	r.git("checkout", "-q", "-b", "place", "main")
+	r.write("place.txt", "head\ndeliver to "+"10115"+" "+"Übungsstadt\n")
+	placeTip := r.commit("place: a place with a capital umlaut")
+	for _, lc := range []string{"LC_ALL=C.UTF-8", "LC_ALL=C"} {
+		code, out := r.hookNewBranch("count", countTip, lc)
+		ppWantPass(t, code, out)
+		code, out = r.hookNewBranch("place", placeTip, lc)
+		ppWantRefused(t, code, out, "postcode and place: "+placeTip+":place.txt:2:")
+		ppWantChecked(t, out)
 	}
 }
