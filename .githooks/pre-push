@@ -507,36 +507,44 @@ grep_both() {
 # the same. A part this hook skipped would be a place to hide a line in.
 #
 # But for a signature's base64 lines, as in a commit's gpgsig and mergetag
-# headers (see prepare): encoded bytes, in which no shape can be read, yet a
-# run of their letters and digits takes the IBAN pattern's form in about one
+# headers (see prepare): encoded bytes, in which no shape can be read, yet a run
+# of their letters and digits takes the IBAN pattern's form in about one
 # RSA-4096 signature in 425 (simulated, 2026-10-02). From the last line that
 # opens a signature, as git finds one in a tag, to the -----END ...----- line
-# after it, a line made only of base64 characters is not matched (the owner's
-# call, 2026-10-02). The hole is the same as there: an IBAN without spaces, or
-# a phone number with a slash, alone on such a line.
+# after it - an armour only when that line is there - a line made only of base64
+# characters is not matched (the owner's call, 2026-10-02). The hole is the same
+# as there: an IBAN without spaces, or a phone number with a slash, on a line of
+# base64 characters alone between those two lines. A tag's message is a person's
+# text, and git tag -a writes such an armour into it as typed.
 #
-# tagprep reads one tag object, any NUL turned into \001, twice: the first
-# pass counts its lines and finds that last line - one that starts with a
-# marker, as git's own test is - the second prints every line as it read it,
-# but for the identity on a tagger line of the header - everything up to its
-# last ">" - and a line of the signature that is base64 alone in the object,
-# printed empty so that line numbers stay those of the object. It fails when
-# the second pass did not read as many lines as the first, and writes the
-# lines it printed to IMPRINT_OBJCNT.
+# tagprep reads one tag object, any NUL turned into \001, twice: the first pass
+# counts its lines, finds that last line - one that starts with a marker, as
+# git's own test is - and whether an exact END line follows it; the second
+# prints every line as it read it, but for the identity on a tagger line of the
+# header - everything up to its last ">" - and a line of the signature that is
+# base64 alone in the object, when there is an END line, printed empty so that
+# line numbers stay those of the object. It fails when the second pass did not
+# read as many lines as the first, and writes the lines it printed to
+# IMPRINT_OBJCNT.
 tagprep='
 BEGIN {
-  pass = 0; k = 0; n1 = 0; last = 0; hd = 0; armour = 0
+  pass = 0; k = 0; n1 = 0; last = 0; endok = 0; hd = 0; armour = 0
   b64 = "^[A-Za-z0-9+/=]*$"; armend = "^-----END [A-Z ]*-----$"
   sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----"
 }
 FNR == 1 { pass++ }
-pass == 1 { n1++; if ($0 ~ sigbegin) last = FNR; next }
+pass == 1 {
+  n1++
+  if ($0 ~ sigbegin) { last = FNR; endok = 0 }
+  else if (last && $0 ~ armend) endok = 1
+  next
+}
 {
   line = $0
   if (!hd && line == "") hd = 1
   else if (!hd && match(line, /^tagger .*>/)) line = "tagger" substr(line, RLENGTH + 1)
   if (armour && $0 ~ b64) line = ""
-  else if (FNR == last) armour = 1
+  else if (FNR == last && endok) armour = 1
   else if (armour && $0 ~ armend) armour = 0
   print line; k++
 }
@@ -603,8 +611,8 @@ TAGGERS
     fi
     # The object as it is, but for the identity on each tagger line of the
     # header, checked above, and the signature's base64 lines; line numbers
-    # stay those of the object, and a line awk lost is a check that could
-    # not run.
+    # stay those of the object. A line one pass of awk read and the other did
+    # not, or a count its output does not hold, is a check that could not run.
     true >"$work/objcnt" || refuse "$cannot_write"
     if IMPRINT_OBJCNT="$work/objcnt" LC_ALL=C awk "$tagprep" "$t_file" "$t_file" >"$work/tagtext" </dev/null \
       && t_k="$(cat "$work/objcnt")" && [ -n "$t_k" ] \
@@ -801,13 +809,13 @@ note committers '%s\n' "$web_flow"
 # these two headers a signature's base64 lines are not matched: from the last
 # line of the header that opens a signature, as git finds one - a line that
 # starts with -----BEGIN PGP SIGNATURE-----, PGP MESSAGE, SSH SIGNATURE or
-# SIGNED MESSAGE - to the -----END ...----- line after it, a line made only of
-# base64 characters is skipped. Every other line of them is matched: the armour
-# lines, an armour header such as Comment:, the merged tag's name and message,
-# any armour of another name or before the last one. The merged tag's tagger is
-# left out the way the tag check leaves a tagger out, everything up to the last
-# > on the line, and check 1 holds it to the declared identities as the tag
-# check does.
+# SIGNED MESSAGE - to the -----END ...----- line after it - an armour only when
+# that line is there - a line made only of base64 characters is skipped. Every
+# other line of them is matched: the armour lines, an armour header such as
+# Comment:, the merged tag's name and message, any armour of another name or
+# before the last one. The merged tag's tagger is left out the way the tag check
+# leaves a tagger out, everything up to the last > on the line, and check 1
+# holds it to the declared identities as the tag check does.
 #
 # git log converts a commit from the encoding its header names, and the
 # patterns are UTF-8: a Latin-1 place read as stored matches nothing under a
@@ -916,7 +924,8 @@ pass == 1 {
     else if (substr($0, 1, 10) == "committer ") nc++
     else if (f1 == "encoding" && substr($0, 9, 1) == " ") { nenc++; if (!enc) { enc = 1; ev = t1 } }
   }
-  if (signed(f1) && t1 ~ sigbegin) lastsig[s1] = FNR
+  if (signed(f1) && t1 ~ sigbegin) { lastsig[s1] = FNR; endok[s1] = 0 }
+  else if (signed(f1) && (s1 in lastsig) && t1 ~ armend) endok[s1] = 1
   next
 }
 { n2++ }
@@ -933,7 +942,7 @@ $0 == "" { body = 1; next }
   }
   if (signed(field)) {
     if (armour && text ~ b64) next
-    if ((fstart in lastsig) && lastsig[fstart] == FNR) armour = 1
+    if ((fstart in lastsig) && lastsig[fstart] == FNR && endok[fstart]) armour = 1
     else if (armour && text ~ armend) armour = 0
     if (inner && text == "") inner = 0
     else if (inner && substr(text, 1, 7) == "tagger ") {

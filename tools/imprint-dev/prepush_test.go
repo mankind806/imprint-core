@@ -2516,6 +2516,10 @@ func TestPrePushEmptyEncodingHeader(t *testing.T) {
 // pattern, as one in about 400 RSA-4096 signatures holds by chance.
 var ppIBANLine = "DE" + "89" + "3704" + "0044" + "0532" + "0130" + "00"
 
+// ppSpacedIBAN is the same IBAN with its spaces: no longer base64 alone, so
+// read wherever it is.
+var ppSpacedIBAN = "DE" + "89" + " " + "3704" + " " + "0044" + " " + "0532" + " " + "0130" + " " + "00"
+
 // ppArmour is an armoured signature block, each line after the first
 // starting with prefix, as git stores one in a header; extra goes in before
 // the base64 lines.
@@ -2550,6 +2554,10 @@ func TestPrePushGpgsigHeader(t *testing.T) {
 		{"another header", "x-note " + ppArmour(" ", ""), []string{"IBAN in a commit object: ", ":8: " + ppIBANLine}},
 		{"an armour that is no signature", "gpgsig -----BEGIN NOTES-----\n " + ppIBANLine + "\n -----END NOTES-----\n",
 			[]string{"IBAN in a commit object: ", ":6: " + ppIBANLine}},
+		{"an armour with no END line", "gpgsig -----BEGIN PGP SIGNATURE-----\n \n " + ppIBANLine + "\n",
+			[]string{"IBAN in a commit object: ", ":7: " + ppIBANLine}},
+		{"a spaced IBAN in the armour", "gpgsig -----BEGIN PGP SIGNATURE-----\n \n " + ppSpacedIBAN + "\n -----END PGP SIGNATURE-----\n",
+			[]string{"IBAN in a commit object: ", ":7: " + ppSpacedIBAN}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := r.with(t)
@@ -2739,6 +2747,20 @@ func TestPrePushMergetagHeader(t *testing.T) {
 			me + date + "\n \n notes\n -----BEGIN PGP SIGNATURE-----\n " + fakeIBAN + "\n -----END PGP SIGNATURE-----\n -----BEGIN PGP SIGNATURE-----x\n\ntrail: merge\n")
 		code, out := r.hookNewBranch("trail", oid)
 		ppWantRefused(t, code, out, "IBAN in a commit object: "+oid+":13: "+fakeIBAN)
+		ppWantChecked(t, out)
+	})
+
+	// A merged tag whose message holds a marker and no END line: git
+	// copies it into the mergetag header, and the lines after the marker
+	// are read.
+	t.Run("a marker with no END line", func(t *testing.T) {
+		r := r.with(t)
+		date := " 1767225600 +0000"
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") + "\nparent " + side +
+			"\nauthor " + me + date + "\ncommitter " + me + date + "\nmergetag object " + side + "\n type commit\n tag t-noend\n tagger " +
+			me + date + "\n \n notes\n -----BEGIN PGP SIGNATURE-----\n \n " + fakeIBAN + "\n\nnoend: merge\n")
+		code, out := r.hookNewBranch("noend", oid)
+		ppWantRefused(t, code, out, "IBAN in a commit object: "+oid+":14: "+fakeIBAN)
 		ppWantChecked(t, out)
 	})
 
@@ -3187,6 +3209,21 @@ func TestPrePushTagSignature(t *testing.T) {
 		// more on it, so the armour before it is message to git.
 		{"trailing-marker", "a message\n-----BEGIN PGP SIGNATURE-----\n" + fakeIBAN + "\n-----END PGP SIGNATURE-----\n-----BEGIN PGP SIGNATURE-----x\n",
 			[]string{"IBAN in tag trailing-marker: 8:" + fakeIBAN}},
+		// An armour is one only when its END line follows: a message that
+		// holds a marker alone, as git tag -a writes any message, is read
+		// to its end, and so is one whose END line has more on it.
+		{"no-end", "release notes\n\nthe block starts with\n-----BEGIN PGP SIGNATURE-----\n\n" + ppIBANLine + "\n",
+			[]string{"IBAN in tag no-end: 11:" + ppIBANLine}},
+		{"cr-end", "a clean tag\n-----BEGIN PGP SIGNATURE-----\n\n" + ppIBANLine + "\n-----END PGP SIGNATURE-----\r\n",
+			[]string{"IBAN in tag cr-end: 9:" + ppIBANLine}},
+		{"space-end", "a clean tag\n-----BEGIN PGP SIGNATURE-----\n\n" + ppIBANLine + "\n-----END PGP SIGNATURE----- \n",
+			[]string{"IBAN in tag space-end: 9:" + ppIBANLine}},
+		// Inside the armour, only a line of base64 characters alone is
+		// left out: one with spaces, or an address, is read.
+		{"spaced", "a clean tag\n-----BEGIN PGP SIGNATURE-----\n\n" + ppSpacedIBAN + "\n-----END PGP SIGNATURE-----\n",
+			[]string{"IBAN in tag spaced: 9:" + ppSpacedIBAN}},
+		{"address-in-armour", "a clean tag\n-----BEGIN PGP SIGNATURE-----\n\n" + comment + "\n-----END PGP SIGNATURE-----\n",
+			[]string{"address in tag address-in-armour: 9:" + comment}},
 		// A tagger line in the message is text, its identity read.
 		{"tagger-line", "a clean tag\ntagger " + stranger + "\n", []string{"address in tag tagger-line: 7:tagger " + stranger}},
 	} {
