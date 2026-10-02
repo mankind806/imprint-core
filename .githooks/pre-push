@@ -24,7 +24,7 @@
 # `git fetch --prune` first. A line already on it was checked on its way there,
 # or predates the hook; reading it again would refuse every push for what is
 # already published. A new commit whose header names an encoding other than
-# UTF-8 has its message read as git converts it, too.
+# UTF-8 is read as git converts it, too.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -760,15 +760,17 @@ note committers '%s\n' "$web_flow"
 # patterns are UTF-8: a Latin-1 place read as stored matches nothing under a
 # UTF-8 locale or C. So a commit whose header names another encoding - or none
 # at all on its encoding line, which git takes for the locale's - is read as
-# git log converts it too, in check 3, and check 1 reads its identities both
-# ways. A header can name an encoding the bytes are not in: with
+# git log converts it too, header and message, and check 1 reads its
+# identities both ways. A header can name an encoding the bytes are not in: with
 # i18n.commitEncoding set to Latin-1 and UTF-8 typed in, git commit writes
 # UTF-8 under a Latin-1 header, and the conversion turns each character
 # outside ASCII into two that no pattern and no declared name holds. git log
 # --format converts even under --encoding=none (both measured with git 2.55.0,
 # 2026-10-01).
 #
-# prepare reads one object, any NUL turned into \001, twice. The first pass
+# prepare reads one object, any NUL turned into \001, twice - or a commit as
+# git log --pretty=raw converts and prints it, whose identities are the ones
+# git shows; git drops the encoding line from what it has converted. The first pass
 # counts the author and committer lines of the header, finds its encoding line
 # and the last line that opens a signature in each header field. It reads the
 # declared identities from IMPRINT_ALLOWED and IMPRINT_COMMITTERS. The second
@@ -890,10 +892,10 @@ ascii_of() { printf '%s\n' "$1" | LC_ALL=C sed 's/[^ -~]//g'; }
 # committext and commitloc are parallel, as added and addedloc are below, and
 # rawcommits lists "oid N" for each commit read as converted as well, raw.N
 # holding its object.
-for f in committext commitloc mttaggers rawcommits; do
+for f in committext commitloc convtext convloc mttaggers rawcommits; do
   true >"$work/$f" || refuse "$cannot_write"
 done
-n_obj=0; n_raw=0; n_lines=0; n_mt=0
+n_obj=0; n_raw=0; n_lines=0; n_conv=0; n_mt=0
 while read -r o_oid; do
   n_obj=$((n_obj + 1))
   # ids holds two lines a commit, in the order of commits.
@@ -924,11 +926,27 @@ while read -r o_oid; do
     n_raw=$((n_raw + 1))
     mv "$work/raw.t" "$work/raw.$n_raw" || refuse "could not keep commit $o_oid for reading as converted."
     note rawcommits '%s %s\n' "$o_oid" "$n_raw"
+    # The whole commit as git log converts it, header and message: --pretty=raw
+    # prints every header line, a converted one as git reads it.
+    git log -1 --no-show-signature --no-notes --no-decorate --encoding=UTF-8 --pretty=raw "$o_oid" \
+      >"$work/conv.tmp" </dev/null || refuse "git log failed reading commit $o_oid as converted."
+    true >"$work/objcnt" || refuse "$cannot_write"
+    IMPRINT_COMMIT="$o_oid" IMPRINT_COMMITLOC="$work/convloc" IMPRINT_MTTAGGERS="$work/mttaggers" \
+      IMPRINT_ALLOWED="$work/allowed" IMPRINT_COMMITTERS="$work/committers" \
+      IMPRINT_AUTHOR_SHOWN="$o_a" IMPRINT_COMMITTER_SHOWN="$o_c" \
+      IMPRINT_OBJCNT="$work/objcnt" LC_ALL=C awk "$prepare" "$work/conv.tmp" "$work/conv.tmp" \
+      >>"$work/convtext" </dev/null || refuse "awk could not read commit $o_oid as converted."
+    o_k=''; o_conv=''; o_m=''
+    { read -r o_k && read -r o_conv && read -r o_m; } <"$work/objcnt" || o_k=''
+    case "$o_k:$o_conv:$o_m" in
+      *[!0-9:]* | :* | *::* | *:) refuse "awk reported no count of what it read from commit $o_oid as converted." ;;
+    esac
+    n_conv=$((n_conv + o_k)); n_mt=$((n_mt + o_m))
   fi
 done <"$work/commits" 3<"$work/ids" || refuse "could not read back the new commits."
 [ "$n_obj" = "$n_commits" ] || refuse "read back $n_obj of $n_commits new commit(s)."
 # A line awk could not write down - a full disk, say - would go unmatched.
-for f in committext:"$n_lines" commitloc:"$n_lines" mttaggers:"$n_mt"; do
+for f in committext:"$n_lines" commitloc:"$n_lines" convtext:"$n_conv" convloc:"$n_conv" mttaggers:"$n_mt"; do
   n_f="$(wc -l <"$work/${f%%:*}" | tr -d ' ')"
   [ "$n_f" = "${f#*:}" ] || refuse \
     "wrote down ${n_f:-none} of ${f#*:} line(s) of the new commits' objects in ${f%%:*}."
@@ -1238,49 +1256,26 @@ note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
 # A message is as public as a blob, and trailers are where addresses ride in; a
 # header line is published as much. Each new commit's object was read above,
 # as stored, but for the identities check 1 reads and a signature's base64
-# lines. A commit whose header names an encoding other than UTF-8 has its
-# message read here as git log converts it, too: in Latin-1, a place that
+# lines. A commit whose header names an encoding other than UTF-8 was read as
+# git log converts it, too, header and message: in Latin-1, a place that
 # starts with an umlaut matches the pattern neither under a UTF-8 locale nor
-# under C. The shapes are matched line by line, as everywhere in this hook.
-true >"$work/convtext" && true >"$work/convloc" || refuse "$cannot_write"
-number='
-BEGIN { c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_LOC"]; k = 0 }
-{ print; print c ":" FNR >> loc; k++ }
-END { cnt = ENVIRON["IMPRINT_OBJCNT"]; print k > cnt }
-'
-n_read=0; n_conv=0
-while read -r r_oid r_n; do
-  n_read=$((n_read + 1))
-  git log -1 --no-show-signature --encoding=UTF-8 --format=%B "$r_oid" >"$work/conv.tmp" </dev/null \
-    || refuse "git log failed reading the message of $r_oid as converted."
-  true >"$work/objcnt" || refuse "$cannot_write"
-  IMPRINT_COMMIT="$r_oid" IMPRINT_LOC="$work/convloc" IMPRINT_OBJCNT="$work/objcnt" \
-    LC_ALL=C awk "$number" "$work/conv.tmp" >>"$work/convtext" </dev/null \
-    || refuse "awk could not read the message of $r_oid as converted."
-  r_k="$(cat "$work/objcnt")" || r_k=''
-  case "$r_k" in '' | *[!0-9]*) refuse "awk reported no count of the message of $r_oid as converted." ;; esac
-  n_conv=$((n_conv + r_k))
-done <"$work/rawcommits" || refuse "could not read back the commits read as converted."
-[ "$n_read" = "$n_raw" ] || refuse "read back $n_read of $n_raw commit(s) read as converted."
-for f in convtext convloc; do
-  n_f="$(wc -l <"$work/$f" | tr -d ' ')"
-  [ "$n_f" = "$n_conv" ] || refuse \
-    "wrote down ${n_f:-none} of $n_conv line(s) of the converted messages in $f."
-done
+# under C, and in UTF-7 a header line read as stored shows no shape that git
+# shows in it. The shapes are matched line by line, as everywhere in this
+# hook.
 n_done=0
 while IFS="$tab" read -r name pattern; do
   if grep_both "$name" "$pattern" "$work/committext" "the commit objects"; then
     place_hits "$name in a commit object" "$work/commitloc"
   fi
   if [ "$n_raw" -gt 0 ] \
-    && grep_both "$name" "$pattern" "$work/convtext" "the converted commit messages"; then
-    place_hits "$name in a commit message converted to UTF-8" "$work/convloc"
+    && grep_both "$name" "$pattern" "$work/convtext" "the converted commits"; then
+    place_hits "$name in a commit converted to UTF-8" "$work/convloc"
   fi
   n_done=$((n_done + 1))
 done <"$work/shapes"
 [ "$n_done" = "$n_shapes" ] || note errors \
   'ran %s of %s shape(s) over the commit objects\n' "$n_done" "$n_shapes"
-note ran 'commit objects - %s shape(s) over %s new commit object(s), all but the identities check 1 reads; %s message(s) also as converted to UTF-8\n' \
+note ran 'commit objects - %s shape(s) over %s new commit object(s), all but the identities check 1 reads; %s of them also as converted to UTF-8\n' \
   "$n_shapes" "$n_commits" "$n_raw"
 
 # --- report ------------------------------------------------------------------

@@ -56,9 +56,11 @@ either one made a declared name outside ASCII read as undeclared, and hid a post
 place that starts with an umlaut in a message read through `git log` from both matches
 (*measured with git 2.55.0, 2026-10-01*). The message is read from the object, where neither
 setting reaches. git converts a commit from the encoding its header names, though, and in
-Latin-1 a place with an umlaut matches no pattern, so a commit whose header names an encoding
-other than UTF-8 has its message read as `git log --encoding=UTF-8` converts it, too. An
-encoding line that names nothing counts as such a header: git takes the locale's character
+Latin-1 a place with an umlaut matches no pattern under a UTF-8 locale or `C`, so a commit
+whose header names an encoding other than UTF-8 is read whole as `git log --pretty=raw
+--encoding=UTF-8` converts and prints it, too — header and message, since in UTF-7 a header
+line or a signature line that holds no shape as stored can hold one to git (*measured with git
+2.55.0, 2026-10-02*). An encoding line that names nothing counts as such a header: git takes the locale's character
 set for it, and under a Latin-1 locale it turned a UTF-8 place into characters no pattern
 holds (*measured with git 2.55.0, 2026-10-02*), which the object as stored still has as
 written. The header can also be wrong: with `i18n.commitEncoding` set to Latin-1 and UTF-8

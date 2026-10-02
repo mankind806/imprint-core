@@ -2176,8 +2176,9 @@ func TestPrePushIdentityEncoding(t *testing.T) {
 // declared name into one nobody declared; the commit's object as stored still
 // holds them, and check 1 reads its identities both ways. A commit whose
 // header is right - Latin-1 bytes under a Latin-1 header - is found through
-// git's conversion. Each case runs with and without the setting when the hook
-// runs, under C.UTF-8.
+// git's conversion, which git log --pretty=raw prints with the message
+// indented. Each case runs with and without the setting when the hook runs,
+// under C.UTF-8.
 func TestPrePushMislabelledEncoding(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -2239,7 +2240,7 @@ func TestPrePushMislabelledEncoding(t *testing.T) {
 			ppWantRefused(t, code, out, "undeclared identity: ", " <"+ccTestSomeoneEmail+">")
 			ppWantChecked(t, out)
 			code, out = r.hookNewBranch("rightplace", rightPlace, c.env...)
-			ppWantRefused(t, code, out, "postcode and place in a commit message converted to UTF-8: "+rightPlace+":1:right: deliver to "+place)
+			ppWantRefused(t, code, out, "postcode and place in a commit converted to UTF-8: "+rightPlace+":7:    right: deliver to "+place)
 			ppWantChecked(t, out)
 			code, out = r.hookNewBranch("two", twoAuthors, c.env...)
 			ppWantRefused(t, code, out, "undeclared identity: Eve Stranger <"+ccTestSomeoneEmail+">")
@@ -2588,13 +2589,16 @@ func TestPrePushMergetagHeader(t *testing.T) {
 	ppWantRefused(t, code, out, "address in a commit object: "+shapeMerge+":", " release, contact "+shape)
 	ppWantChecked(t, out)
 
+	// Unlike ppIBANLine, which the armour every tag here ends in holds too,
+	// so a finding for it says which armour was read.
+	fakeIBAN := "DE" + "02" + "1203" + "0000" + "0000" + "2020" + "51"
 	for _, c := range []struct {
 		name, tagger, message string
 		wants                 []string // nil: the push passes
 	}{
 		{"t-before", me, "release notes\n" + ppIBANLine, []string{"IBAN in a commit object: ", " " + ppIBANLine}},
-		{"t-fake", me, "-----BEGIN PGP SIGNATURE-----\n" + ppIBANLine + "\n-----END PGP SIGNATURE-----\nmore notes",
-			[]string{"IBAN in a commit object: ", " " + ppIBANLine}},
+		{"t-fake", me, "-----BEGIN PGP SIGNATURE-----\n" + fakeIBAN + "\n-----END PGP SIGNATURE-----\nmore notes",
+			[]string{"IBAN in a commit object: ", " " + fakeIBAN}},
 		{"t-taggerline", me, "tagger " + stranger, []string{"address in a commit object: ", " tagger " + stranger}},
 		{"t-twoaddr", me + " <" + shape + ">", "a clean tag", []string{"undeclared identity: " + me + " <" + shape + ">, tagger of the tag commit "}},
 		{"t-tab", "\t" + me, "a clean tag", []string{"undeclared identity: \t" + me + ", tagger of the tag commit "}},
@@ -2694,7 +2698,7 @@ func TestPrePushShowSignature(t *testing.T) {
 // lines are (11d): an awk that loses a line of the text, of its locations or
 // of the merged taggers without saying so, or reports no count, stops the
 // push before any check reads them - for the objects as stored and for a
-// message read as converted. IMPRINT_PUSH_ANYWAY does not reach that far.
+// commit read as converted. IMPRINT_PUSH_ANYWAY does not reach that far.
 func TestPrePushCommitObjectCounts(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -2716,7 +2720,7 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 		return "sed '$d' \"$" + v + "\" >\"$" + v + ".cut\" && mv \"$" + v + ".cut\" \"$" + v + "\""
 	}
 	objects := `[ -n "${IMPRINT_COMMITLOC:-}" ]`
-	converted := `[ -n "${IMPRINT_LOC:-}" ] && [ -n "${IMPRINT_OBJCNT:-}" ]`
+	converted := `case "${IMPRINT_COMMITLOC:-}" in */convloc) true ;; *) false ;; esac`
 	for _, c := range []struct {
 		name, tip, cond, after, want string
 	}{
@@ -2724,8 +2728,8 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 		{"no count", plain, objects, `echo x >"$IMPRINT_OBJCNT"`, "awk reported no count of what it read from commit " + plain},
 		{"a merged tagger lost", merge, objects + ` && [ -s "$IMPRINT_MTTAGGERS" ]`, `: >"$IMPRINT_MTTAGGERS"`,
 			"wrote down 0 of 1 line(s) of the new commits' objects in mttaggers."},
-		{"a converted location lost", latin1, converted, dropLast("IMPRINT_LOC"), " line(s) of the converted messages in convloc."},
-		{"no converted count", latin1, converted, `echo x >"$IMPRINT_OBJCNT"`, "awk reported no count of the message of " + latin1},
+		{"a converted location lost", latin1, converted, dropLast("IMPRINT_COMMITLOC"), " line(s) of the new commits' objects in convloc."},
+		{"no converted count", latin1, converted, `echo x >"$IMPRINT_OBJCNT"`, "awk reported no count of what it read from commit " + latin1 + " as converted."},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := r.with(t)
@@ -2754,8 +2758,10 @@ func ppUTF7(text string) string {
 // author line of its own once converted, and git showed that one. The
 // stored reading of a declared author vouches only for an identity git shows
 // that differs from it in nothing but characters outside ASCII, so a
-// stranger is undeclared. A name stored in Latin-1 under a Latin-1 header is
-// still declared, and its identity left out of the shapes.
+// stranger is undeclared. A shape git shows only in the converted header is
+// found in the commit as git log --pretty=raw prints it. A name stored in
+// Latin-1 under a Latin-1 header is still declared, and its identity left
+// out of the shapes.
 func TestPrePushConvertedIdentity(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -2775,6 +2781,32 @@ func TestPrePushConvertedIdentity(t *testing.T) {
 		ppWantRefused(t, code, out, "undeclared identity: "+stranger)
 		ppWantChecked(t, out)
 	})
+	// A shape git shows only once it has converted the header: in an extra
+	// line, after the committer's identity, and on a line of the signature
+	// that is base64 as stored and a phone number to git. git log
+	// --pretty=raw starts with a "commit" line, so each line is one further
+	// down than in the object.
+	phone := ppUTF7("0" + "30" + " " + "1234567")
+	for _, c := range []struct{ name, header, want string }{
+		{"in an extra line", "committer " + me + date + "\nx-note call " + phone + "\n", ":6:x-note call 0"},
+		{"after the identity", "committer " + me + date + " call " + phone + "\n", ":5:committer" + date + " call 0"},
+		{"in the armour", "committer " + me + date + "\ngpgsig -----BEGIN SSH SIGNATURE-----\n " + strings.TrimSuffix(phone, "-") +
+			"\n -----END SSH SIGNATURE-----\n", ":7: 0"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawCommit(head + "author " + me + date + "\n" + c.header + "encoding UTF-7\n\nutf7: " + c.name + "\n")
+			cmd := exec.Command("git", "-C", r.dir, "log", "-1", "--encoding=UTF-8", "--pretty=raw", oid)
+			cmd.Env = ccIsolatedGitEnv()
+			got, err := cmd.Output()
+			if err != nil || !strings.Contains(string(got), "0"+"30"+" "+"1234567") {
+				t.Skipf("git does not show the converted phone number here (%v, %q), so the case proves nothing", err, got)
+			}
+			code, out := r.hookNewBranch("utf7h", oid)
+			ppWantRefused(t, code, out, "phone number in a commit converted to UTF-8: "+oid+c.want)
+			ppWantChecked(t, out)
+		})
+	}
 	t.Run("a name stored in Latin-1", func(t *testing.T) {
 		r := r.with(t)
 		name := "J\u00f6rg T\u00e4ster"
