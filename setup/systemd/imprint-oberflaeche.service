@@ -14,13 +14,15 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now imprint-oberflaeche.service
 #
-# Anmelden: `oberflaeche link` holt über $XDG_RUNTIME_DIR/imprint/oberflaeche.sock
-# einen Einmal-Link (60 s). Der Dienst druckt beim Start nur die Adresse ohne
-# Token, im Journal steht also kein Token.
+# Anmelden: Vom selben Rechner genügt die Adresse http://127.0.0.1:7420/ im Browser,
+# ohne Token (imprint-CL-277). `oberflaeche link` holt weiter über
+# $XDG_RUNTIME_DIR/imprint/oberflaeche.sock einen Einmal-Link (60 s). Der Dienst druckt
+# beim Start nur die Adresse ohne Token, im Journal steht also kein Token.
 #
-# Zweiter Ursprung „fremd” für die Seiten mit fremdem Text (-fremd-port 7421:
-# Suche, Freigaben, Beleg; N129 entschieden: 7420 eigener Ursprung, 7421 fremder Text).
-# ExecStart übergibt die ganze Kette: -port 7420, -fremd-port 7421, -archiv
+# Eine Adresse für alle Seiten, auch die mit fremdem Text (imprint-CL-278,
+# Besitzerentscheid 2026-10-01 „Eine Adresse, ohne Sperre“, löst N129 ab). Der
+# veraltete Schalter -fremd-port entfällt hier, 7421 ist damit zu.
+# ExecStart übergibt die ganze Kette: -port 7420, -archiv
 # (Pflichtangabe, da das Wiki ohne Archiv fail-closed ist), -index und -wissen.
 #
 # Jede TCP-Verbindung muss von derselben UID kommen wie der Dienst (Nachschlagen
@@ -40,7 +42,7 @@ Type=simple
 # schreibgeschützten Kopie von `betrieb install` (N39). Die Arbeitskopie legt die
 # relativen Standardpfade des Lagebilds fest (docs/umbau-2026-09-25/...).
 WorkingDirectory=%h/.local/share/imprint/betrieb-code/aktuell
-ExecStart=%h/.local/share/imprint/betrieb-code/aktuell/tools/oberflaeche/oberflaeche -port 7420 -fremd-port 7421 -archiv %h/.local/share/archiv/privat/archiv.db -index %h/.local/share/archiv/privat/index.db -wissen %h/.local/share/imprint/wissen/wissen.db
+ExecStart=%h/.local/share/imprint/betrieb-code/aktuell/tools/oberflaeche/oberflaeche -port 7420 -archiv %h/.local/share/archiv/privat/archiv.db -index %h/.local/share/archiv/privat/index.db -wissen %h/.local/share/imprint/wissen/wissen.db
 # Belegter Port = Abbruch, kein Ausweichport; ein Neustart hilft dann nicht sofort.
 Restart=on-failure
 RestartSec=30s
