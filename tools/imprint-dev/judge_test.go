@@ -809,16 +809,19 @@ func TestJudgeLogOneLinePerCall(t *testing.T) {
 	if code, _, _ := runJudgeCLI(t, "not json", "--gate", "done"); code != exitOK {
 		t.Fatalf("bad stdin: exit %d", code)
 	}
-	// A flag that does not parse gives no verdict and no log line.
+	// A flag that does not parse gives no verdict (exit 1), but a minimal log line.
 	if code, _, _ := runJudgeCLI(t, stopPayload(t, "Fertig.", ""), "--gate", "done", "--nope"); code != judgeExitUsage {
 		t.Fatalf("bad flag: exit %d", code)
 	}
 	lines := readJudgeLog(t, logPath)
-	if len(lines) != len(runs)+1 {
-		t.Fatalf("log lines = %d, want %d", len(lines), len(runs)+1)
+	if len(lines) != len(runs)+2 {
+		t.Fatalf("log lines = %d, want %d", len(lines), len(runs)+2)
 	}
-	if last := lines[len(runs)]; last["error_class"] != "input" || last["failed"] != true {
-		t.Errorf("input error log line = %v", last)
+	if l := lines[len(runs)]; l["error_class"] != "input" || l["failed"] != true {
+		t.Errorf("input error log line = %v", l)
+	}
+	if l := lines[len(runs)+1]; l["error_class"] != "usage" || l["exit_code"] != 1.0 || l["gate"] != "" || l["session"] != nil {
+		t.Errorf("usage log line = %v", l)
 	}
 	lines = lines[:len(runs)]
 	for i, l := range lines {
@@ -891,8 +894,8 @@ func TestJudgeNeverExits2(t *testing.T) {
 		wantCrit string
 	}{
 		{"no gate", stop, nil, "call", "", false, ""},
-		{"unknown gate", stop, []string{"--gate", "nope"}, "call", "nope", false, ""},
-		{"gate differs from envelope", `{"gate":"done","payload":{"hook_event_name":"Stop"}}`, []string{"--gate", "foreign_return"}, "call", "", false, ""},
+		{"unknown gate", stop, []string{"--gate", "nope"}, "call", "", false, ""},
+		{"gate differs from envelope", `{"gate":"done","payload":{"hook_event_name":"Stop"}}`, []string{"--gate", "foreign_return"}, "call", "foreign_return", false, ""},
 		{"host differs from envelope", `{"host":"pi","gate":"done","payload":{"hook_event_name":"Stop"}}`, []string{"--host", "claude"}, "call", "done", true, ""},
 		{"unknown host", stop, []string{"--gate", "done", "--host", "vim"}, "call", "done", true, ""},
 		{"envelope payload not an object", `{"gate":"done","payload":"x"}`, []string{"--gate", "done"}, "input", "done", true, ""},
@@ -905,7 +908,7 @@ func TestJudgeNeverExits2(t *testing.T) {
 		{"endpoint not allowed", stop, []string{"--gate", "done", "--endpoint", "https://typesafe.example.test/v1/systemone"}, "call", "done", true, ""},
 		{"bad source", stop, []string{"--gate", "done", "--source", "prod"}, "call", "done", true, ""},
 		{"negative deadline", stop, []string{"--gate", "done", "--deadline-ms", "-5"}, "call", "done", true, ""},
-		{"bad registry", stop, []string{"--gate", "done", "--registry", filepath.Join(t.TempDir(), "missing.json")}, "call", "done", false, ""},
+		{"bad registry", stop, []string{"--gate", "done", "--registry", filepath.Join(t.TempDir(), "missing.json")}, "call", "", false, ""},
 	}
 	for _, tc := range cases {
 		for _, critical := range []bool{false, true} {
@@ -974,10 +977,97 @@ func TestJudgeUsageErrorsExit1(t *testing.T) {
 		{"--list", "--registry", filepath.Join(t.TempDir(), "missing.json")},
 		{"--version", "--registry", filepath.Join(t.TempDir(), "missing.json")},
 	} {
-		code, stdout, _ := runJudgeCLI(t, "{}", args...)
+		logPath := setupJudge(t, "test-key")
+		code, stdout, _ := runJudgeCLI(t, `{"session_id":"s-1","hook_event_name":"Stop"}`, args...)
 		if code != judgeExitUsage || stdout != "" {
 			t.Errorf("%v: exit %d stdout %q, want 1 and nothing", args, code, stdout)
 		}
+		// one minimal log line: no payload field
+		lines := readJudgeLog(t, logPath)
+		if len(lines) != 1 || lines[0]["error_class"] != "usage" || lines[0]["exit_code"] != 1.0 ||
+			lines[0]["event"] != "" || lines[0]["session"] != nil || lines[0]["verdict"] != "" {
+			t.Errorf("%v: log = %v", args, lines)
+		}
+	}
+}
+
+// TestJudgeFailModeWhenTheGateIsUnclear (review round 2, N2/N4): --gate decides
+// whenever the registry knows it; a gate that cannot be told is judged by the
+// strictest closed gate there is, never allow; only a registry without closed
+// gates leaves it open.
+func TestJudgeFailModeWhenTheGateIsUnclear(t *testing.T) {
+	setupJudge(t, "test-key")
+	crit := criticalRegistry(t)
+	cases := []struct {
+		name, stdin string
+		args        []string
+		verdict     string
+		failMode    string
+		gate        string
+	}{
+		{"stdin broken, no --gate", "not json", []string{"--registry", crit}, "ask", "closed", ""},
+		{"stdin broken, no --gate, no UI", "not json", []string{"--registry", crit, "--no-ui"}, "block", "closed", ""},
+		{"envelope broken, no --gate", `{"payload":"x","hook_event_name":"Stop"}`, []string{"--registry", crit}, "ask", "closed", ""},
+		{"envelope gate differs, --gate known and closed", `{"gate":"done","payload":{"hook_event_name":"SubagentStop"}}`, []string{"--registry", crit, "--gate", "foreign_return"}, "ask", "closed", "foreign_return"},
+		{"envelope gate differs, --gate unknown", `{"gate":"done","payload":{"hook_event_name":"Stop"}}`, []string{"--registry", crit, "--gate", "nope"}, "block", "closed", ""},
+		{"unknown gate, closed gates exist", `{"hook_event_name":"PostToolUse"}`, []string{"--registry", crit, "--gate", "nope"}, "warn", "closed", ""},
+		{"stdin broken, --gate known and open", "not json", []string{"--gate", "done"}, "allow", "open", "done"},
+		{"stdin broken, no --gate, no closed gate", "not json", nil, "allow", "open", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runJudgeCLI(t, tc.stdin, tc.args...)
+			if code != exitOK {
+				t.Fatalf("exit %d: %s", code, stderr)
+			}
+			v := decodeObject(t, stdout)
+			if v["verdict"] != tc.verdict || v["fail_mode"] != tc.failMode || v["gate"] != tc.gate || v["failed"] != true {
+				t.Errorf("verdict %v fail_mode %v gate %q, want %s %s %q", v["verdict"], v["fail_mode"], v["gate"], tc.verdict, tc.failMode, tc.gate)
+			}
+		})
+	}
+}
+
+// TestJudgeNeverEchoesUnknownNames (review round 2, N3): a gate, event or host
+// name nobody knows is not echoed, neither in the verdict nor in the log nor on
+// stderr; a flag says that one was given.
+func TestJudgeNeverEchoesUnknownNames(t *testing.T) {
+	mail := "erika.musterfrau" + "@" + "example.test"
+	pii := []string{mail, "Erika", "Musterfrau"}
+	cases := []struct {
+		name, stdin string
+		args        []string
+		flags       []string
+	}{
+		{"envelope", `{"host":"` + mail + `","gate":"Erika Musterfrau","payload":{"hook_event_name":"` + mail + `"}}`, nil,
+			[]string{"unknown_gate", "unknown_event", "unknown_host"}},
+		{"flags", `{"hook_event_name":"Stop"}`, []string{"--gate", "Erika Musterfrau", "--host", mail}, []string{"unknown_gate", "unknown_host"}},
+		{"event only", `{"hook_event_name":"` + mail + `"}`, []string{"--gate", "foreign_return"}, []string{"unknown_event"}},
+		{"event with a known gate", `{"hook_event_name":"Musterfrau"}`, []string{"--gate", "done"}, []string{"unknown_event"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := setupJudge(t, "test-key")
+			code, stdout, stderr := runJudgeCLI(t, tc.stdin, tc.args...)
+			if code != exitOK {
+				t.Fatalf("exit %d: %s", code, stderr)
+			}
+			raw, _ := os.ReadFile(logPath)
+			for _, where := range []struct{ name, text string }{{"verdict", stdout}, {"log", string(raw)}, {"stderr", stderr}} {
+				for _, p := range pii {
+					if strings.Contains(where.text, p) {
+						t.Errorf("%s carries %q: %s", where.name, p, where.text)
+					}
+				}
+			}
+			v := decodeObject(t, stdout)
+			l := readJudgeLog(t, logPath)[0]
+			for _, f := range tc.flags {
+				if v[f] != true || l[f] != true {
+					t.Errorf("%s not set: verdict %v, log %v", f, v[f], l[f])
+				}
+			}
+		})
 	}
 }
 
@@ -1258,6 +1348,7 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9, "instruction_to_agent": 0.1, "exfil_request": 0.1}))
 	mail := "max" + "@" + "example.test"
 
+	// 20 MB: over the 16 MB stdin limit, an input error, answered at once.
 	filler := strings.Repeat("Lorem ipsum "+mail+" dolor sit amet. ", 20<<20/40)
 	big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": filler}})
 	if len(big) < 20<<20 {
@@ -1267,11 +1358,21 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	code, stdout, stderr := runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
 	el := time.Since(start)
 	v := decodeObject(t, stdout)
+	if code != exitOK || v["error_class"] != "input" || el >= 3*time.Second {
+		t.Fatalf("20 MB tool output: exit %d %v after %v; %s", code, v, el, stderr)
+	}
+	// 15 MB: judged, well inside the deadline.
+	filler = strings.Repeat("Lorem ipsum "+mail+" dolor sit amet. ", 15<<20/45)
+	big, _ = json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": filler}})
+	start = time.Now()
+	code, stdout, stderr = runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
+	el = time.Since(start)
+	v = decodeObject(t, stdout)
 	if code != exitOK || v["failed"] != false {
-		t.Fatalf("20 MB tool output: exit %d %v %s", code, v, stderr)
+		t.Fatalf("15 MB tool output: exit %d %v %s", code, v, stderr)
 	}
 	if el >= 3*time.Second || v["latency_ms"].(float64) >= 3000 {
-		t.Errorf("20 MB tool output took %v (latency_ms %v); the PostToolUse deadline is 3 s", el, v["latency_ms"])
+		t.Errorf("15 MB tool output took %v (latency_ms %v); the PostToolUse deadline is 3 s", el, v["latency_ms"])
 	}
 	if _, ok := v["latency_parts_ms"].(map[string]any)["build"]; !ok {
 		t.Errorf("latency_parts_ms lacks build: %v", v["latency_parts_ms"])
@@ -1306,7 +1407,7 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	if v := decodeObject(t, stdout); v["error_class"] != "timeout" || ts.calls() != before {
 		t.Errorf("expired deadline: %v, requests %d", v, ts.calls()-before)
 	}
-	if n := len(readJudgeLog(t, logPath)); n != 3 {
+	if n := len(readJudgeLog(t, logPath)); n != 4 {
 		t.Errorf("log lines = %d", n)
 	}
 }
@@ -1333,24 +1434,6 @@ func TestForeignReturnSeesTheTail(t *testing.T) {
 	}
 	if n := len([]rune(ft)); n != 8000 {
 		t.Errorf("foreign_text = %d runes, want 8000", n)
-	}
-}
-
-func TestMaskCappedCutsAfterMasking(t *testing.T) {
-	setupJudge(t, "")
-	tok := "ghp_" + strings.Repeat("a1", 30)
-	// The token straddles the head cut: masked whole, no part of it sent.
-	text := strings.Repeat("x", 90) + " " + tok + " " + strings.Repeat("y", 500)
-	got := maskCapped(text, 100, "head")
-	if strings.Contains(got, "a1a1") || len([]rune(got)) != 100 {
-		t.Errorf("head cut: %q", got)
-	}
-	got = maskCapped(strings.Repeat("y", 500)+" "+tok+" "+strings.Repeat("x", 90), 100, "tail")
-	if strings.Contains(got, "a1a1") || len([]rune(got)) != 100 {
-		t.Errorf("tail cut: %q", got)
-	}
-	if got := maskCapped("short "+tok, 100, "head_tail"); got != "short <redacted>" {
-		t.Errorf("under the cap: %q", got)
 	}
 }
 

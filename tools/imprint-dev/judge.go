@@ -51,7 +51,7 @@ const (
 	reasonCoreFailed = "core_failed"
 
 	// maxJudgeInput caps stdin; more is an input error.
-	maxJudgeInput = 64 << 20
+	maxJudgeInput = 16 << 20
 
 	// judgeExitUsage is judge's only non-zero exit (see above).
 	judgeExitUsage = 1
@@ -65,6 +65,7 @@ const (
 	// Error classes of a call that could not be judged as given.
 	errClassCall  = "call"  // flags or wiring: gate, host, event, emit, source, endpoint
 	errClassInput = "input" // stdin: unreadable, too large, not a JSON object, no event
+	errClassUsage = "usage" // no verdict due (exit 1): a flag that does not parse, --list/--version without a registry
 )
 
 var verdictRank = map[string]int{verdictAllow: 0, verdictWarn: 1, verdictAsk: 2, verdictBlock: 3}
@@ -376,6 +377,9 @@ func (g *Gate) failVerdict(event string, noUI bool) string {
 }
 
 func failMessage(gate, class, verdict string) string {
+	if gate == "" {
+		gate = "?"
+	}
 	switch verdict {
 	case verdictAsk:
 		return fmt.Sprintf("imprint judge: Die Prüfung %q konnte nicht laufen (%s). Das Gate ist kritisch: bitte selbst bestätigen.\n(imprint judge: the check %q could not run (%s). This gate is critical: please confirm yourself.)", gate, class, gate, class)
@@ -407,6 +411,11 @@ type Verdict struct {
 	FailMode        string             `json:"fail_mode"`
 	Failed          bool               `json:"failed"`
 	ErrorClass      string             `json:"error_class"`
+	// Set when the call named a gate, event or host the registry or judge does
+	// not know; the name itself is never echoed (it could be anything).
+	UnknownGate  bool `json:"unknown_gate,omitempty"`
+	UnknownEvent bool `json:"unknown_event,omitempty"`
+	UnknownHost  bool `json:"unknown_host,omitempty"`
 }
 
 // judgeLogLine is one line of the judge log. It never holds the state, a
@@ -434,6 +443,10 @@ type judgeLogLine struct {
 	Failed          bool               `json:"failed"`
 	ErrorClass      string             `json:"error_class"`
 	NoUI            bool               `json:"no_ui,omitempty"`
+	UnknownGate     bool               `json:"unknown_gate,omitempty"`
+	UnknownEvent    bool               `json:"unknown_event,omitempty"`
+	UnknownHost     bool               `json:"unknown_host,omitempty"`
+	ExitCode        int                `json:"exit_code,omitempty"`
 }
 
 // judgeLogPath: IMPRINT_JUDGE_LOG, else ${XDG_STATE_HOME:-~/.local/state}/imprint/judge.jsonl.
@@ -658,23 +671,23 @@ func loadJudgeRegistry(path string) (*Registry, error) {
 type judgeRun struct {
 	start          time.Time
 	reg            *Registry
-	source, host   string
+	source         string
+	host           string // a known host, or ""
+	unknownHost    bool
 	session        string
 	noUI           bool
+	flagGate       string // --gate, if the registry knows it
 	stdout, stderr io.Writer
 }
 
 func (r *judgeRun) emit(v Verdict, masked MaskCounts) int {
 	v.LatencyMS = time.Since(r.start).Milliseconds()
+	v.UnknownHost = r.unknownHost
 	code := writeJSON(r.stdout, r.stderr, v)
-	host := r.host
-	if host == "" {
-		host = "unknown"
-	}
 	line := judgeLogLine{
 		TS:              time.Now().UTC().Format(time.RFC3339Nano),
 		Source:          r.source,
-		Host:            host,
+		Host:            r.host,
 		Gate:            v.Gate,
 		Event:           v.Event,
 		Session:         hashSession(r.session),
@@ -694,6 +707,12 @@ func (r *judgeRun) emit(v Verdict, masked MaskCounts) int {
 		Failed:          v.Failed,
 		ErrorClass:      v.ErrorClass,
 		NoUI:            r.noUI,
+		UnknownGate:     v.UnknownGate,
+		UnknownEvent:    v.UnknownEvent,
+		UnknownHost:     v.UnknownHost,
+	}
+	if code != exitOK {
+		line.ExitCode = code
 	}
 	if err := appendJudgeLog(line); err != nil {
 		fmt.Fprintf(r.stderr, "imprint-dev judge: log not written: %v\n", err)
@@ -701,13 +720,123 @@ func (r *judgeRun) emit(v Verdict, masked MaskCounts) int {
 	return code
 }
 
-// callFailure answers a call or input error with a verdict: the gate's fail
-// mode decides; a gate that cannot be told (g == nil) counts as open.
+// knownEvent reports whether some gate of the registry serves event.
+func (r *judgeRun) knownEvent(event string) bool {
+	if r.reg == nil {
+		return false
+	}
+	for _, g := range r.reg.Gates {
+		if _, ok := g.Events[event]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// callFailure answers a call or input error with a verdict. Whose fail mode
+// decides: the gate --gate names, if the registry knows it, always; else
+// gate g, if one could be told; else, if the registry has a closed gate, the
+// strictest verdict the event allows across the closed gates (never allow);
+// else open. Only names the registry or judge knows are echoed.
 func (r *judgeRun) callFailure(name string, g *Gate, event, class, format string, a ...any) int {
 	fmt.Fprintf(r.stderr, "imprint-dev judge: "+format+"\n", a...)
+	if r.flagGate != "" {
+		name, g = r.flagGate, r.reg.Gates[r.flagGate]
+	}
+	unknownGate := name != "" && g == nil
+	if g == nil {
+		name = ""
+	}
+	unknownEvent := event != "" && !r.knownEvent(event)
+	if unknownEvent {
+		event = ""
+	}
 	v := newVerdict(r.reg, name, g, event)
+	v.UnknownGate, v.UnknownEvent = unknownGate, unknownEvent
 	setFailed(&v, g, event, class, r.noUI)
+	if g == nil {
+		if fv, ok := strictFallback(r.reg, event, r.noUI); ok {
+			v.FailMode = failModeClosed
+			v.Verdict = fv
+			v.Reasons = []string{reasonCoreFailed}
+			v.Message = failMessage("", class, fv)
+		}
+	}
 	return r.emit(v, MaskCounts{})
+}
+
+// strictFallback is the verdict for a failed call whose gate cannot be told,
+// when the registry has closed (critical) gates: it might have been one of
+// them, so the strictest verdict the event allows across the closed gates
+// (those serving the event, else all of them) — ask, else block, else warn,
+// never allow. ok is false when the registry has no closed gate.
+func strictFallback(reg *Registry, event string, noUI bool) (verdict string, ok bool) {
+	if reg == nil {
+		return verdictAllow, false
+	}
+	var lists [][]string
+	var all [][]string
+	for _, g := range reg.Gates {
+		if g.FailMode != failModeClosed {
+			continue
+		}
+		if l, served := g.Events[event]; served {
+			lists = append(lists, l)
+		}
+		for _, l := range g.Events {
+			all = append(all, l)
+		}
+	}
+	if len(all) == 0 {
+		return verdictAllow, false
+	}
+	if len(lists) == 0 {
+		lists = all
+	}
+	chain := []string{verdictAsk, verdictBlock, verdictWarn}
+	if noUI {
+		chain = []string{verdictBlock, verdictWarn}
+	}
+	for _, v := range chain {
+		for _, l := range lists {
+			for _, x := range l {
+				if x == v {
+					return v, true
+				}
+			}
+		}
+	}
+	return verdictWarn, true
+}
+
+// usageExit writes the minimal log line of a call that gets no verdict (exit
+// 1): no payload field, only what the flags and registry say.
+func usageExit(stderr io.Writer, reg *Registry, source string, format string, a ...any) int {
+	if format != "" {
+		fmt.Fprintf(stderr, "imprint-dev judge: "+format+"\n", a...)
+	}
+	if !judgeSources[source] {
+		source = "unknown"
+	}
+	line := judgeLogLine{
+		TS:             time.Now().UTC().Format(time.RFC3339Nano),
+		Source:         source,
+		CoreVersion:    coreVersion(),
+		Reasons:        []string{},
+		Scores:         map[string]float64{},
+		CodeFlags:      map[string]bool{},
+		LatencyPartsMS: map[string]int64{},
+		Failed:         true,
+		ErrorClass:     errClassUsage,
+		ExitCode:       judgeExitUsage,
+	}
+	if reg != nil {
+		line.RegistryVersion, line.Model = reg.RegistryVersion, reg.Model
+	}
+	if err := appendJudgeLog(line); err != nil {
+		fmt.Fprintf(stderr, "imprint-dev judge: log not written: %v\n", err)
+	}
+	return judgeExitUsage
 }
 
 func runJudge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -728,18 +857,16 @@ func runJudge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
-		return judgeExitUsage
+		return usageExit(stderr, nil, *source, "")
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "imprint-dev judge: unexpected argument %q\n", fs.Arg(0))
-		return judgeExitUsage
+		return usageExit(stderr, nil, *source, "unexpected argument")
 	}
 
 	reg, regErr := loadJudgeRegistry(*registryPath)
 	if *showVersion || *list {
 		if regErr != nil {
-			fmt.Fprintf(stderr, "imprint-dev judge: %v\n", regErr)
-			return judgeExitUsage
+			return usageExit(stderr, nil, *source, "%v", regErr)
 		}
 		if *showVersion {
 			return writeJSON(stdout, stderr, map[string]string{
@@ -752,7 +879,7 @@ func runJudge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// From here on every outcome is one verdict on stdout and exit 0.
-	r := &judgeRun{start: start, reg: reg, source: *source, host: *hostFlag, noUI: *noUI, stdout: stdout, stderr: stderr}
+	r := &judgeRun{start: start, reg: reg, source: *source, noUI: *noUI, stdout: stdout, stderr: stderr}
 	if !judgeSources[r.source] {
 		r.source = "unknown"
 	}
@@ -762,6 +889,18 @@ func runJudge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return reg.Gates[name]
 	}
+	if gateOf(*gateFlag) != nil {
+		r.flagGate = *gateFlag
+	}
+	setHost := func(h string) {
+		r.host, r.unknownHost = "", false
+		if judgeHosts[h] {
+			r.host = h
+		} else if h != "" {
+			r.unknownHost = true
+		}
+	}
+	setHost(*hostFlag)
 
 	raw, err := io.ReadAll(io.LimitReader(stdin, maxJudgeInput+1))
 	if err != nil {
@@ -791,12 +930,16 @@ func runJudge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	r.session, _ = payload["session_id"].(string)
 	event, _ := payload["hook_event_name"].(string)
 
+	host, herr := agree("host", *hostFlag, envHost)
+	if herr == nil {
+		setHost(host)
+	}
 	gateName, err := agree("gate", *gateFlag, envGate)
 	if err != nil {
-		return r.callFailure("", nil, event, errClassCall, "%v", err)
+		// --gate decides if the registry knows it (callFailure); otherwise the
+		// gate cannot be told, whatever the envelope says.
+		return r.callFailure(*gateFlag, nil, event, errClassCall, "--gate and the envelope's gate differ")
 	}
-	host, herr := agree("host", *hostFlag, envHost)
-	r.host = host
 	if gateName == "" {
 		return r.callFailure("", nil, event, errClassCall, "no gate: give --gate or an envelope with gate")
 	}
@@ -805,7 +948,7 @@ func runJudge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	g, ok := reg.Gates[gateName]
 	if !ok {
-		return r.callFailure(gateName, nil, event, errClassCall, "unknown gate %q (see --list)", gateName)
+		return r.callFailure(gateName, nil, event, errClassCall, "unknown gate (see --list)")
 	}
 	if event == "" && len(g.Events) == 1 {
 		for ev := range g.Events {
@@ -814,22 +957,22 @@ func runJudge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	switch {
 	case herr != nil:
-		return r.callFailure(gateName, g, event, errClassCall, "%v", herr)
-	case host != "" && !judgeHosts[host]:
-		return r.callFailure(gateName, g, event, errClassCall, "host %q: use claude, codex, agy or pi", host)
+		return r.callFailure(gateName, g, event, errClassCall, "--host and the envelope's host differ")
+	case r.unknownHost:
+		return r.callFailure(gateName, g, event, errClassCall, "unknown host: use claude, codex, agy or pi")
 	case *emit != "verdict":
-		return r.callFailure(gateName, g, event, errClassCall, "--emit %q is not built in this stage; only verdict", *emit)
+		return r.callFailure(gateName, g, event, errClassCall, "--emit: only verdict is built in this stage")
 	case !judgeSources[*source]:
-		return r.callFailure(gateName, g, event, errClassCall, "--source %q: use hook, bench or test", *source)
+		return r.callFailure(gateName, g, event, errClassCall, "--source: use hook, bench or test")
 	case !isAllowedEndpoint(*endpoint):
-		return r.callFailure(gateName, g, event, errClassCall, "--endpoint %q is not allowed", *endpoint)
+		return r.callFailure(gateName, g, event, errClassCall, "--endpoint is not allowed (api.typesafe.ai or loopback)")
 	case *deadlineMS < 0:
 		return r.callFailure(gateName, g, event, errClassCall, "--deadline-ms must not be negative")
 	case event == "":
 		return r.callFailure(gateName, g, event, errClassInput, "the payload names no hook_event_name, and gate %q serves several events", gateName)
 	}
 	if _, ok := g.Events[event]; !ok {
-		return r.callFailure(gateName, g, event, errClassCall, "gate %q does not serve event %q", gateName, event)
+		return r.callFailure(gateName, g, event, errClassCall, "gate %q does not serve this event", gateName)
 	}
 
 	deadline := time.Duration(g.DeadlineMS[event]) * time.Millisecond
