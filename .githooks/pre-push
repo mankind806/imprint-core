@@ -5,24 +5,26 @@
 # WHAT IT ENFORCES. One rule has a mechanical half, and this is it: nothing
 # leaves this repository except its git identity. The hook refuses a push whose
 # commits carry an identity this clone has not declared, and it refuses a push
-# whose new commits add a line, or carry a message, that matches a shape that
-# personal data takes - phone numbers, bank account numbers and postal
-# addresses in the formats the patterns below spell out. An annotated tag is
-# held to the same: its tagger has to be a declared identity, and nothing else
-# in it - the message above all - may match a shape. A ref that ends in a blob
-# or a tree is refused unread.
+# whose new commits add a line, or carry one in their message or header, that
+# matches a shape that personal data takes - phone numbers, bank account
+# numbers and postal addresses in the formats the patterns below spell out. An
+# annotated tag is held to the same: its tagger has to be a declared identity,
+# and nothing else in it - the message above all - may match a shape. A ref
+# that ends in a blob or a tree is refused unread.
 #
-# WHAT IT READS. The new commits, and of their content only the lines they add;
-# and every tag object a pushed ref leads to, all of it. A commit is new unless
-# the remote's old tip for that ref reaches it, or one of this clone's tracking
-# refs for the destination remote does (refs/remotes/<remote>/*, only when the
-# push goes to the URL they are fetched from, and only while no other remote
-# stores refs under that prefix). Those refs are what this clone last fetched,
-# not what the remote holds now: after pointing a remote at another repository,
-# run `git fetch --prune` first. A line already on it was checked on its way
-# there, or predates the hook; reading it again would refuse every push for what
-# is already published. A new commit whose header names an encoding other than
-# UTF-8 is also read as stored.
+# WHAT IT READS. The new commits: each commit object as stored, all of it but
+# for the identities the identity check reads and a signature's base64 lines,
+# and of their content only the lines they add; and every tag object a pushed
+# ref leads to, all of it. A commit is new unless the remote's old tip for that
+# ref reaches it, or one of this clone's tracking refs for the destination
+# remote does (refs/remotes/<remote>/*, only when the push goes to the URL they
+# are fetched from, and only while no other remote stores refs under that
+# prefix). Those refs are what this clone last fetched, not what the remote
+# holds now: after pointing a remote at another repository, run
+# `git fetch --prune` first. A line already on it was checked on its way there,
+# or predates the hook; reading it again would refuse every push for what is
+# already published. A new commit whose header names an encoding other than
+# UTF-8 has its message read as git converts it, too.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -705,39 +707,153 @@ if [ "$n_commits" -eq 0 ]; then
   report
 fi
 
-# --- commits whose header names an encoding other than UTF-8 -----------------
-# Checks 1 and 3 read commits through git log, asking for UTF-8 (see check 1),
-# and git converts a commit from the encoding its header names. A header can
-# name an encoding the bytes are not in: with i18n.commitEncoding set to
-# Latin-1 and UTF-8 typed in, git commit writes UTF-8 under a Latin-1 header,
-# and the conversion turns each character outside ASCII into two that no
-# pattern and no declared name holds. git log --format converts even under
-# --encoding=none (both measured with git 2.55.0, 2026-10-01), so the object
-# of such a commit is read as well, and checks 1 and 3 read it both ways. A
-# commit with no encoding header, or one that names UTF-8, git prints as stored
-# already. rawcommits lists "oid N short" for each commit read so, and raw.N
-# holds its object, with any NUL turned into \001.
-git log --no-walk=unsorted --stdin --format='%H %h %e' <"$work/commits" >"$work/encodings" \
-  || refuse "git log failed reading the encodings of the new commits."
-n_enc="$(wc -l <"$work/encodings" | tr -d ' ')"
-[ "$n_enc" = "$n_commits" ] || refuse \
-  "git log listed encodings for ${n_enc:-none} of $n_commits new commit(s)."
-true >"$work/rawcommits" || refuse "$cannot_write"
-n_raw=0; n_read=0
-while read -r e_oid e_short e_enc; do
-  n_read=$((n_read + 1))
-  case "$e_enc" in '' | [Uu][Tt][Ff]-8 | [Uu][Tt][Ff]8) continue ;; esac
-  n_raw=$((n_raw + 1))
-  git cat-file commit "$e_oid" >"$work/raw.tmp" 2>/dev/null </dev/null \
-    || refuse "could not read commit $e_oid as stored."
-  tr '\000' '\001' <"$work/raw.tmp" >"$work/raw.$n_raw" \
-    || refuse "could not prepare commit $e_oid for reading as stored."
+# --- the new commits' objects, as stored -------------------------------------
+# git log shows a commit as it parses it, and part of what a push publishes
+# never reaches it: a header line git does not know - an extra one after the
+# committer, which a local bare repository took even with receive.fsckObjects
+# on - and everything after a NUL byte in the message, where git log stops
+# (both measured with git 2.55.0, 2026-10-02). So check 3 reads each new
+# commit's object as stored, the way the tag check reads a tag object: all of
+# it but for what check 1 reads, the author's and the committer's identity.
+# That is "Name <address>" as git splits it, up to the first < and on to the
+# first > after it, so whatever follows on the line is read. It is left out
+# only on a line that is the only one of its role in the header - git shows
+# the last of several - and only while no NUL came before it in the object.
+#
+# A signed commit carries its signature in a gpgsig header, and a merge of a
+# signed tag carries that tag, tagger and signature, in a mergetag header; git
+# writes one only for a tag that holds a signature (measured with git 2.55.0,
+# 2026-10-02). A signature's base64 lines are encoded bytes, in which no shape
+# can be read, yet a run of their letters and digits takes the IBAN pattern's
+# form in about one RSA-4096 signature in 400 (simulated, 2026-10-02). So in
+# these two headers, from a -----BEGIN ...----- line to its -----END ...-----
+# line, a line made only of base64 characters is not matched. Every other line
+# of them is: the armour lines, an armour header such as Comment:, the merged
+# tag's name and message. The merged tag's tagger is left out the way the tag
+# check leaves a tagger out, everything up to the last > on the line, and
+# check 1 holds it to the declared identities as the tag check does.
+#
+# git log converts a commit from the encoding its header names, and the
+# patterns are UTF-8: a Latin-1 place read as stored matches nothing. So a
+# commit whose header names another encoding - or none at all on its encoding
+# line, which git takes for the locale's - is read as git log converts it too,
+# in check 3, and checks 1 reads its identities both ways. A header can name an
+# encoding the bytes are not in: with i18n.commitEncoding set to Latin-1 and
+# UTF-8 typed in, git commit writes UTF-8 under a Latin-1 header, and the
+# conversion turns each character outside ASCII into two that no pattern and
+# no declared name holds. git log --format converts even under
+# --encoding=none (both measured with git 2.55.0, 2026-10-01).
+#
+# prepare reads one object, any NUL turned into \001, twice. The first pass
+# counts the author and committer lines of the header and finds its encoding
+# line. The second prints the lines to match - each line it does not change as
+# it read it - and appends where each comes from, "commit:N" with N its line
+# in the object, to IMPRINT_COMMITLOC, and each merged tag's tagger identity
+# to IMPRINT_MTTAGGERS as "commit<TAB>identity", empty when the tagger line
+# holds no ">". It writes three counts to IMPRINT_OBJCNT, one to a line: the
+# lines it printed, 1 when the header names an encoding other than UTF-8 (0
+# when not), and the taggers.
+prepare='
+BEGIN {
+  c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_COMMITLOC"]; mt = ENVIRON["IMPRINT_MTTAGGERS"]
+  soh = sprintf("%c", 1); ident = "^[^<" soh "]*<[^>" soh "]*>"
+  b64 = "^[A-Za-z0-9+/=]*$"; armbegin = "^-----BEGIN [A-Z ]*-----$"; armend = "^-----END [A-Z ]*-----$"
+  pass = 0; k = 0; m = 0; na = 0; nc = 0; hd = 0; enc = 0; ev = ""
+  body = 0; nul = 0; field = ""; armour = 0; inner = 0
+}
+function put(s) { print s; print c ":" FNR >> loc; k++ }
+FNR == 1 { pass++ }
+pass == 1 {
+  if (hd) next
+  if ($0 == "") { hd = 1; next }
+  if (substr($0, 1, 7) == "author ") na++
+  else if (substr($0, 1, 10) == "committer ") nc++
+  else if (!enc && substr($0, 1, 9) == "encoding ") { enc = 1; ev = substr($0, 10) }
+  next
+}
+body { put($0); next }
+$0 == "" { body = 1; next }
+{
+  before = nul
+  if (index($0, soh)) nul = 1
+  if (substr($0, 1, 1) == " ") {
+    cont = 1; text = substr($0, 2)
+  } else {
+    cont = 0; field = $0; sub(/ .*/, "", field); text = substr($0, length(field) + 2)
+    armour = 0; inner = (field == "mergetag")
+  }
+  if (field == "gpgsig" || field == "gpgsig-sha256" || field == "mergetag") {
+    if (armour && text ~ b64) next
+    if (text ~ armbegin) armour = 1
+    else if (text ~ armend) armour = 0
+    if (inner && text == "") inner = 0
+    else if (inner && substr(text, 1, 7) == "tagger ") {
+      r = substr(text, 8)
+      if (match(r, /.*>/)) {
+        print c "\t" substr(r, 1, RLENGTH) >> mt; m++
+        put(substr($0, 1, length($0) - length(text)) "tagger" substr(r, RLENGTH + 1))
+        next
+      }
+      print c "\t" >> mt; m++
+    }
+    put($0); next
+  }
+  if (!cont && !before && field == "author" && na == 1 && match(substr($0, 8), ident)) {
+    put("author" substr($0, 8 + RLENGTH)); next
+  }
+  if (!cont && !before && field == "committer" && nc == 1 && match(substr($0, 11), ident)) {
+    put("committer" substr($0, 11 + RLENGTH)); next
+  }
+  put($0)
+}
+END {
+  conv = 0
+  if (enc && tolower(ev) !~ /^utf-?8$/) conv = 1
+  cnt = ENVIRON["IMPRINT_OBJCNT"]
+  print k > cnt; print conv > cnt; print m > cnt
+}
+'
+# Each object is read whole or the push stops here: a commit whose object
+# could not be read is one whose header and message nothing has checked.
+# committext and commitloc are parallel, as added and addedloc are below, and
+# rawcommits lists "oid N" for each commit read as converted as well, raw.N
+# holding its object.
+for f in committext commitloc mttaggers rawcommits; do
+  true >"$work/$f" || refuse "$cannot_write"
+done
+n_obj=0; n_raw=0; n_lines=0; n_mt=0
+while read -r o_oid; do
+  n_obj=$((n_obj + 1))
+  git cat-file commit "$o_oid" >"$work/raw.tmp" 2>/dev/null </dev/null \
+    || refuse "could not read commit $o_oid as stored."
+  tr '\000' '\001' <"$work/raw.tmp" >"$work/raw.t" \
+    || refuse "could not prepare commit $o_oid for reading as stored."
   # tr maps byte for byte, so the copy has to be as long as the object.
-  [ "$(wc -c <"$work/raw.tmp" | tr -d ' ')" = "$(wc -c <"$work/raw.$n_raw" | tr -d ' ')" ] \
-    || refuse "could not copy commit $e_oid whole."
-  note rawcommits '%s %s %s\n' "$e_oid" "$n_raw" "$e_short"
-done <"$work/encodings" || refuse "could not read back the encodings of the new commits."
-[ "$n_read" = "$n_commits" ] || refuse "read back $n_read of $n_commits encoding(s)."
+  [ "$(wc -c <"$work/raw.tmp" | tr -d ' ')" = "$(wc -c <"$work/raw.t" | tr -d ' ')" ] \
+    || refuse "could not copy commit $o_oid whole."
+  true >"$work/objcnt" || refuse "$cannot_write"
+  IMPRINT_COMMIT="$o_oid" IMPRINT_COMMITLOC="$work/commitloc" IMPRINT_MTTAGGERS="$work/mttaggers" \
+    IMPRINT_OBJCNT="$work/objcnt" LC_ALL=C awk "$prepare" "$work/raw.t" "$work/raw.t" \
+    >>"$work/committext" </dev/null || refuse "awk could not read commit $o_oid."
+  o_k=''; o_conv=''; o_m=''
+  { read -r o_k && read -r o_conv && read -r o_m; } <"$work/objcnt" || o_k=''
+  case "$o_k:$o_conv:$o_m" in
+    *[!0-9:]* | :* | *::* | *:) refuse "awk reported no count of what it read from commit $o_oid." ;;
+  esac
+  n_lines=$((n_lines + o_k)); n_mt=$((n_mt + o_m))
+  if [ "$o_conv" = 1 ]; then
+    n_raw=$((n_raw + 1))
+    mv "$work/raw.t" "$work/raw.$n_raw" || refuse "could not keep commit $o_oid for reading as converted."
+    note rawcommits '%s %s\n' "$o_oid" "$n_raw"
+  fi
+done <"$work/commits" || refuse "could not read back the new commits."
+[ "$n_obj" = "$n_commits" ] || refuse "read back $n_obj of $n_commits new commit(s)."
+# A line awk could not write down - a full disk, say - would go unmatched.
+for f in committext:"$n_lines" commitloc:"$n_lines" mttaggers:"$n_mt"; do
+  n_f="$(wc -l <"$work/${f%%:*}" | tr -d ' ')"
+  [ "$n_f" = "${f#*:}" ] || refuse \
+    "wrote down ${n_f:-none} of ${f#*:} line(s) of the new commits' objects in ${f%%:*}."
+done
 
 # --- check 1: every author and committer is a declared identity --------------
 # A committer may also be GitHub's web-flow identity, which a merge through the
@@ -757,7 +873,7 @@ note committers '%s\n' "$web_flow"
 # 2026-10-01). A declared name outside ASCII, printed in Latin-1, would no
 # longer equal the UTF-8 one in the declared list, so git is asked for UTF-8,
 # which is what git config holds. An author or committer of a commit read as
-# stored as well (above) is declared when either reading of it is.
+# converted as well (above) is declared when either reading of it is.
 git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%H A %an <%ae>%n%H C %cn <%ce>' \
   <"$work/commits" >"$work/ids" || refuse "git log failed reading the identities of the new commits."
 true >"$work/undeclared" || refuse "$cannot_write"
@@ -767,7 +883,7 @@ while IFS= read -r line; do
   [ -n "$id" ] || continue
   if [ "$role" = C ]; then list="$work/committers"; key=committer; else list="$work/allowed"; key=author; fi
   grep -Fxq -- "$id" "$list" && continue
-  r_n="$(sed -n "s/^$i_oid \\([0-9]*\\) .*/\\1/p" "$work/rawcommits")"
+  r_n="$(sed -n "s/^$i_oid \\([0-9]*\\)\$/\\1/p" "$work/rawcommits")"
   if [ -n "$r_n" ]; then
     # git takes the last of several author or committer lines, so the stored
     # reading vouches only for a header that has exactly one.
@@ -788,8 +904,34 @@ while IFS= read -r id; do
 done <"$work/undeclared" || refuse "could not read back the undeclared identities."
 undeclared="$(wc -l <"$work/undeclared" | tr -d ' ')"
 n_ids="$(sed 's/^[^ ]* . //' "$work/ids" | sort -u | wc -l | tr -d ' ')"
-note ran 'declared identity - %s identity/identities over %s new commit(s), %s undeclared\n' \
-  "$n_ids" "$n_commits" "$undeclared"
+
+# The tagger of a tag a new merge carries in its mergetag header, read above,
+# is held to the declared identities as the tag check holds a tagger: the
+# web-flow identity is not one, and a tagger line that does not end its
+# identity in "<...>" is a check that could not run.
+n_read=0; n_mt_undeclared=0
+while IFS="$tab" read -r m_oid m_id; do
+  n_read=$((n_read + 1))
+  if [ -z "$m_id" ]; then
+    note errors 'could not read the tagger of the tag commit %s merges as "Name <address>"\n' "$m_oid"
+    continue
+  fi
+  LC_ALL=C grep -Fxq -- "$m_id" "$work/allowed"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    note findings 'undeclared identity: %s, tagger of the tag commit %s merges\n' "$m_id" "$m_oid"
+    n_mt_undeclared=$((n_mt_undeclared + 1))
+  elif [ "$rc" -gt 1 ]; then
+    note errors 'grep could not read the declared identities for the tagger of the tag commit %s merges\n' "$m_oid"
+  fi
+done <"$work/mttaggers" || refuse "could not read back the taggers of merged tags."
+[ "$n_read" = "$n_mt" ] || refuse "read back $n_read of $n_mt tagger(s) of merged tags."
+if [ "$n_mt" -gt 0 ]; then
+  note ran 'declared identity - %s identity/identities over %s new commit(s), %s undeclared; %s tagger(s) of merged tags, %s undeclared\n' \
+    "$n_ids" "$n_commits" "$undeclared" "$n_mt" "$n_mt_undeclared"
+else
+  note ran 'declared identity - %s identity/identities over %s new commit(s), %s undeclared\n' \
+    "$n_ids" "$n_commits" "$undeclared"
+fi
 
 # --- check 2: tracked content, the lines the new commits add -----------------
 # Every new commit, not just the tip: a push publishes them all, and a line
@@ -882,10 +1024,11 @@ END {
 }
 '
 # join puts a grep hit back where it came from: "N:content" becomes
-# "shape: commit:path:line:content", the form git grep prints.
+# "label: location:content", line N of IMPRINT_LOC being the location - for an
+# added line "commit:path:line", the form git grep prints.
 join='
 BEGIN {
-  f = ENVIRON["IMPRINT_ADDEDLOC"]; name = ENVIRON["IMPRINT_SHAPE"]; n = 0
+  f = ENVIRON["IMPRINT_LOC"]; name = ENVIRON["IMPRINT_SHAPE"]; n = 0
   while ((r = (getline l < f)) > 0) loc[++n] = l
   if (r < 0) exit 2
 }
@@ -985,22 +1128,33 @@ for f in added addedloc; do
   [ "$n_f" = "$n_added" ] || note errors \
     'wrote down %s of %s added line(s) in %s\n' "${n_f:-none}" "$n_added" "$f"
 done
+# place_hits LABEL LOC - appends the hits grep_both left in hits to findings,
+# each put back where LOC says it came from, as "LABEL: location:content".
+# Every hit is one finding, so join has to place as many lines as hits holds:
+# an awk that lost a write without saying so is an error. They go to a file
+# of their own first and then onto findings in one write, which refuses the
+# push when it fails, as note does; findings itself is never read back here.
+place_hits() {
+  ph_label="$1"; ph_loc="$2"
+  true >"$work/placed" || refuse "$cannot_write"
+  if IMPRINT_SHAPE="$ph_label" IMPRINT_LOC="$ph_loc" \
+    LC_ALL=C awk "$join" <"$work/hits" >"$work/placed"; then
+    n_hits="$(wc -l <"$work/hits" | tr -d ' ')"
+    n_placed="$(wc -l <"$work/placed" | tr -d ' ')"
+    if [ -n "$n_hits" ] && [ "$n_placed" = "$n_hits" ]; then
+      cat "$work/placed" >>"$work/findings" || refuse "$cannot_write"
+    else
+      note errors 'placed %s of %s %s hit(s)\n' "${n_placed:-?}" "${n_hits:-?}" "$ph_label"
+    fi
+  else
+    note errors 'awk could not place the %s hits\n' "$ph_label"
+  fi
+}
+
 n_done=0
 while IFS="$tab" read -r name pattern; do
   if grep_both "$name" "$pattern" "$work/added" "the added lines"; then
-    # Every hit is one finding, so findings has to grow by as many lines as
-    # hits holds: an awk that lost a write without saying so is an error.
-    n_hits="$(wc -l <"$work/hits" | tr -d ' ')"
-    n_before="$(wc -l <"$work/findings" | tr -d ' ')"
-    if IMPRINT_SHAPE="$name" IMPRINT_ADDEDLOC="$work/addedloc" \
-      LC_ALL=C awk "$join" <"$work/hits" >>"$work/findings"; then
-      n_after="$(wc -l <"$work/findings" | tr -d ' ')"
-      [ -n "$n_hits" ] && [ -n "$n_before" ] && [ "$n_after" = $((n_before + n_hits)) ] \
-        || note errors 'findings went from %s to %s line(s) for %s %s hit(s)\n' \
-          "${n_before:-?}" "${n_after:-?}" "${n_hits:-?}" "$name"
-    else
-      note errors 'awk could not place the %s hits\n' "$name"
-    fi
+    place_hits "$name" "$work/addedloc"
   fi
   n_done=$((n_done + 1))
 done <"$work/shapes"
@@ -1009,39 +1163,54 @@ done <"$work/shapes"
 note ran 'tracked content - %s shape(s) over the lines %s new commit(s) add\n' \
   "$n_shapes" "$n_commits"
 
-# --- check 3: commit messages ------------------------------------------------
-# A message is as public as a blob, and trailers are where addresses ride in.
-# --encoding=UTF-8 for the reason check 1 gives: in Latin-1, a place that
-# starts with an umlaut matches the pattern under neither locale. A message
-# whose bytes are not valid UTF-8 and that carries no encoding header to say
-# what they are is printed as it is, which grep_both matches under C as well.
-# A commit read as stored as well (above) adds its message as stored, after
-# all of git log's.
-git log --no-walk=unsorted --stdin --encoding=UTF-8 --format='%h|%s%n%b' \
-  <"$work/commits" >"$work/messages" \
-  || refuse "git log failed reading the messages of the new commits."
-n_read=0
-while read -r r_oid r_n r_short; do
+# --- check 3: commit objects -------------------------------------------------
+# A message is as public as a blob, and trailers are where addresses ride in; a
+# header line is published as much. Each new commit's object was read above,
+# as stored, but for the identities check 1 reads and a signature's base64
+# lines. A commit whose header names an encoding other than UTF-8 has its
+# message read here as git log converts it, too: in Latin-1, a place that
+# starts with an umlaut matches the pattern under neither locale. The shapes
+# are matched line by line, as everywhere in this hook.
+true >"$work/convtext" && true >"$work/convloc" || refuse "$cannot_write"
+number='
+BEGIN { c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_LOC"]; k = 0 }
+{ print; print c ":" FNR >> loc; k++ }
+END { cnt = ENVIRON["IMPRINT_OBJCNT"]; print k > cnt }
+'
+n_read=0; n_conv=0
+while read -r r_oid r_n; do
   n_read=$((n_read + 1))
-  note messages '%s as stored|' "$r_short"
-  LC_ALL=C sed '1,/^$/d' "$work/raw.$r_n" >>"$work/messages" \
-    || refuse "could not write down the message of $r_oid as stored."
-  note messages '\n'
-done <"$work/rawcommits" || refuse "could not read back the commits read as stored."
-[ "$n_read" = "$n_raw" ] || refuse "read back $n_read of $n_raw commit(s) read as stored."
+  git log -1 --encoding=UTF-8 --format=%B "$r_oid" >"$work/conv.tmp" </dev/null \
+    || refuse "git log failed reading the message of $r_oid as converted."
+  true >"$work/objcnt" || refuse "$cannot_write"
+  IMPRINT_COMMIT="$r_oid" IMPRINT_LOC="$work/convloc" IMPRINT_OBJCNT="$work/objcnt" \
+    LC_ALL=C awk "$number" "$work/conv.tmp" >>"$work/convtext" </dev/null \
+    || refuse "awk could not read the message of $r_oid as converted."
+  r_k="$(cat "$work/objcnt")" || r_k=''
+  case "$r_k" in '' | *[!0-9]*) refuse "awk reported no count of the message of $r_oid as converted." ;; esac
+  n_conv=$((n_conv + r_k))
+done <"$work/rawcommits" || refuse "could not read back the commits read as converted."
+[ "$n_read" = "$n_raw" ] || refuse "read back $n_read of $n_raw commit(s) read as converted."
+for f in convtext convloc; do
+  n_f="$(wc -l <"$work/$f" | tr -d ' ')"
+  [ "$n_f" = "$n_conv" ] || refuse \
+    "wrote down ${n_f:-none} of $n_conv line(s) of the converted messages in $f."
+done
 n_done=0
 while IFS="$tab" read -r name pattern; do
-  if grep_both "$name" "$pattern" "$work/messages" "the commit messages"; then
-    while IFS= read -r hit; do
-      [ -n "$hit" ] || continue
-      note findings '%s in a commit message: %s\n' "$name" "$hit"
-    done <"$work/hits" || refuse "could not read back the hits in the commit messages."
+  if grep_both "$name" "$pattern" "$work/committext" "the commit objects"; then
+    place_hits "$name in a commit object" "$work/commitloc"
+  fi
+  if [ "$n_raw" -gt 0 ] \
+    && grep_both "$name" "$pattern" "$work/convtext" "the converted commit messages"; then
+    place_hits "$name in a commit message converted to UTF-8" "$work/convloc"
   fi
   n_done=$((n_done + 1))
 done <"$work/shapes"
 [ "$n_done" = "$n_shapes" ] || note errors \
-  'ran %s of %s shape(s) over the commit messages\n' "$n_done" "$n_shapes"
-note ran 'commit messages - %s shape(s) over %s new commit(s)\n' "$n_shapes" "$n_commits"
+  'ran %s of %s shape(s) over the commit objects\n' "$n_done" "$n_shapes"
+note ran 'commit objects - %s shape(s) over %s new commit object(s), all but the identities check 1 reads; %s message(s) also as converted to UTF-8\n' \
+  "$n_shapes" "$n_commits" "$n_raw"
 
 # --- report ------------------------------------------------------------------
 report

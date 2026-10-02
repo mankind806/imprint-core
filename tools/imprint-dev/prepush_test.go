@@ -685,26 +685,27 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		{"a grep over the added lines that writes no hit", func(t *testing.T) string {
 			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */added) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
 		}, []string{" in the added lines but wrote no hit down"}},
-		{"a grep over the commit messages that writes no hit", func(t *testing.T) string {
-			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */messages) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
-		}, []string{" in the commit messages but wrote no hit down"}},
+		{"a grep over the commit objects that writes no hit", func(t *testing.T) string {
+			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */committext) exit 0 ;; esac\nexec '"+grepBin+"' \"$@\"\n")
+		}, []string{" in the commit objects but wrote no hit down"}},
 		// The sort that merges the hits under your locale with those under
 		// C, failing out loud, and losing a line without saying so. The
-		// shape is in the commit message, so that is where it fails.
+		// shape is in the commit message, so the commit objects are where it
+		// fails.
 		{"a sort that cannot merge the hits", func(t *testing.T) string {
 			return ppShimPATH(t, "sort", "for a; do case \"$a\" in */hits.own) exit 2 ;; esac; done\nexec '"+sortBin+"' \"$@\"\n")
-		}, []string{"sort could not merge the address hits in the commit messages"}},
+		}, []string{"sort could not merge the address hits in the commit objects"}},
 		{"a sort that loses a merged hit", func(t *testing.T) string {
 			return ppShimPATH(t, "sort", "for a; do case \"$a\" in */hits.own) '"+sortBin+"' \"$@\" | sed '$d'; exit ;; esac; done\nexec '"+sortBin+"' \"$@\"\n")
-		}, []string{"sort lost some of the address hits in the commit messages while merging them"}},
+		}, []string{"sort lost some of the address hits in the commit objects while merging them"}},
 		{"a sort that swaps a merged hit for another line", func(t *testing.T) string {
 			return ppShimPATH(t, "sort", "for a; do case \"$a\" in */hits.own) '"+sortBin+"' \"$@\" | sed '1s/.*/1:not what grep found/'; exit ;; esac; done\nexec '"+sortBin+"' \"$@\"\n")
-		}, []string{"sort lost some of the address hits in the commit messages while merging them"}},
+		}, []string{"sort lost some of the address hits in the commit objects while merging them"}},
 		{"a shape loop cut short", func(t *testing.T) string {
 			// A grep that empties the shape list the loops read, while the
 			// first loop is on its first shape.
 			return ppShimPATH(t, "grep", "for a; do last=$a; done\ncase \"${last:-}\" in */added) : >\"${last%/added}/shapes\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
-		}, []string{"ran 1 of ", " shape(s) over the added lines", "ran 0 of ", " shape(s) over the commit messages"}},
+		}, []string{"ran 1 of ", " shape(s) over the added lines", "ran 0 of ", " shape(s) over the commit objects"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r, tip := brokenTip(t, "guard.shim")
@@ -728,13 +729,19 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		}
 		wantCouldNotRun(t, r, tip, nil)
 	})
+	// The first awk the hook runs reads the new commit's object, and a
+	// commit nothing could read stops the push there, before any report.
 	t.Run("awk fails", func(t *testing.T) {
 		r, tip := brokenTip(t, "no.awk")
-		wantCouldNotRun(t, r, tip, []string{ppShimPATH(t, "awk", "exit 2\n")})
+		shim := ppShimPATH(t, "awk", "exit 2\n")
+		for _, e := range [][]string{{shim}, {shim, "IMPRINT_PUSH_ANYWAY=only a test"}} {
+			code, out := r.hookNewBranch("broken", tip, e...)
+			ppWantRefused(t, code, out, "awk could not read commit "+tip)
+		}
 	})
 	// The awk that puts each hit back where it came from loses its write, and
 	// exits 0 as busybox awk does when its standard output fails: only the
-	// count of findings before and after can tell. The exit 0 is forced, so
+	// count of the lines it placed can tell. The exit 0 is forced, so
 	// this holds under an awk that would report the failure itself.
 	t.Run("a hit placed but not written", func(t *testing.T) {
 		if fi, err := os.Stat("/dev/full"); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
@@ -745,7 +752,7 @@ func TestPrePushCheckCouldNotRun(t *testing.T) {
 		r.write("lost.txt", "first line\nwrite to "+addr("lost.join", "example.invalid")+"\n")
 		tip := r.commit("broken: write to " + addr("lost.message", "example.invalid"))
 		shim := ppShimPATH(t, "awk", "if [ -n \"${IMPRINT_SHAPE:-}\" ]; then '"+awkBin+"' \"$@\" >/dev/full; exit 0; fi\nexec '"+awkBin+"' \"$@\"\n")
-		wantCouldNotRun(t, r, tip, []string{shim}, "findings went from ")
+		wantCouldNotRun(t, r, tip, []string{shim}, "placed 0 of 1 address hit(s)")
 	})
 }
 
@@ -1234,7 +1241,7 @@ func TestPrePushToolchains(t *testing.T) {
 	// postcode pattern held its umlauts in a bracket; the encoding cases
 	// that need one are in tests 40 and 42. A declared name outside ASCII
 	// shows git log's --encoding at work, and a mislabelled commit's
-	// address its message read as stored. umlautplace below runs the
+	// address its object read as stored. umlautplace below runs the
 	// spelled-out pattern (44) under every shell.
 	tcName := "J\u00fcrgen Test"
 	tcDeclared := []string{"GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0=" + tcName + " <" + ccTestSomeoneEmail + ">"}
@@ -1309,13 +1316,13 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantRefused(t, code, out, "phone number: ", ":l1.txt:2:")
 				ppWantChecked(t, out)
 				code, out = c.hookNewBranch("rawmsg", rawMsgTip, "LC_ALL=C.UTF-8")
-				ppWantRefused(t, code, out, "phone number in a commit message: ")
+				ppWantRefused(t, code, out, "phone number in a commit object: "+rawMsgTip+":8:")
 				ppWantChecked(t, out)
 				code, out = c.hookNewBranch("encid", encIDTip, append([]string{"LC_ALL=C.UTF-8", "GIT_CONFIG_COUNT=2",
 					"GIT_CONFIG_KEY_1=i18n.logOutputEncoding", "GIT_CONFIG_VALUE_1=ISO-8859-1"}, tcDeclared...)...)
 				ppWantPass(t, code, out)
 				code, out = c.hookNewBranch("mislabel", mislabelTip, append([]string{"LC_ALL=C.UTF-8", "GIT_CONFIG_COUNT=1"}, tcDeclared...)...)
-				ppWantRefused(t, code, out, " as stored|mislabel: write to "+tcMislabelAddr)
+				ppWantRefused(t, code, out, "address in a commit object: "+mislabelTip+":", "mislabel: write to "+tcMislabelAddr)
 				ppWantChecked(t, out)
 				if strings.Contains(out, "undeclared identity") {
 					t.Errorf("the stored reading did not vouch for the declared name; output:\n%s", out)
@@ -1343,9 +1350,9 @@ func TestPrePushToolchains(t *testing.T) {
 					file  string
 					wants []string
 				}{
-					{"hits.own", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit messages"}},
-					{"hits.c", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit messages"}},
-					{"greperr", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit messages"}},
+					{"hits.own", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit objects"}},
+					{"hits.c", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit objects"}},
+					{"greperr", []string{"could not run grep for address over the added lines", "could not run grep for address over the commit objects"}},
 					// sort runs only where a grep found something, and the
 					// leak branch's message is clean, so this one is check 2's.
 					{"hits", []string{"sort could not merge the address hits in the added lines"}},
@@ -1416,8 +1423,9 @@ func TestPrePushPOSIXLYCorrect(t *testing.T) {
 // 25. A signal ends the hook half-way. dash and busybox sh run no EXIT trap
 // then, so without a trap of its own the hook would leave its working files
 // behind and exit by the signal; it removes them and exits 1, which refuses
-// the push. The TERM comes during the last git call the hook makes, the one
-// that reads the messages: a trap that removed the files and returned would
+// the push. The TERM comes during the last git call the hook makes, the diff
+// of the new commit against its parent: a trap that removed the files and
+// returned would
 // let the hook run on without them, to whatever exit that happened to reach.
 // And it comes from a grep in a shape loop, which has to run in the shell that
 // holds the trap: a piped loop ran in a subshell that died alone, and the hook
@@ -1434,7 +1442,7 @@ func TestPrePushSignalCleansUp(t *testing.T) {
 		shim    func(t *testing.T) string
 	}{
 		{"a TERM during the last git call", "a clean line\n", func(t *testing.T) string {
-			return ppShimPATH(t, "git", "case \" $* \" in *\" --format=%h|%s%n%b \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+			return ppShimPATH(t, "git", "case \" $* \" in *\" diff-tree \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+gitBin+"' \"$@\"\n")
 		}},
 		{"a TERM from a grep in a shape loop", "first line\nvisit " + ppPostcode + "\n", func(t *testing.T) string {
 			return ppShimPATH(t, "grep", "case \" $* \" in *\"/added \"*) kill -TERM \"$PPID\" ;; esac\nexec '"+grepBin+"' \"$@\"\n")
@@ -1462,7 +1470,7 @@ func TestPrePushSignalCleansUp(t *testing.T) {
 }
 
 // 26. A line of the hook's own report that cannot be written. A grep, at each
-// shape it runs over the commit messages, swaps the findings or the errors file
+// shape it runs over the commit objects, swaps the findings or the errors file
 // for a link to /dev/full, so every write to it fails as on a full disk. The
 // verdict reads those files, and an empty one means clean: a finding or an
 // error that was never written down let the push through with "no findings".
@@ -1478,10 +1486,10 @@ func TestPrePushReportNotWritten(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		file string // the work file the shim swaps for /dev/full
-		then string // what the shim does next at a grep over the messages
+		then string // what the shim does next at a grep over the commit objects
 	}{
 		{"a finding in a commit message", "findings", ":"},
-		{"a grep that fails over the commit messages", "errors", "exit 2"},
+		{"a grep that fails over the commit objects", "errors", "exit 2"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := ppSeed(t, env)
@@ -1489,7 +1497,7 @@ func TestPrePushReportNotWritten(t *testing.T) {
 			r.write("full.txt", "a clean line\n")
 			tip := r.commit("full: write to " + addr("full.disk", "example.invalid"))
 			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
-				"case \"${last:-}\" in */messages) ln -s -f /dev/full \"${last%/messages}/"+c.file+"\"; "+c.then+" ;; esac\n"+
+				"case \"${last:-}\" in */committext) ln -s -f /dev/full \"${last%/committext}/"+c.file+"\"; "+c.then+" ;; esac\n"+
 				"exec '"+grepBin+"' \"$@\"\n")
 			for _, anyway := range []bool{false, true} {
 				e := []string{shim}
@@ -1507,9 +1515,11 @@ func TestPrePushReportNotWritten(t *testing.T) {
 }
 
 // 27. The working directory removed half-way - by a grep, at the first shape it
-// runs over the commit messages, the last step before the verdict. The verdict
+// runs over the commit objects, the last step before the verdict. The verdict
 // read the files that were gone as empty ones and reported no findings. Which
-// guard meets the gap first differs between shells, so the test names none.
+// guard meets the gap first differs between shells, so the test names none;
+// the shim leaves a mark outside the working directory, so a refusal for the
+// shape alone does not pass for a guard that held.
 func TestPrePushWorkGone(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -1526,15 +1536,22 @@ func TestPrePushWorkGone(t *testing.T) {
 			r.git("checkout", "-q", "-b", "gone")
 			r.write("gone.txt", "a clean line\n")
 			tip := r.commit(c.message)
+			fired := filepath.Join(t.TempDir(), "fired")
 			shim := ppShimPATH(t, "grep", "for a; do last=$a; done\n"+
-				"case \"${last:-}\" in */messages) rm -rf \"${last%/messages}\" ;; esac\n"+
+				"case \"${last:-}\" in */committext) rm -rf \"${last%/committext}\"; : >'"+fired+"' ;; esac\n"+
 				"exec '"+grepBin+"' \"$@\"\n")
 			for _, anyway := range []bool{false, true} {
 				e := []string{shim}
 				if anyway {
 					e = append(e, "IMPRINT_PUSH_ANYWAY=only a test")
 				}
+				if err := os.Remove(fired); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
 				code, out := r.hookNewBranch("gone", tip, e...)
+				if _, err := os.Stat(fired); err != nil {
+					t.Fatalf("no grep ran over the commit objects, so the working directory was never removed; output:\n%s", out)
+				}
 				ppWantRefused(t, code, out)
 				if strings.Contains(out, "no findings") {
 					t.Errorf("hook reports no findings; output:\n%s", out)
@@ -2048,12 +2065,13 @@ func TestPrePushAddedLineLatin1Byte(t *testing.T) {
 	}
 }
 
-// 40. A commit message reaches its check as git log prints it, re-encoded
-// into i18n.logOutputEncoding, or into i18n.commitEncoding when that is unset.
-// In Latin-1, a place that starts with an umlaut matches the pattern under
-// neither locale, so the hook asks git for UTF-8. A message whose bytes are
-// not valid UTF-8, with no encoding header to say what they are, is printed
-// as it is, and is matched under C as well. The hook runs under C.UTF-8.
+// 40. git log re-encodes what it prints into i18n.logOutputEncoding, or into
+// i18n.commitEncoding when that is unset. In Latin-1, a place that starts
+// with an umlaut matches the pattern under neither locale, so the hook reads
+// a commit's object as stored, where neither setting reaches. A message whose
+// bytes are not valid UTF-8, with no encoding header to say what they are, is
+// matched under C as well, and once: a commit with no encoding header is not
+// read as converted. The hook runs under C.UTF-8.
 func TestPrePushCommitMessageEncoding(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -2072,8 +2090,8 @@ func TestPrePushCommitMessageEncoding(t *testing.T) {
 			tip := r.commit("enc: deliver to " + place + "\n\nTel.:\u00a0" + phone)
 			code, out := r.hookNewBranch("enc", tip, "LC_ALL=C.UTF-8",
 				"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0="+c.key, "GIT_CONFIG_VALUE_0=ISO-8859-1")
-			ppWantRefused(t, code, out, "postcode and place in a commit message: ", place,
-				"phone number in a commit message: ")
+			ppWantRefused(t, code, out, "postcode and place in a commit object: "+tip+":", place,
+				"phone number in a commit object: "+tip+":")
 			ppWantChecked(t, out)
 		})
 	}
@@ -2084,9 +2102,9 @@ func TestPrePushCommitMessageEncoding(t *testing.T) {
 		tip := r.rawCommit("tree " + r.git("rev-parse", "HEAD^{tree}") + "\nparent " + r.head() +
 			"\nauthor " + id + "\ncommitter " + id + "\n\nraw: a Latin-1 byte\n\nTel.:\xa0" + phone + "\n")
 		code, out := r.hookNewBranch("raw", tip, "LC_ALL=C.UTF-8")
-		ppWantRefused(t, code, out, "phone number in a commit message: ")
+		ppWantRefused(t, code, out, "phone number in a commit object: "+tip+":8:Tel.:")
 		ppWantChecked(t, out)
-		if n := strings.Count(out, "phone number in a commit message: "); n != 1 {
+		if n := strings.Count(out, "phone number in a commit"); n != 1 {
 			t.Errorf("the hit is reported %d times, want once; output:\n%s", n, out)
 		}
 	})
@@ -2119,10 +2137,11 @@ func TestPrePushIdentityEncoding(t *testing.T) {
 // with i18n.commitEncoding set to Latin-1 and UTF-8 typed in, git commit
 // writes UTF-8 under a Latin-1 header. git log converts it anyway, which
 // turns the umlaut of a place into two characters no pattern holds, and a
-// declared name into one nobody declared, so the hook reads such a commit as
-// stored as well. A commit whose header is right - Latin-1 bytes under a
-// Latin-1 header - is still read through git's conversion. Each case runs
-// with and without the setting when the hook runs, under C.UTF-8.
+// declared name into one nobody declared; the commit's object as stored still
+// holds them, and check 1 reads its identities both ways. A commit whose
+// header is right - Latin-1 bytes under a Latin-1 header - is found through
+// git's conversion. Each case runs with and without the setting when the hook
+// runs, under C.UTF-8.
 func TestPrePushMislabelledEncoding(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -2176,7 +2195,7 @@ func TestPrePushMislabelledEncoding(t *testing.T) {
 			t.Parallel()
 			r := r.with(t)
 			code, out := r.hookNewBranch("misplace", misPlace, c.env...)
-			ppWantRefused(t, code, out, "postcode and place in a commit message: ", " as stored|misplace: deliver to "+place)
+			ppWantRefused(t, code, out, "postcode and place in a commit object: "+misPlace+":", "misplace: deliver to "+place)
 			ppWantChecked(t, out)
 			code, out = r.hookNewBranch("misname", misName, c.env...)
 			ppWantPass(t, code, out)
@@ -2184,7 +2203,7 @@ func TestPrePushMislabelledEncoding(t *testing.T) {
 			ppWantRefused(t, code, out, "undeclared identity: ", " <"+ccTestSomeoneEmail+">")
 			ppWantChecked(t, out)
 			code, out = r.hookNewBranch("rightplace", rightPlace, c.env...)
-			ppWantRefused(t, code, out, "postcode and place in a commit message: ", "|right: deliver to "+place)
+			ppWantRefused(t, code, out, "postcode and place in a commit message converted to UTF-8: "+rightPlace+":1:right: deliver to "+place)
 			ppWantChecked(t, out)
 			code, out = r.hookNewBranch("two", twoAuthors, c.env...)
 			ppWantRefused(t, code, out, "undeclared identity: Eve Stranger <"+ccTestSomeoneEmail+">")
