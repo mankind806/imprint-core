@@ -16,14 +16,52 @@ MODEL = "jev-latest"
 TIMEOUT = 8
 
 
-def get_key():
-    """TYPESAFE_API_KEY, else `secret-tool lookup service typesafe key api`; None if absent."""
+def _die_with_parent_preexec():
+    """A preexec_fn that makes the child get SIGKILL when its parent dies (Linux
+    prctl PR_SET_PDEATHSIG; kept across exec). None where libc/prctl isn't
+    available. Only for a single-threaded parent: preexec_fn runs between fork and
+    exec. libc is looked up here, in the parent; the returned function never raises."""
+    try:
+        import ctypes
+        import signal
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+        args = (ctypes.c_int(1), ctypes.c_ulong(int(signal.SIGKILL)),  # 1 = PR_SET_PDEATHSIG
+                ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0))
+    except Exception:
+        return None
+    parent = os.getpid()
+
+    def preexec():
+        try:
+            prctl(*args)
+            if os.getppid() != parent:  # the parent died before prctl took effect
+                os._exit(0)
+        except BaseException:
+            pass
+    return preexec
+
+
+def get_key(timeout=5, die_with_parent=False):
+    """TYPESAFE_API_KEY, else `secret-tool lookup service typesafe key api`; None if absent.
+
+    `timeout` bounds only the secret-tool subprocess (the env-var path is instant);
+    callers under a tighter deadline (e.g. a Stop hook) can cap it below the default.
+    die_with_parent=True (ts-done-check's worker) makes secret-tool get SIGKILL if
+    the caller dies first; it applies only while the caller has a single thread
+    (otherwise secret-tool is started as before)."""
     key = os.environ.get("TYPESAFE_API_KEY", "").strip()
     if key:
         return key
     try:
+        kw = {}
+        if die_with_parent:
+            import threading
+            if threading.active_count() == 1:
+                preexec = _die_with_parent_preexec()
+                if preexec is not None:
+                    kw["preexec_fn"] = preexec
         r = subprocess.run(["secret-tool", "lookup", "service", "typesafe", "key", "api"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=timeout, **kw)
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except Exception:
@@ -54,14 +92,41 @@ def _mask_tree(obj):
     return obj
 
 
-def post(state, questions, timeout=TIMEOUT):
+def _failure_reason(e):
+    """(reason, HTTP status or None) for an exception raised inside post()."""
+    import socket
+    if isinstance(e, urllib.error.HTTPError):  # includes an unfollowed 3xx
+        return "http_status", e.code
+    if isinstance(e, (TimeoutError, socket.timeout)) or (
+            isinstance(e, urllib.error.URLError) and isinstance(e.reason, (TimeoutError, socket.timeout))):
+        return "timeout", None
+    import http.client
+    if isinstance(e, (OSError, http.client.HTTPException)):  # refused, DNS, TLS, reset, truncated
+        return "network", None
+    return "internal", None
+
+
+def post(state, questions, timeout=TIMEOUT, key=None, detail=None):
     """One batched request. Returns the `answers` dict, or None on ANY failure.
 
     Second line of defence: every string leaf of state and questions is masked here
-    again, in addition to the masking each tool does itself."""
+    again, in addition to the masking each tool does itself.
+
+    `key` lets a caller that already fetched the key (e.g. under its own keyring-
+    timeout budget) hand it over directly instead of having post() call get_key()
+    again with get_key()'s own default timeout.
+
+    `detail`, if given a dict, receives why a None came back: detail["reason"] is
+    no_key, http_status (with detail["status"], e.g. 401, 500, an unfollowed 302),
+    timeout, network (refused, DNS, TLS, reset), bad_response (body not JSON, or no
+    `answers` object) or internal. The return value is the same with or without it."""
+    if detail is None:
+        detail = {}
     try:
-        key = get_key()
+        if key is None:
+            key = get_key()
         if not key:
+            detail["reason"] = "no_key"
             return None
         body = json.dumps({"state": _mask_tree(state), "model": MODEL,
                            "questions": _mask_tree(questions)}).encode()
@@ -71,12 +136,25 @@ def post(state, questions, timeout=TIMEOUT):
         req.add_unredirected_header("Authorization", "Bearer " + key)
         with _OPENER.open(req, timeout=timeout) as resp:
             if resp.status != 200:
+                detail["reason"], detail["status"] = "http_status", resp.status
                 return None
-            answers = json.loads(resp.read().decode()).get("answers")
-            return answers if isinstance(answers, dict) else None
+            raw = resp.read()
+            try:
+                parsed = json.loads(raw.decode())
+            except ValueError:  # not UTF-8 or not JSON
+                detail["reason"] = "bad_response"
+                return None
+            answers = parsed.get("answers") if isinstance(parsed, dict) else None
+            if not isinstance(answers, dict):
+                detail["reason"] = "bad_response"
+                return None
+            return answers
     except Exception as e:
         if isinstance(e, urllib.error.HTTPError):  # e.g. an unfollowed 3xx: release the response
             e.close()
+        detail["reason"], status = _failure_reason(e)
+        if status is not None:
+            detail["status"] = status
         return None
 
 
@@ -116,7 +194,100 @@ def _key_val_repl(m):
     return m.group(1) + q + "<redacted>" + q
 
 
-RX_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+# [\w.+-]+@ is quadratic in practice for the same reason RX_OPAQUE's lookaheads
+# were: re retries the greedy local-part scan from every position in a long run
+# of the charset with no '@' reachable from there. Confirmed empirically
+# (2026-10-02): 50k such characters took 5.5s (letters) to 10.7s (hex) to mask.
+# _LinearEmailMatcher below is a drop-in replacement supporting every way this
+# module uses RX_EMAIL -- .subn(str, text) (mask_detail), .sub(callable, text)
+# (alarm_view, which needs a real-enough match object for m.group(0)), and
+# .search(text) (local_alarm) -- finding the same matches in linear time: '@'
+# is never itself part of any surrounding character class, so once anchored on
+# a real '@' there is no backtracking ambiguity in what can match around it
+# (the local part before it, the domain and TLD after it are each a single
+# greedy run with a required literal in between, checked once per '@', not
+# once per starting position).
+_EMAIL_LOCAL_CHAR = re.compile(r"[\w.+-]")
+_EMAIL_DOMAIN_CHAR = re.compile(r"[\w-]")
+_EMAIL_TLD_CHAR = re.compile(r"[\w.-]")
+
+
+class _EmailMatch:
+    """Just enough of re.Match for alarm_view()'s repl(m): m.group(0)."""
+    __slots__ = ("_text",)
+
+    def __init__(self, text):
+        self._text = text
+
+    def group(self, n=0):
+        if n not in (0, "0"):
+            raise IndexError("_EmailMatch only has group 0")
+        return self._text
+
+
+class _LinearEmailMatcher:
+    def _spans(self, text):
+        """[(start, end), ...] of non-overlapping matches, left to right --
+        the same set .finditer() would yield, computed without ever trying a
+        starting position that isn't a real '@' in the text."""
+        spans = []
+        n = len(text)
+        consumed_to = 0  # end of the last match; nothing before this can start a new one
+        search_from = 0
+        while True:
+            at = text.find("@", search_from)
+            if at == -1 or at >= n:
+                break
+            # local part: walk backward from `at` while [\w.+-], never past
+            # the end of a previous match (that text is already consumed).
+            start = at
+            while start > consumed_to and _EMAIL_LOCAL_CHAR.match(text, start - 1, start):
+                start -= 1
+            if start == at:  # empty local part: [\w.+-]+ needs at least 1
+                search_from = at + 1
+                continue
+            # domain: walk forward from just after '@' while [\w-]
+            i = at + 1
+            while i < n and _EMAIL_DOMAIN_CHAR.match(text, i, i + 1):
+                i += 1
+            if i == at + 1 or i >= n or text[i] != ".":
+                search_from = at + 1
+                continue
+            # tld: walk forward from just after the literal '.' while [\w.-]
+            j = i + 1
+            k = j
+            while k < n and _EMAIL_TLD_CHAR.match(text, k, k + 1):
+                k += 1
+            if k == j:  # [\w.-]+ needs at least 1
+                search_from = at + 1
+                continue
+            spans.append((start, k))
+            consumed_to = k
+            search_from = k
+        return spans
+
+    def subn(self, repl, text):
+        spans = self._spans(text)
+        if not spans:
+            return text, 0
+        out, last = [], 0
+        is_callable = callable(repl)
+        for start, end in spans:
+            out.append(text[last:start])
+            out.append(repl(_EmailMatch(text[start:end])) if is_callable else repl)
+            last = end
+        out.append(text[last:])
+        return "".join(out), len(spans)
+
+    def sub(self, repl, text):
+        return self.subn(repl, text)[0]
+
+    def search(self, text):
+        spans = self._spans(text)
+        return _EmailMatch(text[spans[0][0]:spans[0][1]]) if spans else None
+
+
+RX_EMAIL = _LinearEmailMatcher()
 RX_IBAN = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Za-z0-9])")
 # German numbers: +49 or a leading 0, then at least 8 more digits, separators allowed.
 RX_PHONE = re.compile(r"(?<![\w+.])(?:\+49|0)(?:[ \t./()-]*\d){8,}(?!\d)")
@@ -126,7 +297,56 @@ KNOWN_PREFIX = (r"(?:ghp_|gho_|ghs_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|r
 _TOKEN_CHARS = r"[A-Za-z0-9_\-./+=]"
 RX_KNOWN_TOKEN = re.compile(r"(?<![A-Za-z0-9])" + KNOWN_PREFIX + _TOKEN_CHARS + r"{8,}")
 RX_AWS_KEY_ID = re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])")
-RX_OPAQUE = re.compile(r"(?=[A-Za-z0-9_\-+/]*\d)(?=[A-Za-z0-9_\-+/]*[A-Za-z])[A-Za-z0-9_\-+/]{24,}={0,2}")
+# The two lookaheads below ((?=...*\d)(?=...*[A-Za-z])) are quadratic in practice:
+# re's backtracking engine re-tries each lookahead from every position in a long
+# run of the charset, so a long run with no digit (or no letter) anywhere in the
+# rest of the string makes each position's lookahead re-scan up to the end of
+# that run. Confirmed empirically (2026-10-02): 40k such characters took ~5.8s,
+# scaling quadratically (doubling the input ~4x'd the time). _LinearOpaqueMatcher
+# below is a drop-in replacement (same .subn(repl, text) interface, the only
+# method mask_detail() calls on it) that finds the same matches in linear time:
+# a qualifying run (length >= 24, contains a digit, contains a letter) is always
+# consumed WHOLE by the original's greedy {24,} once found from its own start,
+# so checking each maximal charset run once -- instead of re-deriving "is there
+# a digit/letter ahead" from every position within it -- gives identical matches.
+_RX_OPAQUE_RUN = re.compile(r"[A-Za-z0-9_\-+/]+")  # a single greedy class run: never backtracks
+_RX_OPAQUE_HAS_DIGIT = re.compile(r"\d")  # also used as a single-char check at a fixed position, below
+_RX_OPAQUE_HAS_ALPHA = re.compile(r"[A-Za-z]")
+
+
+class _LinearOpaqueMatcher:
+    def subn(self, repl, text):
+        out, count, last = [], 0, 0
+        for m in _RX_OPAQUE_RUN.finditer(text):
+            start, end = m.span()
+            run = m.group(0)
+            if len(run) < 24 or not _RX_OPAQUE_HAS_ALPHA.search(run):
+                continue
+            # \d is Unicode: the original lookahead's greedy [charset]* always
+            # consumes the WHOLE run (since the run is already maximal) before
+            # checking \d, so a run with no ASCII digit of its own can still
+            # qualify if the single character immediately AFTER it (not part
+            # of the charset, so never part of the final match either) happens
+            # to be a Unicode decimal digit outside A-Za-z0-9_-+/ (confirmed:
+            # "a"*24 + "３" (fullwidth 3) -- found during review, 2026-10-02).
+            if not _RX_OPAQUE_HAS_DIGIT.search(run) \
+                    and not _RX_OPAQUE_HAS_DIGIT.match(text, end, end + 1):
+                continue
+            pad_end = end
+            for _ in range(2):  # the original's trailing ={0,2}, greedy but capped at 2
+                if pad_end < len(text) and text[pad_end] == "=":
+                    pad_end += 1
+                else:
+                    break
+            out.append(text[last:start])
+            out.append(repl)
+            count += 1
+            last = pad_end
+        out.append(text[last:])
+        return "".join(out), count
+
+
+RX_OPAQUE = _LinearOpaqueMatcher()
 
 NAMES_FILE = os.environ.get("TYPESAFE_NAMES_FILE", os.path.expanduser("~/.config/typesafe/names.txt"))
 _NAMES_CACHE = {}  # filepath -> (mtime, regex)
