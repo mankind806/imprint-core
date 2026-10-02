@@ -1143,7 +1143,8 @@ func TestPrePushNULOnShapeLine(t *testing.T) {
 // 23. A few cases under every shell and awk found on PATH: sh, dash and
 // busybox sh, each with the default awk, mawk, busybox awk and original-awk.
 // The tag and tree cases (28-37 below) and some commit object cases (45, 46,
-// 48, 49) run here too, for the seds, greps and awks those shells come with.
+// 48, 49, 53) run here too, for the seds, greps and awks those shells come
+// with.
 // CI runs on Ubuntu, where sh is dash and awk may be mawk; the combinations
 // that ran are logged (go test -v), so the log says which were exercised. A
 // combination that resolves to one already listed runs once.
@@ -1275,6 +1276,9 @@ func TestPrePushToolchains(t *testing.T) {
 	tcHdr := addr("tc.header", "example.invalid")
 	objHdrTip := r.rawCommit(objHead + "x-note " + tcHdr + "\n\nobjhdr: a clean subject\n")
 	objSigTip := r.rawCommit(objHead + "gpgsig " + ppArmour(" ", "") + "\nobjsig: a clean subject\n")
+	// The list of encodings read in full (53), under each awk's regex.
+	encReadTip := r.rawCommit(objHead + "encoding ISO-8859-1\n\nencread: a clean subject\n")
+	encUnreadTip := r.rawCommit(objHead + "encoding UTF-7\n\nencunread: a clean subject\n")
 	r.git("checkout", "-q", "-b", "tc-side", "main")
 	r.write("tc-side.txt", "a clean line\n")
 	tcSide := r.commit("tc-side: one clean commit")
@@ -1363,6 +1367,11 @@ func TestPrePushToolchains(t *testing.T) {
 				ppWantChecked(t, out)
 				code, out = c.hookNewBranch("objsig", objSigTip)
 				ppWantPass(t, code, out)
+				code, out = c.hookNewBranch("encread", encReadTip)
+				ppWantPass(t, code, out)
+				code, out = c.hookNewBranch("encunread", encUnreadTip)
+				ppWantRefused(t, code, out, "unread encoding: commit "+encUnreadTip+" names the encoding \"UTF-7\"")
+				ppWantChecked(t, out)
 				code, out = c.hookNewBranch("merge-tc-mtdeclared", mtDeclared)
 				ppWantPass(t, code, out)
 				code, out = c.hookNewBranch("merge-tc-mtstranger", mtStranger, "LC_ALL=C.UTF-8")
@@ -2404,7 +2413,8 @@ func TestPrePushCommitObjectHeader(t *testing.T) {
 			t.Skipf("git shows the author as %q here, not as the declared identity, so the case proves nothing", got)
 		}
 		code, out := r.hookNewBranch("utf7", oid)
-		ppWantRefused(t, code, out, "address in a commit object: "+oid+":3:author "+hidden)
+		ppWantRefused(t, code, out, "address in a commit object: "+oid+":3:author "+hidden,
+			"unread encoding: commit "+oid+" names the encoding \"UTF-7\"")
 		ppWantChecked(t, out)
 	})
 }
@@ -2621,6 +2631,24 @@ func TestPrePushMergetagHeader(t *testing.T) {
 		})
 	}
 
+	// A merge written under a Latin-1 header, of a tag whose tagger is the
+	// declared name outside ASCII: the tag holds it in UTF-8, git log turns
+	// it into one nobody declared, and the tagger as stored vouches for it.
+	t.Run("t-latin1", func(t *testing.T) {
+		r := r.with(t)
+		name := "J\u00f6rg T\u00e4ster"
+		r.ppSignedLookingTag("t-latin1", side, name+" <"+ccTestAuthorEmail+">", "a clean tag")
+		r.git("checkout", "-q", "-b", "merge-t-latin1", "main")
+		r.git("-c", "i18n.commitEncoding=ISO-8859-1", "merge", "-q", "--no-ff", "-m", "merge: tag t-latin1", "t-latin1")
+		merge := r.head()
+		if enc := r.git("log", "-1", "--format=%e", merge); enc != "ISO-8859-1" {
+			t.Fatalf("the merge's encoding header is %q, want ISO-8859-1", enc)
+		}
+		code, out := r.hookNewBranch("merge-t-latin1", merge,
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestAuthorEmail+">")
+		ppWantPass(t, code, out)
+	})
+
 	// A tagger line that ends no identity in ">", made by hand.
 	r.git("checkout", "-q", "main")
 	mt := "mergetag object " + side + "\n type commit\n tag t-broken\n tagger nobody at all\n \n a clean tag\n"
@@ -2721,6 +2749,21 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 	}
 	objects := `[ -n "${IMPRINT_COMMITLOC:-}" ]`
 	converted := `case "${IMPRINT_COMMITLOC:-}" in */convloc) true ;; *) false ;; esac`
+	// git listing the identities out of step with the commits: each
+	// commit's committer line before its author line, or the committer
+	// line named for another commit.
+	gitBin := ppRealBin(t, "git")
+	for _, c := range []struct{ name, prog string }{
+		{"identities swapped", "NR % 2 == 1 { a = $0; next } { print; print a }"},
+		{"a committer line for another commit", "NR % 2 == 0 { sub(/^[0-9a-f]+/, \"0\") } { print }"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := r.with(t)
+			s := ppShimPATH(t, "git", "case \" $* \" in *\" --format=%H A \"*) '"+gitBin+"' \"$@\" | '"+awkBin+"' '"+c.prog+"'; exit ;; esac\nexec '"+gitBin+"' \"$@\"\n")
+			code, out := r.hookNewBranch("count", plain, s)
+			ppWantRefused(t, code, out, "the identities git listed are out of step at commit "+plain)
+		})
+	}
 	for _, c := range []struct {
 		name, tip, cond, after, want string
 	}{
@@ -2729,6 +2772,10 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 		{"a merged tagger lost", merge, objects + ` && [ -s "$IMPRINT_MTTAGGERS" ]`, `: >"$IMPRINT_MTTAGGERS"`,
 			"wrote down 0 of 1 line(s) of the new commits' objects in mttaggers."},
 		{"a converted location lost", latin1, converted, dropLast("IMPRINT_COMMITLOC"), " line(s) of the new commits' objects in convloc."},
+		{"a line of text lost", plain, objects, `d="${IMPRINT_COMMITLOC%/*}"; case "$IMPRINT_COMMITLOC" in */commitloc) sed '$d' "$d/committext" >"$d/committext.cut" && mv "$d/committext.cut" "$d/committext" ;; esac`,
+			" line(s) of the new commits' objects in committext."},
+		{"a converted line of text lost", latin1, converted, `d="${IMPRINT_COMMITLOC%/*}"; sed '$d' "$d/convtext" >"$d/convtext.cut" && mv "$d/convtext.cut" "$d/convtext"`,
+			" line(s) of the new commits' objects in convtext."},
 		{"no converted count", latin1, converted, `echo x >"$IMPRINT_OBJCNT"`, "awk reported no count of what it read from commit " + latin1 + " as converted."},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -2778,7 +2825,7 @@ func TestPrePushConvertedIdentity(t *testing.T) {
 			t.Skipf("git shows the author as %q here, not as the converted line, so the case proves nothing", got)
 		}
 		code, out := r.hookNewBranch("utf7", oid)
-		ppWantRefused(t, code, out, "undeclared identity: "+stranger)
+		ppWantRefused(t, code, out, "undeclared identity: "+stranger, "unread encoding: commit "+oid)
 		ppWantChecked(t, out)
 	})
 	// A shape git shows only once it has converted the header: in an extra
@@ -2803,7 +2850,7 @@ func TestPrePushConvertedIdentity(t *testing.T) {
 				t.Skipf("git does not show the converted phone number here (%v, %q), so the case proves nothing", err, got)
 			}
 			code, out := r.hookNewBranch("utf7h", oid)
-			ppWantRefused(t, code, out, "phone number in a commit converted to UTF-8: "+oid+c.want)
+			ppWantRefused(t, code, out, "phone number in a commit converted to UTF-8: "+oid+c.want, "unread encoding: commit "+oid)
 			ppWantChecked(t, out)
 		})
 	}
@@ -2816,5 +2863,44 @@ func TestPrePushConvertedIdentity(t *testing.T) {
 		code, out := r.hookNewBranch("latin1", oid, "LC_ALL=C.UTF-8",
 			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestAuthorEmail+">")
 		ppWantPass(t, code, out)
+	})
+}
+
+// 53. A commit whose header names an encoding other than UTF-8 is read as
+// stored and as git converts it. That covers what git shows only where a
+// conversion makes an ASCII character from the same byte alone, and never a
+// newline or a NUL; any other encoding - UTF-7, UTF-16, EBCDIC - is a
+// finding. The commits here hold ASCII alone, so every encoding reads them
+// the same, and only the name decides.
+func TestPrePushUnreadEncoding(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	id := ppAuthorName + " <" + ccTestAuthorEmail + "> 1767225600 -0100"
+	head := "tree " + r.git("rev-parse", "HEAD^{tree}") + "\nparent " + r.head() + "\nauthor " + id + "\ncommitter " + id + "\n"
+	for _, enc := range []string{"ISO-8859-1", "iso8859-15", "latin1", "utf8", "", "windows-1252", "CP1251", "KOI8-R",
+		"EUC-JP", "GBK", "GB18030", "Big5", "Shift_JIS", "CP932"} {
+		t.Run("reads "+enc, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawCommit(head + "encoding " + enc + "\n\nreadable: " + enc + "\n")
+			code, out := r.hookNewBranch("enc", oid)
+			ppWantPass(t, code, out)
+		})
+	}
+	for _, enc := range []string{"UTF-7", "UTF-16BE", "IBM037", "ISO-2022-JP"} {
+		t.Run("does not read "+enc, func(t *testing.T) {
+			r := r.with(t)
+			oid := r.rawCommit(head + "encoding " + enc + "\n\nunread: " + enc + "\n")
+			code, out := r.hookNewBranch("enc", oid)
+			ppWantRefused(t, code, out, "unread encoding: commit "+oid+" names the encoding \""+enc+"\", which this hook does not read in full")
+		})
+	}
+	// An escaped NUL ends git's converted text, and what follows it is
+	// read nowhere but here.
+	t.Run("an escaped NUL", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawCommit(head + "encoding UTF-7\n\nnul: x+AAA-" + ppUTF7("call "+"0"+"30"+" "+"1234567") + "\n")
+		code, out := r.hookNewBranch("enc", oid)
+		ppWantRefused(t, code, out, "unread encoding: commit "+oid)
 	})
 }

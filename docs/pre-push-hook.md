@@ -48,33 +48,49 @@ finds is a finding. The patterns hold characters outside ASCII, which takes your
 a byte that is not valid in your locale's encoding matches no bracket expression there, not
 even `[^0-9]`, and such bytes do arrive: a file is stored as it was written, a commit made by
 a tool other than git's own commands can keep them in its message, and a tag object is raw
-bytes. A Latin-1 no-break space right before a phone number hid it from a UTF-8 locale and not
-from `C` (*measured with GNU grep 3.12, 2026-10-01*). The author and committer identities
-are read with `git log --encoding=UTF-8`. Without that flag git re-encodes what it prints into
-`i18n.logOutputEncoding`, or into `i18n.commitEncoding` when that is unset; set to Latin-1,
-either one made a declared name outside ASCII read as undeclared, and hid a postcode before a
-place that starts with an umlaut in a message read through `git log` from both matches
-(*measured with git 2.55.0, 2026-10-01*). The message is read from the object, where neither
-setting reaches. git converts a commit from the encoding its header names, though, and in
-Latin-1 a place with an umlaut matches no pattern under a UTF-8 locale or `C`, so a commit
-whose header names an encoding other than UTF-8 is read whole as `git log --pretty=raw
+bytes. A Latin-1 no-break space right before a phone number hid it from a UTF-8 locale and
+not from `C` (*measured with GNU grep 3.12, 2026-10-01*). The author and committer identities
+are read with `git log --encoding=UTF-8`. Without that flag git re-encodes what it prints
+into `i18n.logOutputEncoding`, or into `i18n.commitEncoding` when that is unset; set to
+Latin-1, either one made a declared name outside ASCII read as undeclared, and hid a postcode
+before a place that starts with an umlaut in a message read through `git log` from both
+matches (*measured with git 2.55.0, 2026-10-01*). The message is read from the object, where
+neither setting reaches. git converts a commit from the encoding its header names, though,
+and in Latin-1 a place with an umlaut matches no pattern under a UTF-8 locale or `C`, so a
+commit whose header names an encoding other than UTF-8 is read whole as `git log --pretty=raw
 --encoding=UTF-8` converts and prints it, too — header and message, since in UTF-7 a header
-line or a signature line that holds no shape as stored can hold one to git (*measured with git
-2.55.0, 2026-10-02*). An encoding line that names nothing counts as such a header: git takes the locale's character
-set for it, and under a Latin-1 locale it turned a UTF-8 place into characters no pattern
-holds (*measured with git 2.55.0, 2026-10-02*), which the object as stored still has as
-written. The header can also be wrong: with `i18n.commitEncoding` set to Latin-1 and UTF-8
-typed in, `git commit` writes UTF-8 under a Latin-1 header, the conversion turns the same
-umlaut into two characters that neither match finds, and `git log --format` converts even
-under `--encoding=none`. The object as stored holds the umlaut as typed, and the author or
-committer of such a commit counts as declared when either reading does — the stored one only
-when the header holds a single line for that role, since git shows the last of several, and
-only when the identity git shows differs from it in nothing but characters outside ASCII
-(*measured with git 2.55.0, 2026-10-01*). A conversion that changes more is not the same name
-read two ways: in UTF-7 an extra header line became an author line of its own, which git
-showed, while the stored header held one declared author (*measured with git 2.55.0,
-2026-10-02*). A tag object is read byte for byte throughout, so a
-tagger whose name is stored in Latin-1 is read as written.
+line or a signature line that holds no shape as stored can hold one to git (*measured with
+git 2.55.0, 2026-10-02*). An encoding line that names nothing counts as such a header: git
+takes the locale's character set for it, and under a Latin-1 locale it turned a UTF-8 place
+into characters no pattern holds (*measured with git 2.55.0, 2026-10-02*), which the object
+as stored still has as written. The header can also be wrong: with `i18n.commitEncoding` set
+to Latin-1 and UTF-8 typed in, `git commit` writes UTF-8 under a Latin-1 header, the
+conversion turns the same umlaut into two characters that neither match finds, and `git log
+--format` converts even under `--encoding=none`. The object as stored holds the umlaut as
+typed, and the author or committer of such a commit counts as declared when either reading
+does — the stored one only when the header holds a single line for that role, since git shows
+the last of several, and only when the identity git shows differs from it in nothing but
+characters outside ASCII (*measured with git 2.55.0, 2026-10-01*). A conversion that changes
+more is not the same name read two ways: in UTF-7 an extra header line became an author line
+of its own, which git showed, while the stored header held one declared author (*measured
+with git 2.55.0, 2026-10-02*). A tag object is read byte for byte throughout, so a tagger
+whose name is stored in Latin-1 is read as written.
+
+| The header's encoding line names … | read as stored | read as git converts it | finding of its own |
+|---|---|---|---|
+| nothing (no line), UTF-8 or utf8 | yes | — | — |
+| an empty value, ISO-8859-*, latin*, windows-125* or CP125*, KOI8-R/U, EUC-*, GB2312, GBK, GB18030, Big5, Shift_JIS, SJIS, CP932 | yes | yes | — |
+| any other encoding: UTF-7, UTF-16, UTF-32, EBCDIC (IBM037 …), ISO-2022-* … | yes | yes | `unread encoding` |
+
+Reading both ways covers what git shows only where a conversion makes an ASCII character
+from that same byte alone and never makes a newline or a NUL. In UTF-7 neither holds: an
+extra header line became an author line once converted, and an escaped NUL ended git's
+converted text before a shape that is only encoded as stored (*measured with git 2.55.0,
+2026-10-02*). So a commit whose header names an encoding outside the list is a finding, as a
+ref to a blob or a tree is; `IMPRINT_PUSH_ANYWAY` with a reason is the way past. `git log`
+stops at a NUL in what it converts as well, so for a listed encoding such a NUL was stored
+as one, and the stored reading reads past it. This is the hook's choice of list, made
+2026-10-02, and a name can be added once its conversion is shown to keep to that rule.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be
 a declared identity, as an author has to, and a tag that names no tagger is a finding.
@@ -109,7 +125,9 @@ finds one — `-----BEGIN PGP SIGNATURE-----`, `PGP MESSAGE`, `SSH SIGNATURE` or
 `SIGNED MESSAGE` — to the `-----END …-----` line after it, a line made only of base64
 characters is skipped. An armour of another name, or one before the last, is matched like any
 text. The merged tag's tagger is held to the declared identities as a pushed tag's tagger is,
-and left out of the shapes; a tagger line with no `>` in it is a check that could not run. A
+and left out of the shapes; a tagger line with no `>` in it is a check that could not run. In
+a merge read as converted, a tagger git shows counts as declared when the one stored is and
+the two differ in nothing but characters outside ASCII, as for an author. A
 merged tag that names no tagger brings no identity along and is no finding, unlike a pushed
 tag with none. The
 tag check makes no such exception, so a signed tag pushed as a tag object still meets those
@@ -213,10 +231,12 @@ and on its own line inside the armour of a `gpgsig` or `mergetag` header it pass
 nothing there but the signature; a commit object made by hand can. A merge of a tag signed by
 someone this clone has not declared is refused for its tagger: `IMPRINT_PUSH_ANYWAY` with a
 reason is the way past, or a merge of the commit the tag points at rather than of the tag. And
-`git merge --no-edit` of a signed tag writes the tag's signature and gpg's report on it into
-the merge's message, as lines that start with `#` (*measured with git 2.55.0 and a signature
-gpg could not read, 2026-10-02*); they are matched as the rest of the message is, base64
-included. A message given with `-m` leaves them out.
+`git merge --no-edit` of a signed tag writes the tag's signature and the report on verifying
+it into the merge's message, as lines that start with `#`; they are matched as the rest of
+the message is, base64 included. For an SSH key git knows through
+`gpg.ssh.allowedSignersFile`, that report is `Good "git" signature for <principal> …`, and a
+principal that is an address is a finding (*both measured with git 2.55.0, 2026-10-02*). A
+message given with `-m` leaves them out.
 
 `git push --no-verify` skips every hook silently, and the script cannot see that it happened.
 `IMPRINT_PUSH_ANYWAY='reason' git push` is the loud alternative — the findings are printed in
