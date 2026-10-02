@@ -40,7 +40,8 @@ that role, before any NUL. Whatever follows on that line is read, a second addre
 `git log` converts the header from the encoding it names as well, and in UTF-7 that turned
 one author line as stored into two, the declared one last (*measured with git 2.55.0,
 2026-10-02*): in a commit whose header names an encoding other than UTF-8, the identity is
-left out only when it is declared as stored.
+left out only when it is declared as stored, or when git shows a declared one that differs
+from it in nothing but characters outside ASCII — a name stored in Latin-1.
 
 Every shape is matched twice, under your own locale and under `C`, and a line either match
 finds is a finding. The patterns hold characters outside ASCII, which takes your locale; but
@@ -65,8 +66,12 @@ typed in, `git commit` writes UTF-8 under a Latin-1 header, the conversion turns
 umlaut into two characters that neither match finds, and `git log --format` converts even
 under `--encoding=none`. The object as stored holds the umlaut as typed, and the author or
 committer of such a commit counts as declared when either reading does — the stored one only
-when the header holds a single line for that role, since git shows the last of several
-(*measured with git 2.55.0, 2026-10-01*). A tag object is read byte for byte throughout, so a
+when the header holds a single line for that role, since git shows the last of several, and
+only when the identity git shows differs from it in nothing but characters outside ASCII
+(*measured with git 2.55.0, 2026-10-01*). A conversion that changes more is not the same name
+read two ways: in UTF-7 an extra header line became an author line of its own, which git
+showed, while the stored header held one declared author (*measured with git 2.55.0,
+2026-10-02*). A tag object is read byte for byte throughout, so a
 tagger whose name is stored in Latin-1 is read as written.
 
 An annotated tag is read as well, since it carries what a commit carries. Its tagger has to be

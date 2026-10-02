@@ -736,7 +736,9 @@ note committers '%s\n' "$web_flow"
 # conversion can make lines: in UTF-7, +AAo- is a newline, and one author line
 # as stored became two to git, the declared one last (measured with git
 # 2.55.0, 2026-10-02). So in a commit whose header names an encoding other
-# than UTF-8, an identity is left out only when it is declared as stored.
+# than UTF-8, an identity is left out only when it is declared as stored, or
+# when git shows a declared one that differs from it in nothing but
+# characters outside ASCII (ascii_of): a name stored in Latin-1.
 #
 # A signed commit carries its signature in a gpgsig header, and a merge of a
 # signed tag carries that tag, tagger and signature, in a mergetag header; git
@@ -780,6 +782,7 @@ note committers '%s\n' "$web_flow"
 prepare='
 BEGIN {
   c = ENVIRON["IMPRINT_COMMIT"]; loc = ENVIRON["IMPRINT_COMMITLOC"]; mt = ENVIRON["IMPRINT_MTTAGGERS"]
+  ashown = ENVIRON["IMPRINT_AUTHOR_SHOWN"]; cshown = ENVIRON["IMPRINT_COMMITTER_SHOWN"]
   soh = sprintf("%c", 1); ident = "^[^<" soh "]*<[^>" soh "]*>"
   b64 = "^[A-Za-z0-9+/=]*$"; armend = "^-----END [A-Z ]*-----$"
   sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----$"
@@ -793,6 +796,11 @@ function slurp(f, a,   l, r) {
   return r == 0
 }
 function put(s) { print s; print c ":" FNR >> loc; k++ }
+function ascii(s) { gsub(/[^ -~]/, "", s); return s }
+function declared(id, role) { return role == "author" ? (id in allowed) : (id in committers) }
+function vouched(span, shown, role) {
+  return !conv || declared(span, role) || (declared(shown, role) && ascii(span) == ascii(shown))
+}
 function signed(f) { return f == "gpgsig" || f == "gpgsig-sha256" || f == "mergetag" }
 FNR == 1 {
   pass++
@@ -840,11 +848,11 @@ $0 == "" { body = 1; next }
     put($0); next
   }
   if (!cont && !before && field == "author" && na == 1 && match(substr($0, 8), ident) &&
-    (!conv || (substr($0, 8, RLENGTH) in allowed))) {
+    vouched(substr($0, 8, RLENGTH), ashown, "author")) {
     put("author" substr($0, 8 + RLENGTH)); next
   }
   if (!cont && !before && field == "committer" && nc == 1 && match(substr($0, 11), ident) &&
-    (!conv || (substr($0, 11, RLENGTH) in committers))) {
+    vouched(substr($0, 11, RLENGTH), cshown, "committer")) {
     put("committer" substr($0, 11 + RLENGTH)); next
   }
   put($0)
@@ -854,6 +862,29 @@ END {
   print k > cnt; print conv > cnt; print m > cnt
 }
 '
+# --- the identities git shows ------------------------------------------------
+# git log re-encodes what it prints into i18n.logOutputEncoding, or into
+# i18n.commitEncoding when that is unset (measured with git 2.55.0,
+# 2026-10-01). A declared name outside ASCII, printed in Latin-1, would no
+# longer equal the UTF-8 one in the declared list, so git is asked for UTF-8,
+# which is what git config holds. Check 1 reads these lines, and prepare
+# below what git shows of the commit it reads.
+git log --no-walk=unsorted --stdin --no-show-signature --encoding=UTF-8 \
+  --format='%H A %an <%ae>%n%H C %cn <%ce>' <"$work/commits" >"$work/ids" \
+  || refuse "git log failed reading the identities of the new commits."
+# Two lines a commit, and nothing else: with log.showSignature on, git log
+# prints what verifying a signature says in between, unless told not to.
+n_idlines="$(wc -l <"$work/ids" | tr -d ' ')"
+[ "$n_idlines" = $((2 * n_commits)) ] || refuse \
+  "git log listed ${n_idlines:-no} identity line(s) for $n_commits new commit(s), not two each."
+
+# ascii_of TEXT - TEXT with every byte outside printable ASCII taken out. A
+# conversion from a wrong encoding header changes only bytes outside ASCII in
+# a name; one that changes more - a line git shows that the object as stored
+# does not hold, made by UTF-7 or EBCDIC - shows an identity whose ASCII
+# differs from the stored one.
+ascii_of() { printf '%s\n' "$1" | LC_ALL=C sed 's/[^ -~]//g'; }
+
 # Each object is read whole or the push stops here: a commit whose object
 # could not be read is one whose header and message nothing has checked.
 # committext and commitloc are parallel, as added and addedloc are below, and
@@ -865,6 +896,11 @@ done
 n_obj=0; n_raw=0; n_lines=0; n_mt=0
 while read -r o_oid; do
   n_obj=$((n_obj + 1))
+  # ids holds two lines a commit, in the order of commits.
+  o_a=''; o_c=''
+  { IFS= read -r o_a && IFS= read -r o_c; } <&3 || refuse "could not read back the identities of commit $o_oid."
+  case "$o_a" in "$o_oid A "*) o_a="${o_a#"$o_oid A "}" ;; *) refuse "the identities git listed are out of step at commit $o_oid." ;; esac
+  case "$o_c" in "$o_oid C "*) o_c="${o_c#"$o_oid C "}" ;; *) refuse "the identities git listed are out of step at commit $o_oid." ;; esac
   git cat-file commit "$o_oid" >"$work/raw.tmp" 2>/dev/null </dev/null \
     || refuse "could not read commit $o_oid as stored."
   tr '\000' '\001' <"$work/raw.tmp" >"$work/raw.t" \
@@ -875,6 +911,7 @@ while read -r o_oid; do
   true >"$work/objcnt" || refuse "$cannot_write"
   IMPRINT_COMMIT="$o_oid" IMPRINT_COMMITLOC="$work/commitloc" IMPRINT_MTTAGGERS="$work/mttaggers" \
     IMPRINT_ALLOWED="$work/allowed" IMPRINT_COMMITTERS="$work/committers" \
+    IMPRINT_AUTHOR_SHOWN="$o_a" IMPRINT_COMMITTER_SHOWN="$o_c" \
     IMPRINT_OBJCNT="$work/objcnt" LC_ALL=C awk "$prepare" "$work/raw.t" "$work/raw.t" \
     >>"$work/committext" </dev/null || refuse "awk could not read commit $o_oid."
   o_k=''; o_conv=''; o_m=''
@@ -888,7 +925,7 @@ while read -r o_oid; do
     mv "$work/raw.t" "$work/raw.$n_raw" || refuse "could not keep commit $o_oid for reading as converted."
     note rawcommits '%s %s\n' "$o_oid" "$n_raw"
   fi
-done <"$work/commits" || refuse "could not read back the new commits."
+done <"$work/commits" 3<"$work/ids" || refuse "could not read back the new commits."
 [ "$n_obj" = "$n_commits" ] || refuse "read back $n_obj of $n_commits new commit(s)."
 # A line awk could not write down - a full disk, say - would go unmatched.
 for f in committext:"$n_lines" commitloc:"$n_lines" mttaggers:"$n_mt"; do
@@ -901,20 +938,9 @@ done
 # The declared identities, and the committers it accepts, are written down
 # above.
 
-# git log re-encodes what it prints into i18n.logOutputEncoding, or into
-# i18n.commitEncoding when that is unset (measured with git 2.55.0,
-# 2026-10-01). A declared name outside ASCII, printed in Latin-1, would no
-# longer equal the UTF-8 one in the declared list, so git is asked for UTF-8,
-# which is what git config holds. An author or committer of a commit read as
-# converted as well (above) is declared when either reading of it is.
-git log --no-walk=unsorted --stdin --no-show-signature --encoding=UTF-8 \
-  --format='%H A %an <%ae>%n%H C %cn <%ce>' <"$work/commits" >"$work/ids" \
-  || refuse "git log failed reading the identities of the new commits."
-# Two lines a commit, and nothing else: with log.showSignature on, git log
-# prints what verifying a signature says in between, unless told not to.
-n_idlines="$(wc -l <"$work/ids" | tr -d ' ')"
-[ "$n_idlines" = $((2 * n_commits)) ] || refuse \
-  "git log listed ${n_idlines:-no} identity line(s) for $n_commits new commit(s), not two each."
+# An author or committer of a commit read as converted as well (above) is
+# declared when either reading of it is - the stored one only when the two
+# differ in nothing but characters outside ASCII (see ascii_of).
 true >"$work/undeclared" || refuse "$cannot_write"
 while IFS= read -r line; do
   i_oid="${line%% *}"; line="${line#* }"
@@ -925,13 +951,16 @@ while IFS= read -r line; do
   r_n="$(sed -n "s/^$i_oid \\([0-9]*\\)\$/\\1/p" "$work/rawcommits")"
   if [ -n "$r_n" ]; then
     # git takes the last of several author or committer lines, so the stored
-    # reading vouches only for a header that has exactly one.
+    # reading vouches only for a header that has exactly one, and only for
+    # the identity git shows: one that differs from it in ASCII is not the
+    # same name read two ways, but a line the conversion made.
     r_hdr="$(LC_ALL=C sed -n -e '/^$/q' -e "/^$key /p" "$work/raw.$r_n")"
     case "$r_hdr" in
       '' | *"$nl"*) ;;
       *)
         r_id="$(printf '%s\n' "$r_hdr" | LC_ALL=C sed -n "s/^$key \\(.*>\\).*\$/\\1/p")"
-        [ -n "$r_id" ] && LC_ALL=C grep -Fxq -- "$r_id" "$list" && continue
+        [ -n "$r_id" ] && LC_ALL=C grep -Fxq -- "$r_id" "$list" \
+          && [ "$(ascii_of "$r_id")" = "$(ascii_of "$id")" ] && continue
         ;;
     esac
   fi

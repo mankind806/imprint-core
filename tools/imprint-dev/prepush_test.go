@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"os"
 	"os/exec"
@@ -2647,6 +2648,46 @@ func TestPrePushShowSignature(t *testing.T) {
 	shim := ppShimPATH(t, "git", "case \" $* \" in *\" --format=%H A \"*) '"+gitBin+"' \"$@\"; rc=$?; echo extra; exit $rc ;; esac\nexec '"+gitBin+"' \"$@\"\n")
 	code, out = r.hookNewBranch("signed", oid, shim)
 	ppWantRefused(t, code, out, "git log listed 3 identity line(s) for 1 new commit(s), not two each.")
+
+	// A message read as converted goes through git log as well: a commit
+	// signed with a real SSH key whose header names Latin-1, and a signer
+	// git knows, make git print "Good ... signature for" the signer's
+	// principal, an address, among the message's lines.
+	t.Run("a message read as converted", func(t *testing.T) {
+		if _, err := exec.LookPath("ssh-keygen"); err != nil {
+			t.Skip("no ssh-keygen here, so no commit can be signed: " + err.Error())
+		}
+		r := ppSeed(t, env)
+		dir := t.TempDir()
+		key := filepath.Join(dir, "key")
+		if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", key).CombinedOutput(); err != nil {
+			t.Fatalf("ssh-keygen: %v\n%s", err, out)
+		}
+		pub, err := os.ReadFile(key + ".pub")
+		if err != nil {
+			t.Fatal(err)
+		}
+		signers := filepath.Join(dir, "allowed_signers")
+		if err := os.WriteFile(signers, []byte(ccTestAuthorEmail+" "+string(pub)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r.git("checkout", "-q", "-b", "sshsigned")
+		r.write("signed.txt", "a clean line\n")
+		r.stage()
+		r.git("-c", "gpg.format=ssh", "-c", "user.signingkey="+key, "-c", "i18n.commitEncoding=ISO-8859-1",
+			"commit", "-q", "-S", "-m", "sshsigned: a clean subject")
+		tip := r.head()
+		show := []string{"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=log.showSignature", "GIT_CONFIG_VALUE_0=true",
+			"GIT_CONFIG_KEY_1=gpg.ssh.allowedSignersFile", "GIT_CONFIG_VALUE_1=" + signers}
+		cmd := exec.Command("git", "-C", r.dir, "log", "-1", "--encoding=UTF-8", "--format=%B", tip)
+		cmd.Env = ccIsolatedGitEnv(show...)
+		got, _ := cmd.Output()
+		if !strings.Contains(string(got), ccTestAuthorEmail) {
+			t.Skipf("git printed no signer for the signature here (%q), so the setting is not exercised", got)
+		}
+		code, out := r.hookNewBranch("sshsigned", tip, show...)
+		ppWantPass(t, code, out)
+	})
 }
 
 // 51. The lists the commit objects are read into are counted, as the added
@@ -2695,4 +2736,53 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ppUTF7 encodes text as one UTF-7 shifted run: "+", the UTF-16BE bytes in
+// base64 without padding, "-".
+func ppUTF7(text string) string {
+	var b []byte
+	for _, r := range text {
+		b = append(b, byte(r>>8), byte(r))
+	}
+	return "+" + base64.RawStdEncoding.EncodeToString(b) + "-"
+}
+
+// 52. A header that names an encoding other than UTF-8 is converted by git
+// log before it reads the identities, and a conversion can make lines the
+// object as stored does not hold: in UTF-7, an extra header line held an
+// author line of its own once converted, and git showed that one. The
+// stored reading of a declared author vouches only for an identity git shows
+// that differs from it in nothing but characters outside ASCII, so a
+// stranger is undeclared. A name stored in Latin-1 under a Latin-1 header is
+// still declared, and its identity left out of the shapes.
+func TestPrePushConvertedIdentity(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	r := ppSeed(t, env)
+	me := ppAuthorName + " <" + ccTestAuthorEmail + ">"
+	stranger := "Evil Stranger <" + addr("utf7.author", "example.invalid") + ">"
+	date := " 1767225600 -0100"
+	head := "tree " + r.git("rev-parse", "HEAD^{tree}") + "\nparent " + r.head() + "\n"
+	t.Run("a line the conversion makes", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawCommit(head + "author " + me + date + "\ncommitter " + me + date + "\nx-junk " + ppUTF7("\nauthor "+stranger+date) +
+			"\nencoding UTF-7\n\nutf7: a clean subject\n")
+		if got := r.git("log", "-1", "--encoding=UTF-8", "--format=%an <%ae>", oid); got != stranger {
+			t.Skipf("git shows the author as %q here, not as the converted line, so the case proves nothing", got)
+		}
+		code, out := r.hookNewBranch("utf7", oid)
+		ppWantRefused(t, code, out, "undeclared identity: "+stranger)
+		ppWantChecked(t, out)
+	})
+	t.Run("a name stored in Latin-1", func(t *testing.T) {
+		r := r.with(t)
+		name := "J\u00f6rg T\u00e4ster"
+		stored := "J\xf6rg T\xe4ster <" + ccTestAuthorEmail + ">"
+		oid := r.rawCommit(head + "author " + stored + date + "\ncommitter " + stored + date +
+			"\nencoding ISO-8859-1\n\nlatin1: a clean subject\n")
+		code, out := r.hookNewBranch("latin1", oid, "LC_ALL=C.UTF-8",
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=imprint.allowedIdentity", "GIT_CONFIG_VALUE_0="+name+" <"+ccTestAuthorEmail+">")
+		ppWantPass(t, code, out)
+	})
 }
