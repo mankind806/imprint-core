@@ -48,6 +48,7 @@ var gateImpls = map[string]gateImpl{
 			"assistant_message": {chars: true},
 			"tool_calls":        {items: true},
 			"cmd":               {chars: true},
+			"tool":              {chars: true},
 		},
 		build: buildDoneCase,
 	},
@@ -182,7 +183,7 @@ func eachJSONLine(ctx context.Context, path string, fn func(v any)) error {
 // doneToolCalls is tool_calls() of ts-done-check: the last maxItems tool calls
 // of the transcript, chronological. Only the Bash commands of those calls are
 // masked and cut, not every command of the transcript.
-func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems, cmdCap int, cmdKeep string) ([]doneCall, error) {
+func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems int, cmdCap, toolCap StateCap) ([]doneCall, error) {
 	var calls []*doneCall
 	rawCmd := map[*doneCall]string{}
 	byID := map[string]*doneCall{}
@@ -242,8 +243,17 @@ func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems, cm
 	}
 	out := make([]doneCall, 0, len(calls))
 	for _, c := range calls {
+		// A tool name is a leaf like any other: masked and capped within the
+		// budget (ts-done-check sends it whole; names are short in practice).
+		if name, ok := c.Tool.(string); ok {
+			m, err := b.maskCapped(ctx, name, toolCap.CapChars, toolCap.Keep)
+			if err != nil {
+				return nil, err
+			}
+			c.Tool = m
+		}
 		if cmd, ok := rawCmd[c]; ok {
-			m, err := b.maskCapped(ctx, cmd, cmdCap, cmdKeep)
+			m, err := b.maskCapped(ctx, cmd, cmdCap.CapChars, cmdCap.Keep)
 			if err != nil {
 				return nil, err
 			}
@@ -326,12 +336,12 @@ func buildDoneCase(ctx context.Context, g *Gate, _ string, p map[string]any) (ga
 	}
 
 	// ts-done-check: tool_calls(tp) if tp and os.path.exists(tp) else []
-	budget := newMaskBudget()
+	budget := newMaskBudget(ctx)
 	calls := []doneCall{}
 	if tp != "" {
 		if _, err := os.Stat(tp); err == nil {
 			cmd := g.State["cmd"]
-			got, err := doneToolCalls(ctx, budget, tp, g.State["tool_calls"].MaxItems, cmd.CapChars, cmd.Keep)
+			got, err := doneToolCalls(ctx, budget, tp, g.State["tool_calls"].MaxItems, cmd, g.State["tool"])
 			if err != nil {
 				return c, err
 			}
@@ -401,7 +411,7 @@ func buildForeignReturnCase(ctx context.Context, g *Gate, event string, p map[st
 		c.skip = "too_short"
 		return c, nil
 	}
-	masked, err := newMaskBudget().maskCapped(ctx, text, ft.CapChars, ft.Keep)
+	masked, err := newMaskBudget(ctx).maskCapped(ctx, text, ft.CapChars, ft.Keep)
 	if err != nil {
 		return c, err
 	}

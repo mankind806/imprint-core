@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -76,6 +79,8 @@ func filler(rng *rand.Rand, kind string, n int) string {
 			sb.WriteString(h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:] + "\n")
 		case "integrity":
 			sb.WriteString(`    "integrity": "sha512-` + randFrom(rng, b64Alphabet, 86) + `==",` + "\n")
+		case "multibyte":
+			sb.WriteString([]string{"äöü ", "ß", "Grüße ", "\u6f22\u5b57 ", "\U0001f600", "e\u0301", "\u0661\u0662 ", "Ä<b>", "\u00a0"}[rng.Intn(9)])
 		case "angles":
 			sb.WriteString([]string{"a < b ", "<b>bold</b> ", "<redac ", "x<y ", "<<", "<ema", "if a<3 { "}[rng.Intn(7)])
 		default:
@@ -85,7 +90,7 @@ func filler(rng *rand.Rand, kind string, n int) string {
 	return headRunes(sb.String(), n)
 }
 
-var fillerKinds = []string{"jwt", "base64", "uuids", "integrity", "angles", "prose"}
+var fillerKinds = []string{"jwt", "base64", "uuids", "integrity", "angles", "multibyte", "prose"}
 
 // genText alternates filler and secret segments; a secret never lands inside
 // another one.
@@ -101,49 +106,93 @@ func genText(rng *rand.Rand, maxRunes int) string {
 	return headRunes(sb.String(), maxRunes)
 }
 
-// checkCut asserts the oracle for one cut of masked text m.
+// placeholderSpans finds every placeholder in m by its own scan (not with
+// cutMasked's helpers), as byte ranges.
+func placeholderSpans(m string) [][2]int {
+	var spans [][2]int
+	for _, ph := range []string{"<redacted>", "<address>", "<email>", "<phone>", "<iban>", "<name>"} {
+		for from := 0; ; {
+			k := strings.Index(m[from:], ph)
+			if k < 0 {
+				break
+			}
+			spans = append(spans, [2]int{from + k, from + k + len(ph)})
+			from += k + 1
+		}
+	}
+	return spans
+}
+
+// splits reports whether a cut at byte offset at runs through a placeholder.
+func splits(spans [][2]int, at int) bool {
+	for _, sp := range spans {
+		if sp[0] < at && at < sp[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// checkCut asserts the oracle for one cut of masked text m: the output is
+// valid UTF-8, within the cap, the whole text when it fits, else a prefix, a
+// suffix or prefix + separator + suffix of m; no cut runs through a
+// placeholder; and each kept side is at most 9 runes (a placeholder less one)
+// short of its share of the cap.
 func checkCut(m string, capChars int, keep, out string) string {
+	if !utf8.ValidString(out) {
+		return "output is not valid UTF-8"
+	}
 	if utf8.RuneCountInString(out) > capChars {
 		return "over the cap"
 	}
-	if len(headRunes(m, capChars)) == len(m) {
+	if utf8.RuneCountInString(m) <= capChars {
 		if out != m {
 			return "text under the cap was changed"
 		}
 		return ""
 	}
-	headOK := func(p string) string {
+	spans := placeholderSpans(m)
+	sep := utf8.RuneCountInString(headTailSeparator)
+	h := (capChars - sep) / 2
+	t := capChars - sep - h
+	headOK := func(p string, share int) string {
 		if !strings.HasPrefix(m, p) {
 			return "head is no prefix of the masked text"
 		}
-		if _, _, split := placeholderAcross(m, len(p)); split {
+		if splits(spans, len(p)) {
 			return "head cut splits a placeholder"
+		}
+		if utf8.RuneCountInString(p) < share-9 {
+			return "head shorter than its share less a placeholder"
 		}
 		return ""
 	}
-	tailOK := func(q string) string {
+	tailOK := func(q string, share int) string {
 		if !strings.HasSuffix(m, q) {
 			return "tail is no suffix of the masked text"
 		}
-		if _, _, split := placeholderAcross(m, len(m)-len(q)); split {
+		if splits(spans, len(m)-len(q)) {
 			return "tail cut splits a placeholder"
+		}
+		if utf8.RuneCountInString(q) < share-9 {
+			return "tail shorter than its share less a placeholder"
 		}
 		return ""
 	}
 	switch keep {
 	case "head":
-		return headOK(out)
+		return headOK(out, capChars)
 	case "tail":
-		return tailOK(out)
+		return tailOK(out, capChars)
 	default:
 		i := strings.Index(out, headTailSeparator)
 		if i < 0 {
 			return "no separator"
 		}
-		if msg := headOK(out[:i]); msg != "" {
+		if msg := headOK(out[:i], h); msg != "" {
 			return msg
 		}
-		return tailOK(out[i+len(headTailSeparator):])
+		return tailOK(out[i+len(headTailSeparator):], t)
 	}
 }
 
@@ -216,7 +265,7 @@ func TestMaskCappedIsCutOfWholeMask(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		text := genText(rng, 50+rng.Intn(4000))
 		capChars, keep := 16+rng.Intn(1500), []string{"head", "tail", "head_tail"}[rng.Intn(3)]
-		got, err := newMaskBudget().maskCapped(context.Background(), text, capChars, keep)
+		got, err := newMaskBudget(context.Background()).maskCapped(context.Background(), text, capChars, keep)
 		m, _ := MaskDetail(text)
 		if err != nil || got != cutMasked(m, capChars, keep) {
 			t.Fatalf("run %d: maskCapped differs from cutMasked(MaskDetail(text)) (err %v)", i, err)
@@ -228,7 +277,7 @@ func TestMaskCappedIsCutOfWholeMask(t *testing.T) {
 
 func TestMaskCappedLongMatch(t *testing.T) {
 	setupJudge(t, "")
-	b := newMaskBudget()
+	b := newMaskBudget(context.Background())
 	ctx := context.Background()
 	head, _ := b.maskCapped(ctx, "key "+strings.Repeat("Q", 3000)+"7", 200, "head")
 	tail, _ := b.maskCapped(ctx, strings.Repeat("Q", 3000)+"7 key", 200, "tail")
@@ -288,23 +337,31 @@ func TestDoneKeepsMessageBesideBlob(t *testing.T) {
 	}
 }
 
-// TestJudgeMaskBudget: a call that would mask more than maxMaskBytes fails with
-// too_large and sends nothing (the gate's fail mode decides; both are open).
+// TestJudgeMaskBudget: a call that would mask more than its budget (half
+// the deadline at the measured worst-case cost) fails with too_large and
+// sends nothing; the gate's fail mode decides (both are open). A short
+// deadline keeps the budget, and so the test, small.
 func TestJudgeMaskBudget(t *testing.T) {
 	logPath := setupJudge(t, "test-key")
 	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9, "instruction_to_agent": 0.1, "exfil_request": 0.1}))
-	big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": strings.Repeat("a", maxMaskBytes+1)})
-	_, stdout, _ := runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	budget := maskBudgetBytes(ctx)
+	cancel()
+	if budget < 100<<10 || budget > 2<<20 {
+		t.Fatalf("budget for 400 ms = %d bytes", budget)
+	}
+	big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": strings.Repeat("a", budget+1)})
+	_, stdout, _ := runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL, "--deadline-ms", "400")
 	if v := decodeObject(t, stdout); v["error_class"] != "too_large" || v["verdict"] != "allow" {
 		t.Errorf("foreign_return over the budget: %v", v)
 	}
-	// done: message and the last 15 commands share one budget.
+	// done: message, commands and tool names share one budget.
 	var calls []tcall
 	for i := 0; i < 15; i++ {
-		calls = append(calls, tcall{tool: "Bash", cmd: strings.Repeat("echo x ", maxMaskBytes/7/10)})
+		calls = append(calls, tcall{tool: "Bash", cmd: strings.Repeat("echo x ", budget/7/10)})
 	}
-	msg := "Fertig. " + strings.Repeat("y", maxMaskBytes/2)
-	_, stdout, _ = runJudgeCLI(t, stopPayload(t, msg, writeDoneTranscript(t, calls)), "--gate", "done", "--endpoint", ts.srv.URL)
+	msg := "Fertig. " + strings.Repeat("y", budget/2)
+	_, stdout, _ = runJudgeCLI(t, stopPayload(t, msg, writeDoneTranscript(t, calls)), "--gate", "done", "--endpoint", ts.srv.URL, "--deadline-ms", "400")
 	if v := decodeObject(t, stdout); v["error_class"] != "too_large" {
 		t.Errorf("done over the budget: %v", v)
 	}
@@ -313,5 +370,94 @@ func TestJudgeMaskBudget(t *testing.T) {
 	}
 	if n := len(readJudgeLog(t, logPath)); n != 2 {
 		t.Errorf("log lines = %d", n)
+	}
+}
+
+// TestJudgeMaskingStopsAtTheDeadline: when masking itself overruns (a slower
+// machine than the budget was measured on), judge stops waiting at the
+// deadline and answers timeout; it is never killed silently.
+func TestJudgeMaskingStopsAtTheDeadline(t *testing.T) {
+	setupJudge(t, "test-key")
+	ts := newFakeTS(t, answers(map[string]float64{"instruction_to_agent": 0.1, "exfil_request": 0.1}))
+	orig := maskDetailFn
+	maskDetailFn = func(s string) (string, MaskCounts) { time.Sleep(3 * time.Second); return MaskDetail(s) }
+	t.Cleanup(func() { maskDetailFn = orig })
+	p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": strings.Repeat("Lorem ipsum. ", 10000)})
+	start := time.Now()
+	code, stdout, stderr := runJudgeCLI(t, string(p), "--gate", "foreign_return", "--endpoint", ts.srv.URL, "--deadline-ms", "300")
+	el := time.Since(start)
+	v := decodeObject(t, stdout)
+	if code != exitOK || v["error_class"] != "timeout" || v["verdict"] != "allow" || el > time.Second {
+		t.Errorf("exit %d %v after %v; %s", code, v, el, stderr)
+	}
+	if ts.calls() != 0 {
+		t.Error("a request was sent")
+	}
+}
+
+// TestMaskLinearOnRejectedRuns: inputs that made the old lookbehind steps
+// quadratic (a rejected match, a retry one rune later, the greedy match
+// rescanned to its end each time) take well under a second at 64 KiB.
+func TestMaskLinearOnRejectedRuns(t *testing.T) {
+	setupJudge(t, "")
+	for name, text := range map[string]string{
+		"a+zeros":   "a" + strings.Repeat("0", 64<<10),
+		"aeyJ run":  strings.Repeat("aeyJ", 16<<10),
+		"XAKIA run": strings.Repeat("XAKIA", 13<<10),
+		"zeros+٣":   strings.Repeat("0 ", 32<<10) + "٣",
+		"tokx run":  strings.Repeat("tokx", 16<<10),
+		"token run": strings.Repeat("token", 13<<10) + "=",
+		"Aaa chain": strings.Repeat("Aaa ", 16<<10) + "Weg 1x2",
+		"at signs":  strings.Repeat("a@", 32<<10),
+		"AB12 run":  "a" + strings.Repeat("AB12", 16<<10),
+		"+49 run":   strings.Repeat("+49", 21<<10),
+	} {
+		start := time.Now()
+		MaskDetail(text)
+		if el := time.Since(start); el > 500*time.Millisecond {
+			t.Errorf("%s (%d bytes): %v", name, len(text), el)
+		}
+	}
+	// The same shapes, small enough for the old implementation: same output.
+	for _, text := range []string{"a" + strings.Repeat("0", 2000), strings.Repeat("aeyJ", 500), strings.Repeat("XAKIA", 400),
+		strings.Repeat("0 ", 1000) + "٣", strings.Repeat("Aaa ", 500) + "Weg 1x2", "a" + strings.Repeat("AB12", 500)} {
+		got, gc := MaskDetail(text)
+		want, wc := maskDetailReference(text)
+		if got != want || gc != wc {
+			t.Errorf("differs on %.40q", text)
+		}
+	}
+}
+
+// TestDoneCapsToolNames (review round 4, N-C): a tool name is a leaf like any
+// other: masked, capped (100 runes) and counted in the mask budget.
+func TestDoneCapsToolNames(t *testing.T) {
+	setupJudge(t, "test-key")
+	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9}))
+	long := "mcp__" + strings.Repeat("x", 1<<20)
+	tr := filepath.Join(t.TempDir(), "t.jsonl")
+	line, _ := json.Marshal(map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
+		map[string]any{"type": "tool_use", "id": "a", "name": long, "input": map[string]any{}}}}})
+	mail := "max" + "@" + "example.test"
+	line2, _ := json.Marshal(map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
+		map[string]any{"type": "tool_use", "id": "b", "name": "tool:" + mail, "input": map[string]any{}}}}})
+	if err := os.WriteFile(tr, append(append(line, '\n'), line2...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runJudgeCLI(t, stopPayload(t, "Fertig.", tr), "--gate", "done", "--endpoint", ts.srv.URL); code != exitOK {
+		t.Fatal(stderr)
+	}
+	var req struct {
+		State struct {
+			ToolCalls []struct {
+				Tool string `json:"tool"`
+			} `json:"tool_calls"`
+		} `json:"state"`
+	}
+	_ = json.Unmarshal(ts.lastBody(t), &req)
+	if len(req.State.ToolCalls) != 2 || utf8.RuneCountInString(req.State.ToolCalls[0].Tool) != 100 ||
+		req.State.ToolCalls[1].Tool != "tool:<email>" {
+		t.Errorf("tool names sent: %d calls, first %d runes, second %q", len(req.State.ToolCalls),
+			utf8.RuneCountInString(req.State.ToolCalls[0].Tool), req.State.ToolCalls[1].Tool)
 	}
 }

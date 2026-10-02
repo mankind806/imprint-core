@@ -1,5 +1,5 @@
 {
-  "registry_version": "2026-10-02.2",
+  "registry_version": "2026-10-02.3",
   "model": "jev-1.13.0",
   "gates": {
     "done": {
@@ -13,7 +13,8 @@
       "state": {
         "assistant_message": {"cap_chars": 4000, "keep": "tail"},
         "tool_calls": {"max_items": 15},
-        "cmd": {"cap_chars": 200, "keep": "head"}
+        "cmd": {"cap_chars": 200, "keep": "head"},
+        "tool": {"cap_chars": 100, "keep": "head"}
       },
       "questions": {
         "claim": {

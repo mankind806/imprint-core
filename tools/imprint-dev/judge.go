@@ -67,7 +67,8 @@ const (
 	errClassInput = "input" // stdin: unreadable, too large, not a JSON object, no event
 	errClassUsage = "usage" // no verdict due (exit 1): a flag that does not parse, --list/--version without a registry
 
-	// errClassTooLarge: the text to mask is over maxMaskBytes; nothing is sent.
+	// errClassTooLarge: the text to mask is over the mask budget
+	// (maskBudgetBytes); nothing is sent.
 	errClassTooLarge = "too_large"
 )
 
