@@ -66,6 +66,9 @@ const (
 	errClassCall  = "call"  // flags or wiring: gate, host, event, emit, source, endpoint
 	errClassInput = "input" // stdin: unreadable, too large, not a JSON object, no event
 	errClassUsage = "usage" // no verdict due (exit 1): a flag that does not parse, --list/--version without a registry
+
+	// errClassTooLarge: the text to mask is over maxMaskBytes; nothing is sent.
+	errClassTooLarge = "too_large"
 )
 
 var verdictRank = map[string]int{verdictAllow: 0, verdictWarn: 1, verdictAsk: 2, verdictBlock: 3}
@@ -571,9 +574,12 @@ func evaluateGate(ctx context.Context, reg *Registry, name string, g *Gate, even
 		v.CodeFlags[k] = f
 	}
 	if err != nil {
-		if timedOut() {
+		switch {
+		case errors.Is(err, errTooLarge):
+			fail(errClassTooLarge)
+		case timedOut():
 			fail(errClassTimeout)
-		} else {
+		default:
 			fail(errClassInternal)
 		}
 		return out

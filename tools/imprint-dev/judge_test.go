@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1341,39 +1342,31 @@ func TestCoreVersionFormat(t *testing.T) {
 // --- review round 1 (2026-10-02) ---------------------------------------------------
 
 // TestJudgeDeadlineCoversBuild: the deadline counts from the start of judge and
-// covers reading stdin, the transcript and masking; a 20 MB tool output and a
-// transcript of 10,000 calls are judged well inside it.
+// covers reading stdin, the transcript and masking. Worst-case maskable text
+// (random capitals and digits, the slowest kind measured) just under the mask
+// budget is judged inside the PostToolUse deadline; 16 MB of it is refused
+// (too_large) inside the deadline, with nothing sent; a transcript of 10,000
+// calls is judged inside the Stop deadline.
 func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	logPath := setupJudge(t, "test-key")
 	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9, "instruction_to_agent": 0.1, "exfil_request": 0.1}))
 	mail := "max" + "@" + "example.test"
+	rng := rand.New(rand.NewSource(5))
+	worst := func(n int) string { return randFrom(rng, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ", n) }
 
-	// 20 MB: over the 16 MB stdin limit, an input error, answered at once.
-	filler := strings.Repeat("Lorem ipsum "+mail+" dolor sit amet. ", 20<<20/40)
-	big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": filler}})
-	if len(big) < 20<<20 {
-		t.Fatalf("payload only %d bytes", len(big))
-	}
+	// Just under the mask budget: judged.
+	big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": worst(maxMaskBytes - 1024)}})
 	start := time.Now()
 	code, stdout, stderr := runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
 	el := time.Since(start)
 	v := decodeObject(t, stdout)
-	if code != exitOK || v["error_class"] != "input" || el >= 3*time.Second {
-		t.Fatalf("20 MB tool output: exit %d %v after %v; %s", code, v, el, stderr)
-	}
-	// 15 MB: judged, well inside the deadline.
-	filler = strings.Repeat("Lorem ipsum "+mail+" dolor sit amet. ", 15<<20/45)
-	big, _ = json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": filler}})
-	start = time.Now()
-	code, stdout, stderr = runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
-	el = time.Since(start)
-	v = decodeObject(t, stdout)
 	if code != exitOK || v["failed"] != false {
-		t.Fatalf("15 MB tool output: exit %d %v %s", code, v, stderr)
+		t.Fatalf("%d bytes: exit %d %v %s", maxMaskBytes-1024, code, v, stderr)
 	}
 	if el >= 3*time.Second || v["latency_ms"].(float64) >= 3000 {
-		t.Errorf("15 MB tool output took %v (latency_ms %v); the PostToolUse deadline is 3 s", el, v["latency_ms"])
+		t.Errorf("%d bytes of worst-case text took %v (latency_ms %v); the PostToolUse deadline is 3 s", maxMaskBytes-1024, el, v["latency_ms"])
 	}
+	t.Logf("%d bytes of worst-case text: judged in %v (build %v ms)", maxMaskBytes-1024, el.Round(time.Millisecond), v["latency_parts_ms"].(map[string]any)["build"])
 	if _, ok := v["latency_parts_ms"].(map[string]any)["build"]; !ok {
 		t.Errorf("latency_parts_ms lacks build: %v", v["latency_parts_ms"])
 	}
@@ -1381,9 +1374,21 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 		State map[string]string `json:"state"`
 	}
 	_ = json.Unmarshal(ts.lastBody(t), &req)
-	if n := len([]rune(req.State["foreign_text"])); n != 8000 {
-		t.Errorf("foreign_text = %d runes, want the cap 8000", n)
+	if n := len([]rune(req.State["foreign_text"])); n > 8000 || n < 7900 {
+		t.Errorf("foreign_text = %d runes, want about the cap 8000", n)
 	}
+
+	// 16 MB (just under the stdin limit): refused inside the deadline, nothing sent.
+	before := ts.calls()
+	big, _ = json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": worst(maxJudgeInput - 200)})
+	start = time.Now()
+	code, stdout, stderr = runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
+	el = time.Since(start)
+	v = decodeObject(t, stdout)
+	if code != exitOK || v["error_class"] != "too_large" || v["verdict"] != "allow" || ts.calls() != before || el >= 3*time.Second {
+		t.Fatalf("16 MB: exit %d %v after %v, requests %d; %s", code, v, el, ts.calls()-before, stderr)
+	}
+	t.Logf("16 MB of worst-case text: refused (too_large) in %v", el.Round(time.Millisecond))
 
 	var calls []tcall
 	for i := 0; i < 5000; i++ {
@@ -1402,7 +1407,7 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	}
 
 	// A deadline that has passed while building: timeout, no request.
-	before := ts.calls()
+	before = ts.calls()
 	_, stdout, _ = runJudgeCLI(t, stopPayload(t, "Fertig.", tr), "--gate", "done", "--endpoint", ts.srv.URL, "--deadline-ms", "1")
 	if v := decodeObject(t, stdout); v["error_class"] != "timeout" || ts.calls() != before {
 		t.Errorf("expired deadline: %v, requests %d", v, ts.calls()-before)

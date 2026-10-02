@@ -386,22 +386,45 @@ func countPlaceholders(text string) MaskCounts {
 	return c
 }
 
-// maskMargin is how many runes of masked text lie between a final cut and
-// the edge of the raw window that was masked. Text the window edge ran
-// through stays unmasked (a cut-off address, IBAN or quoted password no
-// longer matches), and it sits in the last runes of the masked window; the
-// final cut keeps at least maskMargin masked runes away from that edge, so
-// such a fragment is never sent, as long as the secret is shorter than
-// maskMargin runes.
-const maskMargin = 1024
+// maskPlaceholders are the placeholders MaskDetail writes. A cut never splits
+// one of them; no other "<" is ever trimmed.
+var maskPlaceholders = []string{"<redacted>", "<address>", "<email>", "<phone>", "<iban>", "<name>"}
 
-// maskGrowSteps bounds how far a raw window may grow when masking shrinks it
-// below cap+maskMargin runes: to 2^maskGrowSteps times cap+maskMargin runes at
-// most, so the work stays bounded whatever the input.
-const maskGrowSteps = 4
+// maxPlaceholderLen is the length of the longest placeholder.
+const maxPlaceholderLen = len("<redacted>")
 
 // headTailSeparator stands between head and tail when both are kept.
 const headTailSeparator = "\n[…]\n"
+
+// errTooLarge: the text a gate would mask is larger than its mask budget.
+var errTooLarge = errors.New("text too large to mask within the deadline")
+
+// maxMaskBytes is how many bytes of text one judge call masks at most, over
+// all its fields. Masking runs at about 0.6 to 1.5 µs per byte (measured
+// 2026-10-02, go1.27.1: 16 MB took 9 to 26 s); 512 KiB stays well inside the
+// 3 s deadline of PostToolUse. A call that would mask more fails with
+// error_class too_large and sends nothing.
+const maxMaskBytes = 512 << 10
+
+// maskBudget counts down the bytes a call may still mask.
+type maskBudget struct{ left int }
+
+func newMaskBudget() *maskBudget { return &maskBudget{left: maxMaskBytes} }
+
+// maskCapped masks the whole text, then keeps at most capChars runes of the
+// masked text (cutMasked). It refuses a text beyond the budget (errTooLarge)
+// and does not start once ctx's deadline has passed.
+func (b *maskBudget) maskCapped(ctx context.Context, text string, capChars int, keep string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if len(text) > b.left {
+		return "", errTooLarge
+	}
+	b.left -= len(text)
+	m, _ := MaskDetail(text)
+	return cutMasked(m, capChars, keep), nil
+}
 
 // headRunes is the first n runes of s (all of s if it is shorter), without
 // converting s as a whole; n <= 0 keeps everything.
@@ -437,100 +460,55 @@ func tailRunes(s string, n int) string {
 	return s[j:]
 }
 
-// cutRunes keeps the first (tail=false) or last (tail=true) n runes of s;
-// n <= 0 keeps nothing.
-func cutRunes(s string, n int, tail bool) string {
-	if n <= 0 {
-		return ""
+// placeholderAcross returns the start and end (byte offsets in m) of a
+// placeholder that the cut at byte offset at runs through, or ok=false. Such a
+// placeholder starts at the last "<" before at, since none contains a "<".
+func placeholderAcross(m string, at int) (start, end int, ok bool) {
+	for i := at - 1; i >= 0 && i > at-maxPlaceholderLen; i-- {
+		if m[i] != '<' {
+			continue
+		}
+		for _, ph := range maskPlaceholders {
+			if strings.HasPrefix(m[i:], ph) && i+len(ph) > at {
+				return i, i + len(ph), true
+			}
+		}
+		return 0, 0, false
 	}
-	if tail {
-		return tailRunes(s, n)
-	}
-	return headRunes(s, n)
+	return 0, 0, false
 }
 
-// maskSide masks one side of text and keeps at most n runes of it. It masks
-// a raw window of n+maskMargin runes and, while masking shrank that window
-// below n+maskMargin runes, grows the window (at least doubling it, to the
-// size the shrinkage so far suggests, at most 2^maskGrowSteps times
-// n+maskMargin). The final cut keeps min(n, masked length - maskMargin) runes,
-// so it stays maskMargin masked runes away from the window edge. If a window
-// reaches the whole text, whole is true and out is the whole text masked.
-func maskSide(text string, n int, tail bool) (out string, whole bool) {
-	maxWindow := (1 << maskGrowSteps) * (n + maskMargin)
-	window := n + maskMargin
-	for {
-		raw := cutRunes(text, window, tail)
-		m, _ := MaskDetail(raw)
-		if len(raw) == len(text) {
-			return m, true
-		}
-		ml := utf8.RuneCountInString(m)
-		if ml >= n+maskMargin || window >= maxWindow {
-			return cutRunes(m, min(n, ml-maskMargin), tail), false
-		}
-		next := 2 * window
-		if ml > 0 {
-			next = max(next, int(float64(window)*float64(n+maskMargin)/float64(ml)*1.25))
-		} else {
-			next = maxWindow
-		}
-		window = min(next, maxWindow)
-	}
-}
-
-// capMasked cuts already masked text to capChars runes; every cut here runs
-// through text that was masked as a whole, so no edge fragment can arise.
-func capMasked(m string, capChars int, keep string) string {
-	if len(headRunes(m, capChars)) == len(m) {
+// cutMasked keeps at most capChars runes of the masked text m: its head, its
+// tail, or both (head_tail, joined by headTailSeparator, which counts toward
+// the cap). A cut that would split a placeholder moves to its edge, so the
+// result is always a prefix, a suffix, or prefix + separator + suffix of m.
+// capChars <= 0 keeps everything.
+func cutMasked(m string, capChars int, keep string) string {
+	if capChars <= 0 || len(headRunes(m, capChars)) == len(m) {
 		return m
 	}
-	switch keep {
-	case "tail":
-		return tailRunes(m, capChars)
-	case "head_tail":
-		sep := utf8.RuneCountInString(headTailSeparator)
-		h := (capChars - sep) / 2
-		return headRunes(m, h) + headTailSeparator + tailRunes(m, capChars-sep-h)
-	default:
-		return headRunes(m, capChars)
+	headEnd := func(n int) int {
+		end := len(headRunes(m, n))
+		if s, _, ok := placeholderAcross(m, end); ok {
+			end = s
+		}
+		return end
 	}
-}
-
-// maskCapped masks text and keeps at most capChars runes of it: the head, the
-// tail, or both (head_tail, joined by headTailSeparator, which counts toward
-// the cap). It masks only windows of the text, not all of it (bounded work
-// for any input), and never sends a fragment of a secret that a window edge
-// cut (see maskSide). capChars <= 0 masks the whole text.
-func maskCapped(text string, capChars int, keep string) string {
-	if capChars <= 0 || len(headRunes(text, 2*(capChars+maskMargin))) == len(text) {
-		m, _ := MaskDetail(text)
-		return capMasked(m, capChars, keep)
+	tailStart := func(n int) int {
+		start := len(m) - len(tailRunes(m, n))
+		if _, e, ok := placeholderAcross(m, start); ok {
+			start = e
+		}
+		return start
 	}
 	switch keep {
 	case "tail":
-		out, whole := maskSide(text, capChars, true)
-		if whole {
-			return capMasked(out, capChars, keep)
-		}
-		return out
+		return m[tailStart(capChars):]
 	case "head_tail":
 		sep := utf8.RuneCountInString(headTailSeparator)
 		h := (capChars - sep) / 2
-		head, whole := maskSide(text, h, false)
-		if whole {
-			return capMasked(head, capChars, keep)
-		}
-		tail, whole := maskSide(text, capChars-sep-h, true)
-		if whole {
-			return capMasked(tail, capChars, keep)
-		}
-		return head + headTailSeparator + tail
+		return m[:headEnd(h)] + headTailSeparator + m[tailStart(capChars-sep-h):]
 	default:
-		out, whole := maskSide(text, capChars, false)
-		if whole {
-			return capMasked(out, capChars, keep)
-		}
-		return out
+		return m[:headEnd(capChars)]
 	}
 }

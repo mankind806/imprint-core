@@ -16,9 +16,9 @@ import (
 
 // A gate's builder is its code half: it reads the host payload, runs the
 // prefilters, computes the code flags and builds the state. It runs inside the
-// deadline (ctx). It caps text before it masks it (maskCapped), so its work
-// does not grow with the input; PostState masks every string leaf once more
-// before sending.
+// deadline (ctx). Each text field is masked whole, then cut (maskBudget.
+// maskCapped), within one budget of bytes per call; PostState masks every
+// string leaf once more before sending.
 
 type gateCase struct {
 	state any
@@ -182,7 +182,7 @@ func eachJSONLine(ctx context.Context, path string, fn func(v any)) error {
 // doneToolCalls is tool_calls() of ts-done-check: the last maxItems tool calls
 // of the transcript, chronological. Only the Bash commands of those calls are
 // masked and cut, not every command of the transcript.
-func doneToolCalls(ctx context.Context, path string, maxItems, cmdCap int, cmdKeep string) ([]doneCall, error) {
+func doneToolCalls(ctx context.Context, b *maskBudget, path string, maxItems, cmdCap int, cmdKeep string) ([]doneCall, error) {
 	var calls []*doneCall
 	rawCmd := map[*doneCall]string{}
 	byID := map[string]*doneCall{}
@@ -243,7 +243,10 @@ func doneToolCalls(ctx context.Context, path string, maxItems, cmdCap int, cmdKe
 	out := make([]doneCall, 0, len(calls))
 	for _, c := range calls {
 		if cmd, ok := rawCmd[c]; ok {
-			m := maskCapped(cmd, cmdCap, cmdKeep)
+			m, err := b.maskCapped(ctx, cmd, cmdCap, cmdKeep)
+			if err != nil {
+				return nil, err
+			}
 			c.Cmd = &m
 		}
 		out = append(out, *c)
@@ -323,11 +326,12 @@ func buildDoneCase(ctx context.Context, g *Gate, _ string, p map[string]any) (ga
 	}
 
 	// ts-done-check: tool_calls(tp) if tp and os.path.exists(tp) else []
+	budget := newMaskBudget()
 	calls := []doneCall{}
 	if tp != "" {
 		if _, err := os.Stat(tp); err == nil {
 			cmd := g.State["cmd"]
-			got, err := doneToolCalls(ctx, tp, g.State["tool_calls"].MaxItems, cmd.CapChars, cmd.Keep)
+			got, err := doneToolCalls(ctx, budget, tp, g.State["tool_calls"].MaxItems, cmd.CapChars, cmd.Keep)
 			if err != nil {
 				return c, err
 			}
@@ -337,7 +341,11 @@ func buildDoneCase(ctx context.Context, g *Gate, _ string, p map[string]any) (ga
 	c.flags["local_evidence"] = doneLocalEvidence(calls)
 
 	am := g.State["assistant_message"]
-	c.state = doneState{AssistantMessage: maskCapped(msg, am.CapChars, am.Keep), ToolCalls: calls}
+	masked, err := budget.maskCapped(ctx, msg, am.CapChars, am.Keep)
+	if err != nil {
+		return c, err
+	}
+	c.state = doneState{AssistantMessage: masked, ToolCalls: calls}
 	return c, nil
 }
 
@@ -379,7 +387,7 @@ func stringLeaves(v any) string {
 // sends here is the hook matcher's business, not the gate's. The registry keeps
 // head and tail of a long text, so text behind padding at either end is seen;
 // what lies only in the middle of a text longer than the cap is not.
-func buildForeignReturnCase(_ context.Context, g *Gate, event string, p map[string]any) (gateCase, error) {
+func buildForeignReturnCase(ctx context.Context, g *Gate, event string, p map[string]any) (gateCase, error) {
 	c := gateCase{flags: map[string]bool{}}
 	var text string
 	switch event {
@@ -393,6 +401,10 @@ func buildForeignReturnCase(_ context.Context, g *Gate, event string, p map[stri
 		c.skip = "too_short"
 		return c, nil
 	}
-	c.state = map[string]string{"foreign_text": maskCapped(text, ft.CapChars, ft.Keep)}
+	masked, err := newMaskBudget().maskCapped(ctx, text, ft.CapChars, ft.Keep)
+	if err != nil {
+		return c, err
+	}
+	c.state = map[string]string{"foreign_text": masked}
 	return c, nil
 }
