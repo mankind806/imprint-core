@@ -473,7 +473,7 @@ func TestJudgeBudgetCoversFallbackRunes(t *testing.T) {
 	budget := maskBudgetBytes(ctx)
 	cancel()
 	for _, trig := range []string{"ſ", "K", "ẞ"} {
-		patterns := len(loadNameSet().res)
+		patterns := len(loadNameSet().matchers)
 		slow := maskNsPerByte(trig, patterns)
 		fast := maskWorstNsPerByte + nameFoldNsPerByte*float64(patterns)
 		for _, size := range []int{budget * 9 / 10, int(float64(budget) * fast / slow * 0.9)} {
@@ -581,38 +581,40 @@ func TestJudgeBudgetCoversNamesWithoutASCII(t *testing.T) {
 		if v["error_class"] == "timeout" || el >= 3*time.Second {
 			t.Errorf("%s, %d bytes: %v after %v; %s", label, len(text), v["error_class"], el, stderr)
 		}
-		t.Logf("%s, %d bytes, %d name patterns: failed=%v %v in %v", label, len(text), len(loadNameSet().res), v["failed"], v["error_class"], el.Round(time.Millisecond))
+		t.Logf("%s, %d bytes, %d name patterns: failed=%v %v in %v", label, len(text), len(loadNameSet().matchers), v["failed"], v["error_class"], el.Round(time.Millisecond))
 	}
 }
 
-// TestNamesFileNotUTF8 (review round 6, F2): a names file in Latin-1 no longer
-// panics every mask; its invalid names are left out and counted (the count is
-// logged, the names are not), the valid ones still mask.
-func TestNamesFileNotUTF8(t *testing.T) {
+// TestNamesFileLatin1 (review rounds 6 and 7): a names file whose lines are
+// not valid UTF-8 (saved in Latin-1) is read as Latin-1 for those lines, so
+// its names still mask; the count of such lines is logged, the names never.
+// Empty and control-only lines are skipped.
+func TestNamesFileLatin1(t *testing.T) {
 	logPath := setupJudge(t, "test-key")
 	nf := filepath.Join(t.TempDir(), "latin1.txt")
-	if err := os.WriteFile(nf, []byte("J\xfcrgen M\xfcller\nMax Mustermann\n"), 0o600); err != nil {
+	if err := os.WriteFile(nf, []byte("J\xfcrgen M\xfcller\nMax Mustermann\n\x01\x02\n   \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("TYPESAFE_NAMES_FILE", nf)
-	if n := loadNameSet().skipped; n != 3 {
-		t.Errorf("skipped = %d, want 3 (the full name and its two parts)", n)
+	ns := loadNameSet()
+	if ns.latin1 != 1 || len(ns.matchers) != 6 {
+		t.Errorf("latin1 lines = %d, names = %d; want 1 and 6", ns.latin1, len(ns.matchers))
 	}
-	got, counts := MaskDetail("Max Mustermann und J\xfcrgen")
-	if got != "<name> und J\xfcrgen" || counts.Name != 1 {
+	got, counts := MaskDetail("Max Mustermann und J\u00fcrgen M\u00fcller, M\u00dcLLER.")
+	if got != "<name> und <name>, <name>." || counts.Name != 3 {
 		t.Errorf("masked %q %+v", got, counts)
 	}
-	if got, _ := MaskDetail("Max Mustermann und Jürgen"); got != "<name> und Jürgen" {
-		t.Errorf("valid text: %q", got)
-	}
 	ts := newFakeTS(t, answers(map[string]float64{"instruction_to_agent": 0.1, "exfil_request": 0.1}))
-	_, stdout, _ := runJudgeCLI(t, `{"hook_event_name":"SubagentStop","last_assistant_message":"Max Mustermann hat das Ergebnis geschickt."}`,
+	_, stdout, _ := runJudgeCLI(t, `{"hook_event_name":"SubagentStop","last_assistant_message":"J\u00fcrgen hat das Ergebnis geschickt."}`,
 		"--gate", "foreign_return", "--endpoint", ts.srv.URL)
 	if v := decodeObject(t, stdout); v["failed"] != false {
 		t.Errorf("verdict %v", v)
 	}
+	if body := string(ts.lastBody(t)); !strings.Contains(body, "<name> hat") {
+		t.Errorf("not masked: %s", body)
+	}
 	raw, _ := os.ReadFile(logPath)
-	if !strings.Contains(string(raw), `"names_skipped":3`) || strings.Contains(string(raw), "rgen") {
+	if !strings.Contains(string(raw), `"names_latin1":1`) || strings.Contains(string(raw), "rgen") || strings.Contains(string(raw), "ller") {
 		t.Errorf("log: %s", raw)
 	}
 }

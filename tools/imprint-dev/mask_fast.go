@@ -695,9 +695,15 @@ func isREWordRune(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
 }
 
-// nameMatcher finds (?i)\bNAME\b for one literal name: the text's runes equal
-// the name's under simple case folding, with an ASCII word boundary (Go's \b)
-// before and after.
+// isNameWordRune is Python's \w on str, which ts_common's name pattern uses:
+// str.isalnum() or "_" (letters and numbers of any script; marks are not).
+func isNameWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r)
+}
+
+// nameMatcher finds a literal name: the text's runes equal the name's under
+// simple case folding, with a Unicode word boundary (isNameWordRune, as
+// Python's \b) before and after.
 type nameMatcher struct {
 	runes []rune
 	first [256]bool // first bytes of the runes the name's first rune folds to
@@ -734,23 +740,42 @@ var (
 	foldCanonLead [256]bool     // lead bytes of runes whose canonical rune has another length
 )
 
+// initFoldCanon visits every rune that has a case mapping or is a cased
+// letter (unicode.CaseRanges, Upper, Lower, Title); every rune with a fold
+// orbit is among them (TestFoldCanonExhaustive checks all runes), and each
+// gets the minimum of its full unicode.SimpleFold orbit.
 func initFoldCanon() {
 	foldCanonMap = map[rune]rune{}
+	visit := func(r rune) {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < m {
+				m = f
+			}
+		}
+		if m != r {
+			foldCanonMap[r] = m
+			if utf8.RuneLen(m) != utf8.RuneLen(r) {
+				var buf [utf8.UTFMax]byte
+				utf8.EncodeRune(buf[:], r)
+				foldCanonLead[buf[0]] = true
+			}
+		}
+	}
 	for _, cr := range unicode.CaseRanges {
 		for r := rune(cr.Lo); r <= rune(cr.Hi); r++ {
-			m := r
-			for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-				if f < m {
-					m = f
-				}
+			visit(r)
+		}
+	}
+	for _, tab := range []*unicode.RangeTable{unicode.Upper, unicode.Lower, unicode.Title} {
+		for _, r16 := range tab.R16 {
+			for r := rune(r16.Lo); r <= rune(r16.Hi); r += rune(r16.Stride) {
+				visit(r)
 			}
-			if m != r {
-				foldCanonMap[r] = m
-				if utf8.RuneLen(m) != utf8.RuneLen(r) {
-					var buf [utf8.UTFMax]byte
-					utf8.EncodeRune(buf[:], r)
-					foldCanonLead[buf[0]] = true
-				}
+		}
+		for _, r32 := range tab.R32 {
+			for r := rune(r32.Lo); r <= rune(r32.Hi); r += rune(r32.Stride) {
+				visit(r)
 			}
 		}
 	}
@@ -830,9 +855,9 @@ func (nm nameMatcher) matchAt(text string, i int) (int, bool) {
 	}
 	first, _ := utf8.DecodeRuneInString(text[i:])
 	last, _ := utf8.DecodeLastRuneInString(text[:j])
-	before := i > 0 && isREWordRune(prevRune(text, i))
-	after := j < len(text) && isREWordRune(nextRune(text, j))
-	if before == isREWordRune(first) || after == isREWordRune(last) {
+	before := i > 0 && isNameWordRune(prevRune(text, i))
+	after := j < len(text) && isNameWordRune(nextRune(text, j))
+	if before == isNameWordRune(first) || after == isNameWordRune(last) {
 		return 0, false
 	}
 	return j, true

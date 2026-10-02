@@ -424,14 +424,13 @@ var errTooLarge = errors.New("text too large to mask within the deadline")
 //     s, capital sharp s, ...) or invalid UTF-8 sends some steps back to the
 //     old regex: up to 705 ns: 900;
 //   - per name pattern: 0.9 on the fold-canonical search (Greek names on
-//     Greek text): 1.5; 15.7 when such a text is scanned name by name: 20;
-//     up to 21 with the regexps (invalid UTF-8): 25.
+//     Greek text): 1.5; 15.7 when a text is scanned name by name (it holds
+//     such a rune, or is not valid UTF-8): 20.
 const (
 	maskWorstNsPerByte    = 200.0
 	maskFallbackNsPerByte = 900.0
 	nameFoldNsPerByte     = 1.5
 	nameScanNsPerByte     = 20.0
-	nameRegexNsPerByte    = 25.0
 )
 
 // maskNsPerByte is the worst-case masking cost per byte of text, with the
@@ -439,9 +438,7 @@ const (
 func maskNsPerByte(text string, patterns int) float64 {
 	p := float64(patterns)
 	switch {
-	case !utf8.ValidString(text):
-		return maskFallbackNsPerByte + nameRegexNsPerByte*p
-	case hasFoldLengthRune(text):
+	case !utf8.ValidString(text) || hasFoldLengthRune(text):
 		return maskFallbackNsPerByte + nameScanNsPerByte*p
 	default:
 		return maskWorstNsPerByte + nameFoldNsPerByte*p
@@ -456,7 +453,7 @@ func maskBudgetBytes(ctx context.Context) int {
 	if !ok {
 		return maxJudgeInput
 	}
-	perByte := maskWorstNsPerByte + nameFoldNsPerByte*float64(len(loadNameSet().res))
+	perByte := maskWorstNsPerByte + nameFoldNsPerByte*float64(len(loadNameSet().matchers))
 	n := float64(time.Until(dl).Nanoseconds()) / 2 / perByte
 	if n <= 0 {
 		return 0
@@ -505,7 +502,7 @@ func (b *maskBudget) maskCapped(ctx context.Context, text string, capChars int, 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	cost := float64(len(text)) * maskNsPerByte(text, len(loadNameSet().res))
+	cost := float64(len(text)) * maskNsPerByte(text, len(loadNameSet().matchers))
 	if cost > b.leftNs {
 		return "", errTooLarge
 	}

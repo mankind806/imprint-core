@@ -139,12 +139,30 @@ func expandHome(path string) string {
 // Lines with comments '#' are ignored. Names are split into first and last name components,
 // and sorted by length descending (with alphabetical secondary sort for determinism).
 func loadNames(filePath string) []string {
+	names, _ := loadNamesDetail(filePath)
+	return names
+}
+
+// latin1 decodes s byte by byte as ISO 8859-1, which always succeeds.
+func latin1(s string) string {
+	r := make([]rune, len(s))
+	for i := 0; i < len(s); i++ {
+		r[i] = rune(s[i])
+	}
+	return string(r)
+}
+
+// loadNamesDetail is loadNames; latin1Lines counts the lines that were not
+// valid UTF-8 and were read as Latin-1 instead (a names file saved in
+// ISO 8859-1, say), so that they still mask. Lines that are empty or hold
+// only control characters are skipped.
+func loadNamesDetail(filePath string) (names []string, latin1Lines int) {
 	if filePath == "" {
-		return nil
+		return nil, 0
 	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	lines := strings.Split(string(data), "\n")
 	nameSet := make(map[string]bool)
@@ -153,8 +171,12 @@ func loadNames(filePath string) []string {
 		if idx := strings.Index(line, "#"); idx != -1 {
 			line = line[:idx]
 		}
+		if !utf8.ValidString(line) {
+			line = latin1(line)
+			latin1Lines++
+		}
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" || strings.IndexFunc(line, func(r rune) bool { return !unicode.IsControl(r) }) < 0 {
 			continue
 		}
 
@@ -177,10 +199,10 @@ func loadNames(filePath string) []string {
 	}
 
 	if len(nameSet) == 0 {
-		return nil
+		return nil, latin1Lines
 	}
 
-	names := make([]string, 0, len(nameSet))
+	names = make([]string, 0, len(nameSet))
 	for name := range nameSet {
 		names = append(names, name)
 	}
@@ -192,7 +214,7 @@ func loadNames(filePath string) []string {
 		return names[i] < names[j]
 	})
 
-	return names
+	return names, latin1Lines
 }
 
 // nameRegexCache holds the compiled name patterns of one names file, so that
@@ -211,12 +233,10 @@ var nameRegexCache struct {
 // word-bounded pattern per name, longest name first (the order loadNames
 // gives), and the same names as literal matchers.
 type nameSet struct {
-	res      []*regexp.Regexp
 	matchers []nameMatcher
-	// skipped counts the names left out because they are not valid UTF-8
-	// (a names file in Latin-1, say): no pattern can be made of them. The
-	// names themselves are never logged.
-	skipped int
+	// latin1 counts the lines of the names file read as Latin-1 because
+	// they were not valid UTF-8. The names themselves are never logged.
+	latin1 int
 }
 
 // loadNameSet reads the names file through the cache.
@@ -236,17 +256,9 @@ func loadNameSet() nameSet {
 		return c.names
 	}
 	var ns nameSet
-	for _, name := range loadNames(path) {
-		if !utf8.ValidString(name) {
-			ns.skipped++
-			continue
-		}
-		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
-		if err != nil {
-			ns.skipped++
-			continue
-		}
-		ns.res = append(ns.res, re)
+	names, latin1Lines := loadNamesDetail(path)
+	ns.latin1 = latin1Lines
+	for _, name := range names {
 		ns.matchers = append(ns.matchers, newNameMatcher(name))
 	}
 	c.path, c.size, c.mod, c.names, c.ok = path, st.Size(), st.ModTime(), ns, true
@@ -359,6 +371,10 @@ func MaskDetail(text string) (string, MaskCounts) {
 		counts.Name++
 		return "<name>"
 	}
+	// Word boundaries are Unicode ones, as in ts_common.py (Python's \b): a
+	// letter, a number or "_" on both sides of a name's edge means no
+	// boundary. Since 2026-10-02; before, Go's ASCII \b let "Herr Özil" or
+	// "Frau Strauß" out unmasked.
 	names := loadNameSet()
 	if utf8.ValidString(text) {
 		// One fold-canonical copy serves every name and is kept in step
@@ -382,10 +398,10 @@ func MaskDetail(text string) (string, MaskCounts) {
 			}
 		}
 	} else {
-		// The literal matchers need valid UTF-8; the patterns treat an
-		// invalid byte as the regexp package does.
-		for _, re := range names.res {
-			text = re.ReplaceAllStringFunc(text, nameRepl)
+		// Text that is not valid UTF-8: name by name, an invalid byte read
+		// as U+FFFD (no word character), as the regexp package reads it.
+		for _, nm := range names.matchers {
+			text = nm.replace(text, nameRepl)
 		}
 	}
 	maskLap("names")

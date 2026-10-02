@@ -321,21 +321,21 @@ func subset(what string, have, known []string) error {
 	return nil
 }
 
-// hostCannotAsk lists the hook events at which the host cannot ask a
-// person: the action has run (PostToolUse), the turn or the subagent has
-// ended (Stop, SubagentStop), or no action waits on an answer. It is what
-// the host can do, not a registry setting: an ask the registry lists at one
-// of these events is never given (Claude Code's hooks; Codex assumed the
-// same, not measured).
-var hostCannotAsk = map[string]bool{
-	"Stop": true, "SubagentStop": true, "PostToolUse": true, "UserPromptSubmit": true, "SessionStart": true,
-	"SessionEnd": true, "SubagentStart": true, "PreCompact": true, "Notification": true,
-}
+// hostCanAsk lists the hook events at which the host can ask a person
+// before an action runs: PreToolUse, the one such event this repository's
+// hooks know (Claude Code; Codex assumed the same, not measured). At every
+// other event (Stop, SubagentStop, PostToolUse, UserPromptSubmit, an event
+// a host adds later, ...) nobody can be asked, whatever the registry lists:
+// an ask is never given there. It is what the host can do, not a registry
+// setting.
+var hostCanAsk = map[string]bool{"PreToolUse": true}
+
+func hostCannotAsk(event string) bool { return !hostCanAsk[event] }
 
 // allowedAt reports whether verdict can be given at event, by the event's
 // list and the host table.
 func allowedAt(event string, list []string, verdict string) bool {
-	if verdict == verdictAsk && hostCannotAsk[event] {
+	if verdict == verdictAsk && hostCannotAsk(event) {
 		return false
 	}
 	for _, v := range list {
@@ -346,11 +346,12 @@ func allowedAt(event string, list []string, verdict string) bool {
 	return false
 }
 
-// allows reports whether the host can act on verdict at event. For an event
-// the gate does not serve (a wiring error), it asks whether any of the gate's
-// events allows it; an ask is never possible at an event of hostCannotAsk.
+// allows reports whether the host can act on verdict at event. An ask is
+// only possible at an event of hostCanAsk. For an event the gate does not
+// serve (a wiring error) or an unknown one (""), it asks whether any of the
+// gate's events allows it, each by the same rule.
 func (g *Gate) allows(event, verdict string) bool {
-	if verdict == verdictAsk && hostCannotAsk[event] {
+	if verdict == verdictAsk && event != "" && hostCannotAsk(event) {
 		return false
 	}
 	if l, ok := g.Events[event]; ok {
@@ -479,9 +480,9 @@ type judgeLogLine struct {
 	UnknownEvent    bool               `json:"unknown_event,omitempty"`
 	UnknownHost     bool               `json:"unknown_host,omitempty"`
 	ExitCode        int                `json:"exit_code,omitempty"`
-	// NamesSkipped counts names of the names file left out because they are
-	// not valid UTF-8; the names themselves are never logged.
-	NamesSkipped int `json:"names_skipped,omitempty"`
+	// NamesLatin1 counts lines of the names file read as Latin-1 because
+	// they were not valid UTF-8; the names themselves are never logged.
+	NamesLatin1 int `json:"names_latin1,omitempty"`
 }
 
 // judgeLogPath: IMPRINT_JUDGE_LOG, else ${XDG_STATE_HOME:-~/.local/state}/imprint/judge.jsonl.
@@ -748,7 +749,7 @@ func (r *judgeRun) emit(v Verdict, masked MaskCounts) int {
 		UnknownGate:     v.UnknownGate,
 		UnknownEvent:    v.UnknownEvent,
 		UnknownHost:     v.UnknownHost,
-		NamesSkipped:    loadNameSet().skipped,
+		NamesLatin1:     loadNameSet().latin1,
 	}
 	if code != exitOK {
 		line.ExitCode = code
@@ -837,7 +838,7 @@ func strictFallback(reg *Registry, event string, noUI bool) (verdict string, ok 
 		lists = all
 	}
 	has := func(v string) bool {
-		if v == verdictAsk && hostCannotAsk[event] {
+		if v == verdictAsk && event != "" && hostCannotAsk(event) {
 			return false
 		}
 		for _, el := range lists {

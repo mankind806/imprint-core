@@ -4,8 +4,8 @@ package main
 // speed-up: the same pattern strings (compiled here from copies, so a later
 // change to a production pattern shows up as a difference), the same order of
 // steps, the same closures. It is the oracle of TestMaskDifferential and exists
-// only in tests. Its names step compiles one (?i)\bNAME\b pattern per name of
-// the names file, as before.
+// only in tests. One step changed on purpose since: names have Unicode word
+// boundaries (refNamesStep; ts_common.py's parity in TestNamePythonParity).
 
 import (
 	"regexp"
@@ -40,13 +40,55 @@ func refLap(step string) {
 	}
 }
 
-// refNameRegexps compiles the names file's patterns the way MaskDetail did.
-func refNameRegexps() []*regexp.Regexp {
-	var res []*regexp.Regexp
+// refNamesStep is the names step as it stands since 2026-10-02 (Unicode
+// word boundaries, as ts_common.py's Python \b), written plainly and apart
+// from mask_fast.go: for each name in loadNames order, every start that
+// (?i)NAME (no \b) finds, overlapping ones too, is kept if a word boundary
+// lies at both of its ends; the leftmost non-overlapping ones are replaced.
+// Up to 2026-10-02 the step was (?i)\bNAME\b with Go's ASCII \b.
+func refNamesStep(text string, counts *MaskCounts) string {
 	for _, name := range loadNames(getNamesFilePath()) {
-		res = append(res, regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(name)+`\b`))
+		re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(name))
+		var b strings.Builder
+		done := 0
+		for p := 0; p < len(text); {
+			loc := re.FindStringIndex(text[p:])
+			if loc == nil {
+				break
+			}
+			s, e := p+loc[0], p+loc[1]
+			if refBoundary(text, s) && refBoundary(text, e) {
+				b.WriteString(text[done:s])
+				b.WriteString("<name>")
+				counts.Name++
+				done, p = e, e
+				continue
+			}
+			_, w := utf8.DecodeRuneInString(text[s:])
+			p = s + max(w, 1)
+		}
+		if done > 0 {
+			b.WriteString(text[done:])
+			text = b.String()
+		}
 	}
-	return res
+	return text
+}
+
+// refBoundary: a word character on exactly one side of byte i, a word
+// character being a letter, a number or "_" (Python's str.isalnum() or "_").
+func refBoundary(text string, i int) bool {
+	isWord := func(r rune) bool { return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) }
+	before, after := false, false
+	if i > 0 {
+		r, _ := utf8.DecodeLastRuneInString(text[:i])
+		before = isWord(r)
+	}
+	if i < len(text) {
+		r, _ := utf8.DecodeRuneInString(text[i:])
+		after = isWord(r)
+	}
+	return before != after
 }
 
 // replaceBounded replaces the matches of re that pass ok(prev, next), the runes
@@ -197,12 +239,7 @@ func maskDetailReference(text string) (string, MaskCounts) {
 	// 8. names: from TYPESAFE_NAMES_FILE or ~/.config/typesafe/names.txt
 	// Case-insensitive to match ts_common.py's get_name_regex ((?i)), e.g.
 	// "max mustermann" lowercase must also be masked.
-	for _, re := range refNameRegexps() {
-		text = re.ReplaceAllStringFunc(text, func(m string) string {
-			counts.Name++
-			return "<name>"
-		})
-	}
+	text = refNamesStep(text, &counts)
 
 	refLap("names")
 
