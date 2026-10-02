@@ -2729,6 +2729,19 @@ func TestPrePushMergetagHeader(t *testing.T) {
 			"unread encoding: commit "+oid)
 	})
 
+	// git takes the last line of the merged tag that starts with a marker,
+	// so an armour before it is message, and read.
+	t.Run("a trailing marker line", func(t *testing.T) {
+		r := r.with(t)
+		date := " 1767225600 +0000"
+		oid := r.rawCommit("tree " + r.git("rev-parse", "main^{tree}") + "\nparent " + r.git("rev-parse", "main") + "\nparent " + side +
+			"\nauthor " + me + date + "\ncommitter " + me + date + "\nmergetag object " + side + "\n type commit\n tag t-trail\n tagger " +
+			me + date + "\n \n notes\n -----BEGIN PGP SIGNATURE-----\n " + fakeIBAN + "\n -----END PGP SIGNATURE-----\n -----BEGIN PGP SIGNATURE-----x\n\ntrail: merge\n")
+		code, out := r.hookNewBranch("trail", oid)
+		ppWantRefused(t, code, out, "IBAN in a commit object: "+oid+":13: "+fakeIBAN)
+		ppWantChecked(t, out)
+	})
+
 	// A tagger line that ends no identity in ">", made by hand.
 	r.git("checkout", "-q", "main")
 	mt := "mergetag object " + side + "\n type commit\n tag t-broken\n tagger nobody at all\n \n a clean tag\n"
@@ -2833,6 +2846,12 @@ func TestPrePushCommitObjectCounts(t *testing.T) {
 	// commit's committer line before its author line, or the committer
 	// line named for another commit.
 	gitBin := ppRealBin(t, "git")
+	t.Run("a pass skipped", func(t *testing.T) {
+		r := r.with(t)
+		s := ppShimPATH(t, "awk", "if [ -n \"${IMPRINT_COMMITLOC:-}\" ] && [ \"$#\" -eq 3 ]; then exec '"+awkBin+"' \"$1\" \"$2\"; fi\nexec '"+awkBin+"' \"$@\"\n")
+		code, out := r.hookNewBranch("count", plain, s)
+		ppWantRefused(t, code, out, "awk could not read commit "+plain+".")
+	})
 	t.Run("a cmp that cannot compare", func(t *testing.T) {
 		r := r.with(t)
 		s := ppShimPATH(t, "cmp", "exit 2\n")
@@ -3136,8 +3155,11 @@ func TestPrePushUnreadEncoding(t *testing.T) {
 // END line, a line made only of base64 characters is not matched. Every
 // other line is, line numbers those of the object: the message before the
 // armour, an armour of another name or before the last one, an armour
-// header, a line after the END line. An awk that fails, or loses a line
-// without saying so, is a check that could not run.
+// header, a line after the END line, a line before a last marker line that
+// git takes for the start - a line that starts with a marker - and one that
+// is base64 only once a tagger's identity is cut from it. An awk that fails,
+// reads the object once only, or reports a count its output does not hold,
+// is a check that could not run.
 func TestPrePushTagSignature(t *testing.T) {
 	env := ppSetup(t)
 	t.Parallel()
@@ -3148,6 +3170,7 @@ func TestPrePushTagSignature(t *testing.T) {
 	}
 	comment := addr("tag.armour", "example.invalid")
 	fakeIBAN := "DE" + "02" + "1203" + "0000" + "0000" + "2020" + "51"
+	stranger := "Some Stranger <" + ccTestSomeoneEmail + ">"
 	for _, c := range []struct {
 		name, message string
 		wants         []string // nil: the push passes
@@ -3160,6 +3183,12 @@ func TestPrePushTagSignature(t *testing.T) {
 		{"notes", "-----BEGIN NOTES-----\n" + ppIBANLine + "\n-----END NOTES-----\n", []string{"IBAN in tag notes: 7:" + ppIBANLine}},
 		{"comment", "a clean tag\n" + ppArmour("", "Comment: "+comment), []string{"address in tag comment: 8:Comment: " + comment}},
 		{"after", "a clean tag\n" + ppArmour("", "") + ppIBANLine + "\n", []string{"IBAN in tag after: 13:" + ppIBANLine}},
+		// git takes the last line that starts with a marker, here one with
+		// more on it, so the armour before it is message to git.
+		{"trailing-marker", "a message\n-----BEGIN PGP SIGNATURE-----\n" + fakeIBAN + "\n-----END PGP SIGNATURE-----\n-----BEGIN PGP SIGNATURE-----x\n",
+			[]string{"IBAN in tag trailing-marker: 8:" + fakeIBAN}},
+		// A tagger line in the message is text, its identity read.
+		{"tagger-line", "a clean tag\ntagger " + stranger + "\n", []string{"address in tag tagger-line: 7:tagger " + stranger}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := r.with(t)
@@ -3176,11 +3205,25 @@ func TestPrePushTagSignature(t *testing.T) {
 			}
 		})
 	}
+	// The armour opens in the header, and the next tagger line holds an
+	// IBAN after its identity: base64 alone once the identity is cut out,
+	// but not in the object, so it is read.
+	t.Run("header-armour", func(t *testing.T) {
+		r := r.with(t)
+		oid := r.rawTag("object " + r.head() + "\ntype commit\ntag header-armour\ntagger " + me + " 1767225600 +0000\n" +
+			"-----BEGIN PGP SIGNATURE-----\ntagger " + me + ppIBANLine + "\n\na message\n")
+		code, out := r.hookNewTag("header-armour", oid)
+		ppWantRefused(t, code, out, "IBAN in tag header-armour: 6:tagger"+ppIBANLine)
+		ppWantChecked(t, out)
+	})
 	awkBin := ppRealBin(t, "awk")
 	signed := r.rawTag(head("broken") + "a clean tag\n" + ppArmour("", ""))
 	for _, c := range []struct{ name, shim string }{
 		{"awk fails", "exit 2\n"},
 		{"a line lost", "'" + awkBin + "' \"$@\"; rc=$?\nif [ -n \"${IMPRINT_OBJCNT:-}\" ]; then echo 999 >\"$IMPRINT_OBJCNT\"; fi\nexit $rc\n"},
+		// An awk that reads the object once only: the second pass prints
+		// nothing, and its own count agrees with that.
+		{"a pass skipped", "if [ \"$#\" -eq 3 ]; then exec '" + awkBin + "' \"$1\" \"$2\"; fi\nexec '" + awkBin + "' \"$@\"\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := r.with(t)

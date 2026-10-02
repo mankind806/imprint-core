@@ -516,28 +516,34 @@ grep_both() {
 # a phone number with a slash, alone on such a line.
 #
 # tagprep reads one tag object, any NUL turned into \001, twice: the first
-# pass finds that last line, the second prints every line as it read it, but
-# for the identity on a tagger line of the header - everything up to its last
-# ">" - and a base64 line of the signature, printed empty so that line numbers
-# stay those of the object. It writes the lines it printed to IMPRINT_OBJCNT.
+# pass counts its lines and finds that last line - one that starts with a
+# marker, as git's own test is - the second prints every line as it read it,
+# but for the identity on a tagger line of the header - everything up to its
+# last ">" - and a line of the signature that is base64 alone in the object,
+# printed empty so that line numbers stay those of the object. It fails when
+# the second pass did not read as many lines as the first, and writes the
+# lines it printed to IMPRINT_OBJCNT.
 tagprep='
 BEGIN {
-  pass = 0; k = 0; last = 0; hd = 0; armour = 0
+  pass = 0; k = 0; n1 = 0; last = 0; hd = 0; armour = 0
   b64 = "^[A-Za-z0-9+/=]*$"; armend = "^-----END [A-Z ]*-----$"
-  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----$"
+  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----"
 }
 FNR == 1 { pass++ }
-pass == 1 { if ($0 ~ sigbegin) last = FNR; next }
+pass == 1 { n1++; if ($0 ~ sigbegin) last = FNR; next }
 {
   line = $0
   if (!hd && line == "") hd = 1
   else if (!hd && match(line, /^tagger .*>/)) line = "tagger" substr(line, RLENGTH + 1)
-  if (armour && line ~ b64) line = ""
+  if (armour && $0 ~ b64) line = ""
   else if (FNR == last) armour = 1
-  else if (armour && line ~ armend) armour = 0
+  else if (armour && $0 ~ armend) armour = 0
   print line; k++
 }
-END { cnt = ENVIRON["IMPRINT_OBJCNT"]; print k > cnt }
+END {
+  if (k != n1) exit 3
+  cnt = ENVIRON["IMPRINT_OBJCNT"]; print k > cnt
+}
 '
 
 #
@@ -793,14 +799,15 @@ note committers '%s\n' "$web_flow"
 # can be read, yet a run of their letters and digits takes the IBAN pattern's
 # form in about one RSA-4096 signature in 425 (simulated, 2026-10-02). So in
 # these two headers a signature's base64 lines are not matched: from the last
-# line of the header that opens a signature, as git finds one - -----BEGIN PGP
-# SIGNATURE-----, PGP MESSAGE, SSH SIGNATURE or SIGNED MESSAGE - to the
-# -----END ...----- line after it, a line made only of base64 characters is
-# skipped. Every other line of them is matched: the armour lines, an armour
-# header such as Comment:, the merged tag's name and message, any armour of
-# another name or before the last one. The merged tag's tagger is left out the
-# way the tag check leaves a tagger out, everything up to the last > on the
-# line, and check 1 holds it to the declared identities as the tag check does.
+# line of the header that opens a signature, as git finds one - a line that
+# starts with -----BEGIN PGP SIGNATURE-----, PGP MESSAGE, SSH SIGNATURE or
+# SIGNED MESSAGE - to the -----END ...----- line after it, a line made only of
+# base64 characters is skipped. Every other line of them is matched: the armour
+# lines, an armour header such as Comment:, the merged tag's name and message,
+# any armour of another name or before the last one. The merged tag's tagger is
+# left out the way the tag check leaves a tagger out, everything up to the last
+# > on the line, and check 1 holds it to the declared identities as the tag
+# check does.
 #
 # git log converts a commit from the encoding its header names, and the
 # patterns are UTF-8: a Latin-1 place read as stored matches nothing under a
@@ -833,7 +840,8 @@ note committers '%s\n' "$web_flow"
 # shows; git drops the encoding line from what it has converted. The first pass
 # counts the author and committer lines of the header, finds its encoding line
 # and the last line that opens a signature in each header field. It reads the
-# declared identities from IMPRINT_ALLOWED and IMPRINT_COMMITTERS. The second
+# declared identities from IMPRINT_ALLOWED and IMPRINT_COMMITTERS, and fails
+# when the second pass does not read as many lines as the first. The second
 # prints the lines to match - each line it does not change as it read it - and
 # appends where each comes from, "commit:N" with N its line in what it reads -
 # the object, or git's printout - to IMPRINT_COMMITLOC, and each merged tag's
@@ -841,8 +849,8 @@ note committers '%s\n' "$web_flow"
 # tagger line holds no ">"; reading a commit as converted, a tagger is not
 # written when the one in its place in the object as stored, from
 # IMPRINT_RAWTAGGERS, is the same, or is declared - and, with IMPRINT_UNREAD
-# set, differs from it in nothing but characters outside ASCII. It writes
-# five counts to IMPRINT_OBJCNT, one to a line: the lines it printed; 1 when the
+# set, differs from it in nothing but characters outside ASCII. It writes five
+# counts to IMPRINT_OBJCNT, one to a line: the lines it printed; 1 when the
 # header names an encoding other than UTF-8 - reading a commit as converted,
 # when it holds at least as many encoding lines as IMPRINT_ENCLINES says the
 # object does, so git did not convert it - else 0; the taggers; and 1 when that
@@ -857,7 +865,7 @@ BEGIN {
   # \001 stands for a NUL only in an object that holds one; a \001 of its own
   # is a control character like any other.
   hasnul = (ENVIRON["IMPRINT_HASNUL"] == "1")
-  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----$"
+  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----"
   readable = "^(utf-?8|us-ascii|ascii|iso[-_]?8859[-_][0-9]+|latin-?[0-9]+|(windows|cp)-?125[0-8]|koi8-?[ru]|euc-?(jp|kr|cn|tw)|gb2312|gbk|gb18030|big5(-hkscs)?|shift[-_]jis|sjis|cp932|windows-31j)$"
   pass = 0; k = 0; m = 0; na = 0; nc = 0; hd = 0; enc = 0; ev = ""; conv = 0; unread = 0; nenc = 0; anynul = 0
   body = 0; nul = 0; field = ""; fstart = 0; armour = 0; inner = 0
@@ -896,6 +904,7 @@ FNR == 1 {
   if (pass == 2 && ENVIRON["IMPRINT_UNREAD"] == "1") unread = 1
 }
 pass == 1 {
+  n1++
   if (hasnul && index($0, soh)) anynul = 1
   if (hd) next
   if ($0 == "") { hd = 1; next }
@@ -910,6 +919,7 @@ pass == 1 {
   if (signed(f1) && t1 ~ sigbegin) lastsig[s1] = FNR
   next
 }
+{ n2++ }
 body { put($0); next }
 $0 == "" { body = 1; next }
 {
@@ -950,6 +960,7 @@ $0 == "" { body = 1; next }
   put($0)
 }
 END {
+  if (n2 != n1) exit 3
   if (ENVIRON["IMPRINT_ENCLINES"] != "") conv = (nenc >= ENVIRON["IMPRINT_ENCLINES"] + 0) ? 1 : 0
   cnt = ENVIRON["IMPRINT_OBJCNT"]
   print k > cnt; print conv > cnt; print m > cnt; print unread > cnt; print nenc > cnt

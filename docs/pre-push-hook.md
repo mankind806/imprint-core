@@ -119,7 +119,7 @@ another tag.
 |---|---|---|
 | `gpgsig` or `gpgsig-sha256` header of a commit | not matched, inside the last signature armour | matched: armour lines, `Comment:` and other armour headers |
 | `mergetag` header of a merge (the merged tag) | not matched, inside the last signature armour | matched: tag name, message, any other armour, armour lines; tagger held to the declared identities |
-| a tag object pushed as such (the tag check), at the end of its message | not matched, inside the last signature armour | matched: the message before it, armour lines and headers, any other armour |
+| a tag object pushed as such (the tag check) | not matched, inside the last signature armour | matched: the message before it, armour lines and headers, any other armour |
 
 A signed commit carries its signature in a `gpgsig` header (`gpgsig-sha256` in a SHA-256
 repository), and a merge of a signed tag carries the tag, tagger and signature, in a
@@ -132,18 +132,19 @@ RSA-4096 signature in 425 and one 3 KB X.509 signature in 85 (*simulated, 200,00
 400,000 for SSH at the 232 characters of a real one and 50,000 for X.509, 2026-10-02; none of
 the signed commits in this repository's history held such a line that day*). So in those
 headers a signature's base64 lines are not matched: from the last line that opens a
-signature, as git finds one — `-----BEGIN PGP SIGNATURE-----`, `PGP MESSAGE`, `SSH SIGNATURE`
-or `SIGNED MESSAGE` — to the `-----END …-----` line after it, a line made only of base64
-characters is skipped. An armour of another name, or one before the last, is matched like any
-text. The merged tag's tagger is held to the declared identities as a pushed tag's tagger is,
-and left out of the shapes; a tagger line with no `>` in it is a check that could not run. In
-a merge read as converted, a tagger git shows counts as declared when the one stored in its
-place is — for an encoding outside the list above, only when the two differ in nothing but
-characters outside ASCII, as for an author. A merged tag that names no tagger brings no
-identity along and is no finding, unlike a pushed tag with none. A signed tag pushed as a tag
-object is read the same way: from the last line in it that opens a signature, as git finds
-one in a tag, to its END line, a line made only of base64 characters is not matched, and
-everything else is (the owner's call, 2026-10-02).
+signature, as git finds one — a line that starts with `-----BEGIN PGP SIGNATURE-----`, `PGP
+MESSAGE`, `SSH SIGNATURE` or `SIGNED MESSAGE` — to the `-----END …-----` line after it, a
+line made only of base64 characters in the object is skipped. An armour of another name, or
+one before the last, is matched like any text. The merged tag's tagger is held to the
+declared identities as a pushed tag's tagger is, and left out of the shapes; a tagger line
+with no `>` in it is a check that could not run. In a merge read as converted, a tagger git
+shows counts as declared when the one stored in its place is — for an encoding outside the
+list above, only when the two differ in nothing but characters outside ASCII, as for an
+author. A merged tag that names no tagger brings no identity along and is no finding, unlike
+a pushed tag with none. A signed tag pushed as a tag object is read the same way: from the
+last line in it that opens a signature, as git finds one in a tag, to its END line - wherever
+in the object that is - a line made only of base64 characters is not matched, and everything
+else is (the owner's call, 2026-10-02).
 
 **It does not arrive with a clone.** Git runs hooks out of `.git/hooks` unless it is told
 otherwise, and nothing in a checkout can tell it for you. Each clone needs one line:
