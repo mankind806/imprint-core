@@ -9,8 +9,8 @@
 | Gates | `done`, `foreign_return`, beide Hinweis (`warn`), `fail_mode: open` | gebaut; **in keinem Hook verdrahtet** |
 | Fragen, Schwellen, Fail-Modus | eine Datei, `tools/imprint-dev/judge/gates.json`, ins Binary eingebettet | gebaut; `TestEmbeddedRegistry` |
 | Modell | gepinnt `jev-1.13.0`, nie `jev-latest` | gebaut; `TestRegistryPinningAndVersion`; live 2026-10-02: API nennt `model: jev-1.13.0` |
-| Maskierung | Fenster maskieren, mit 1024 maskierten Zeichen Abstand zum Fensterrand kappen; `PostState` maskiert jedes String-Blatt noch einmal | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestMaskCappedNoFragmentAtTheEdges` (640 Platzierungen), `TestMaskCappedProperty` (1000 Zufallsläufe) |
-| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage | gebaut; `TestJudgeDeadlineCoversBuild` (15 MB Werkzeugausgabe, 10.000 Aufrufe) |
+| Maskierung | jedes Textfeld ganz maskieren, dann kappen (nie mitten in einem Platzhalter); höchstens 512 KiB Text je Aufruf, sonst `too_large` und nichts gesendet; `PostState` maskiert jedes String-Blatt noch einmal | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestCutMaskedProperty` (50 × 200 Läufe), `TestMaskCappedIsCutOfWholeMask`, `TestJudgeMaskBudget` |
+| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage | gebaut; `TestJudgeDeadlineCoversBuild` (512 KiB ungünstigster Text, 16 MB, 10.000 Aufrufe) |
 | Log | eine JSONL-Zeile je Aufruf, ohne Texte und ohne unbekannte Namen | gebaut; `TestJudgeLogOneLinePerCall`, `TestJudgeNeverEchoesUnknownNames` |
 | Durchsetzung | keine: kein Hook ruft `judge` | **nichts setzt hier etwas durch** |
 
@@ -71,7 +71,8 @@ imprint-dev version            # auch: imprint-dev --version
 - Umschlag: `{"host": "claude", "gate": "done", "payload": {…rohes Hook-JSON…}}`
 - rohes Hook-JSON des Hosts (so, wie ein einzeiliger Hook-Wrapper es durchreicht); dann ist `--gate` Pflicht.
 
-Höchstens 16 MB; mehr ist ein Eingabefehler (Verdikt, sofort). Speicher, gemessen 2026-10-02 mit
+Höchstens 16 MB; mehr ist ein Eingabefehler (Verdikt, sofort). Maskiert und gesendet wird davon nur,
+was ins Maskier-Budget von 512 KiB passt (siehe Gates). Speicher, gemessen 2026-10-02 mit
 `/usr/bin/time` (go1.27.1, Linux): 16 MB Fließtext als `tool_response` ≈ 62 MB RSS, 0,05 s; 16 MB aus
 920.000 kleinen JSON-Objekten ≈ 507 MB RSS, 0,7 s (`map[string]any` je Objekt). Mehr Struktur auf
 gleich vielen Bytes braucht mehr Speicher.
@@ -97,7 +98,7 @@ Das Ereignis kommt aus `payload.hook_event_name`. Fehlt es und bedient das Gate 
 | `prefilter` | nur wenn Code allein entschied (z. B. `no_claim`, `too_short`): dann kein Jev-Aufruf |
 | `model_resolved` | nur wenn die API ein Feld `model` zurückgibt |
 | `latency_ms`, `latency_parts_ms` | Gesamtzeit ab Start; `build` (Gate-Code), `key` (Schlüsselsuche), `post` (Anfrage) |
-| `failed`, `error_class` | `no_key`, `timeout`, `network`, `http_status`, `parse`, `missing_answer`, `internal`, `call`, `input`; dann entscheidet `fail_mode` |
+| `failed`, `error_class` | `no_key`, `timeout`, `network`, `http_status`, `parse`, `missing_answer`, `internal`, `call`, `input`, `too_large`; dann entscheidet `fail_mode` |
 
 **Exit-Codes.** `judge` endet nie mit 2: Claude Code liest 2 als blockierend, und ein Hinweis-Gate darf
 nicht blockieren.
@@ -155,27 +156,29 @@ entscheidet die Person; heute gilt `block`.
 
 | Gate | Ereignis | Fragen (ein Batch) | Regel | Herkunft |
 |---|---|---|---|---|
-| `done` | Stop | `claim`, `backed` | `claim>=0.7 && (!local_evidence \|\| backed<=0.5)` → `warn` | 1:1 aus `ts-done-check` (typesafe-dev 8b80f48): Fragen, Schwellen, `CLAIM_RE`, `local_evidence`, letzte 15 Aufrufe, Bash-Befehl ≤ 200 Zeichen, Nachricht: letzte 4000 Zeichen. Einziger Unterschied: `warn` statt `block` |
+| `done` | Stop | `claim`, `backed` | `claim>=0.7 && (!local_evidence \|\| backed<=0.5)` → `warn` | 1:1 aus `ts-done-check` (typesafe-dev 8b80f48): Fragen, Schwellen, `CLAIM_RE`, `local_evidence`, letzte 15 Aufrufe, Bash-Befehl ≤ 200 Zeichen, Nachricht: letzte 4000 Zeichen, jeweils erst ganz maskiert, dann gekappt wie in Python. Unterschiede: `warn` statt `block`; ein Schnitt mitten in einem Platzhalter rückt an dessen Rand |
 | `foreign_return` | PostToolUse (`tool_response`), SubagentStop (`last_assistant_message`) | `instruction_to_agent`, `exfil_request` | je ≥ 0.35 → `warn` | Fragen aus Konzept B §4.2; Schwelle 0.35 laut Konzept B aus dem llm_guardrails-Cookbook, hier nicht nachgelesen; Text ≥ 15 Zeichen; über 8000 Zeichen gehen Anfang und Ende (je knapp 4000, getrennt durch `[…]`) |
 
 **Grenze von `foreign_return` in Stufe 1:** Die String-Blätter eines Objekts werden nach Schlüssel
 sortiert verbunden. Was nur in der Mitte eines Textes über 8000 Zeichen steht, sieht Jev nicht
 (`TestForeignReturnSeesTheTail` prüft das Ende hinter 10 kB Füllung). Bewusst nicht umgebaut.
 
-**Kappen und Maskieren.** Maskiert wird nur ein Fenster vom geschnittenen Ende her, nicht der ganze
-Text: zuerst `cap + 1024` Zeichen. Wo der Fensterrand ein Geheimnis zerschneidet, passt das Bruchstück
-auf kein Muster mehr und bleibt unmaskiert; es liegt dann in den letzten Zeichen des maskierten
-Fensters. Deshalb behält der Schnitt höchstens `min(cap, maskierte Länge − 1024)` Zeichen, also immer
-1024 **maskierte** Zeichen Abstand zum Fensterrand. Schrumpft das Fenster beim Maskieren unter
-`cap + 1024` (lange Tokens, UUIDs, Hashes werden zu `<redacted>`), wächst es (mindestens doppelt, höchstens
-16-fach); reicht auch das nicht, gehen weniger als `cap` Zeichen hinaus. Ein Text bis `2 × (cap + 1024)`
-Zeichen wird ganz maskiert. Garantie: kein Bruchstück eines Geheimnisses bis 1024 Zeichen Länge;
-geprüft mit JWT-, base64-, UUID- und Lockfile-Füllung und Geheimnissen genau an jedem Fensterrand
-(`TestMaskCappedNoFragmentAtTheEdges`) und 1000 Zufallsläufen (`TestMaskCappedProperty`): kein
-Teilstück von 4 Zeichen eines Geheimnisses im Ergebnis. Messung 2026-10-02: Maskieren kostet rund 0,7 µs
-je Zeichen (144.000 Zeichen base64: 118 ms). `done` maskiert nur die Befehle der letzten 15 Aufrufe. Die kompilierten Namensmuster
-(`TYPESAFE_NAMES_FILE`) bleiben je Prozess im Speicher, bis sich die Datei ändert. Fragen gehen in der
-Reihenfolge der Registry hinaus (`done`: `claim`, dann `backed`, wie `ts-done-check`).
+**Maskieren und Kappen.** Jedes Textfeld wird ganz maskiert (`MaskDetail`) und erst dann auf seine
+Kappung geschnitten: Anfang, Ende oder beides. Was hinausgeht, ist damit immer ein Anfang, ein Ende
+oder Anfang + `[…]` + Ende des ganz maskierten Textes; ein Geheimnis wird nie zerschnitten, bevor es
+maskiert ist, gleich wie lang es ist. Fiele ein Schnitt mitten in einen Platzhalter (`<redacted>`,
+`<email>` …), rückt er an dessen Rand; andere `<` bleiben unberührt. Geprüft:
+`TestCutMaskedProperty` (50 Seeds × 200 Texte aus JWT-, base64-, UUID-, Lockfile- und Prosa-Stücken
+mit Geheimnissen dazwischen; Orakel: Präfix/Suffix des ganz maskierten Textes, kein geteilter
+Platzhalter), `TestMaskCappedIsCutOfWholeMask`, die Regressionen `TestForeignReturnKeepsInjectionBesideBlob`,
+`TestDoneKeepsMessageBesideBlob`, `TestMaskCappedLongMatch`. `done` maskiert nur die Befehle der letzten
+15 Aufrufe.
+
+**Maskier-Budget.** Ganz maskieren kostet Zeit: gemessen 2026-10-02 (go1.27.1, dieser Rechner,
+`MaskDetail` auf 16 MB): Fließtext 9,0 s ohne und 11,2 s mit Namensdatei, zufällige Großbuchstaben und
+Ziffern 23,9 s bzw. 25,7 s. Ein Aufruf maskiert deshalb höchstens 512 KiB Text über alle Felder; mehr
+endet mit `error_class: too_large`, ohne Anfrage (der Fail-Modus entscheidet). Gemessen im Test mit zwei
+CPUs: 511 KiB ungünstigster Text in 0,63 s geurteilt, 16 MB in 0,03 s abgewiesen.
 
 Kalibrierung, wie in `gates.json` vermerkt: `done` auf 8 synthetischen Fällen am 2026-09-29 mit dem
 Alias `jev-latest` (welche Version er damals war: nicht festgehalten), nicht neu für `jev-1.13.0`.
@@ -230,6 +233,7 @@ Modulversion `(devel)` und `vcs.revision`, `vcs.time`, `vcs.modified`.
 | Code-Gates aus Konzept B §9 (Roster-Datum, Alter-Liste, SessionStart-Zustand, Pfadpräfix) | Pfadliste und Ablöse-Marker-Format sind nicht festgelegt |
 | CL-001…004 als Registry-Gates | die Hooks senden `jev-latest` und einen Text-State; ein Umzug änderte ihr Verhalten |
 | Choice-Fragen | erst mit `skill_suggestion` oder `method` nötig |
+| Texte über 512 KiB urteilen | Produktentscheid offen: die langsamen Muster schneller machen (`knownTokenRE`, `secretKWRE`, `streetRE` ohne festen Anfang), das stdin-Limit senken oder die Deadline heben |
 | Check in `imprint-dev check` (jede Frage hat Kriterien; `calibration.model` = `model`, mit Datum) | die heutige Registry fiele auf beiden Gates durch: keine Kriterien, `done` auf `jev-latest` kalibriert, `foreign_return` gar nicht; ob Warnung oder Verstoß, ist offen |
 
 | Wrapper für kritische Gates | was er ausgibt, wenn `imprint-dev` fehlt, ist offen; `\|\| exit 0` wäre offen |
