@@ -321,22 +321,44 @@ func subset(what string, have, known []string) error {
 	return nil
 }
 
-// allows reports whether the host can act on verdict at event. For an event
-// the gate does not serve (a wiring error), it asks whether any of the gate's
-// events allows it.
-func (g *Gate) allows(event, verdict string) bool {
-	lists := [][]string{g.Events[event]}
-	if _, ok := g.Events[event]; !ok {
-		lists = nil
-		for _, l := range g.Events {
-			lists = append(lists, l)
+// hostCannotAsk lists the hook events at which the host cannot ask a
+// person: the action has run (PostToolUse), the turn or the subagent has
+// ended (Stop, SubagentStop), or no action waits on an answer. It is what
+// the host can do, not a registry setting: an ask the registry lists at one
+// of these events is never given (Claude Code's hooks; Codex assumed the
+// same, not measured).
+var hostCannotAsk = map[string]bool{
+	"Stop": true, "SubagentStop": true, "PostToolUse": true, "UserPromptSubmit": true, "SessionStart": true,
+	"SessionEnd": true, "SubagentStart": true, "PreCompact": true, "Notification": true,
+}
+
+// allowedAt reports whether verdict can be given at event, by the event's
+// list and the host table.
+func allowedAt(event string, list []string, verdict string) bool {
+	if verdict == verdictAsk && hostCannotAsk[event] {
+		return false
+	}
+	for _, v := range list {
+		if v == verdict {
+			return true
 		}
 	}
-	for _, l := range lists {
-		for _, v := range l {
-			if v == verdict {
-				return true
-			}
+	return false
+}
+
+// allows reports whether the host can act on verdict at event. For an event
+// the gate does not serve (a wiring error), it asks whether any of the gate's
+// events allows it; an ask is never possible at an event of hostCannotAsk.
+func (g *Gate) allows(event, verdict string) bool {
+	if verdict == verdictAsk && hostCannotAsk[event] {
+		return false
+	}
+	if l, ok := g.Events[event]; ok {
+		return allowedAt(event, l, verdict)
+	}
+	for ev, l := range g.Events {
+		if allowedAt(ev, l, verdict) {
+			return true
 		}
 	}
 	return false
@@ -457,6 +479,9 @@ type judgeLogLine struct {
 	UnknownEvent    bool               `json:"unknown_event,omitempty"`
 	UnknownHost     bool               `json:"unknown_host,omitempty"`
 	ExitCode        int                `json:"exit_code,omitempty"`
+	// NamesSkipped counts names of the names file left out because they are
+	// not valid UTF-8; the names themselves are never logged.
+	NamesSkipped int `json:"names_skipped,omitempty"`
 }
 
 // judgeLogPath: IMPRINT_JUDGE_LOG, else ${XDG_STATE_HOME:-~/.local/state}/imprint/judge.jsonl.
@@ -723,6 +748,7 @@ func (r *judgeRun) emit(v Verdict, masked MaskCounts) int {
 		UnknownGate:     v.UnknownGate,
 		UnknownEvent:    v.UnknownEvent,
 		UnknownHost:     v.UnknownHost,
+		NamesSkipped:    loadNameSet().skipped,
 	}
 	if code != exitOK {
 		line.ExitCode = code
@@ -788,17 +814,20 @@ func strictFallback(reg *Registry, event string, noUI bool) (verdict string, ok 
 	if reg == nil {
 		return verdictAllow, false
 	}
-	var lists [][]string
-	var all [][]string
+	type evList struct {
+		event string
+		list  []string
+	}
+	var lists, all []evList
 	for _, g := range reg.Gates {
 		if g.FailMode != failModeClosed {
 			continue
 		}
 		if l, served := g.Events[event]; served {
-			lists = append(lists, l)
+			lists = append(lists, evList{event, l})
 		}
-		for _, l := range g.Events {
-			all = append(all, l)
+		for ev, l := range g.Events {
+			all = append(all, evList{ev, l})
 		}
 	}
 	if len(all) == 0 {
@@ -808,11 +837,12 @@ func strictFallback(reg *Registry, event string, noUI bool) (verdict string, ok 
 		lists = all
 	}
 	has := func(v string) bool {
-		for _, l := range lists {
-			for _, x := range l {
-				if x == v {
-					return true
-				}
+		if v == verdictAsk && hostCannotAsk[event] {
+			return false
+		}
+		for _, el := range lists {
+			if allowedAt(el.event, el.list, v) {
+				return true
 			}
 		}
 		return false

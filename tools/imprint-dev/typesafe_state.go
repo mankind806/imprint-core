@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"regexp"
@@ -90,9 +91,24 @@ func (c *Client) PostState(ctx context.Context, state any, questions QuestionSet
 	if err != nil {
 		return nil, call, &CallError{errClassInternal, fmt.Errorf("marshal state: %w", err)}
 	}
-	maskedState, _, err := maskJSONLeaves(rawState)
-	if err != nil {
-		return nil, call, &CallError{errClassInternal, fmt.Errorf("mask state: %w", err)}
+	type maskedLeaves struct {
+		b   []byte
+		err error
+	}
+	leavesDone := make(chan maskedLeaves, 1)
+	go func() {
+		b, _, err := maskJSONLeaves(rawState)
+		leavesDone <- maskedLeaves{b, err}
+	}()
+	var maskedState []byte
+	select {
+	case ml := <-leavesDone:
+		if ml.err != nil {
+			return nil, call, &CallError{errClassInternal, fmt.Errorf("mask state: %w", ml.err)}
+		}
+		maskedState = ml.b
+	case <-ctx.Done():
+		return nil, call, &CallError{errClassTimeout, fmt.Errorf("mask state: %w", ctx.Err())}
 	}
 	rawQuestions, err := json.Marshal(questions)
 	if err != nil {
@@ -276,7 +292,7 @@ func maskJSONLeaves(raw []byte) ([]byte, MaskCounts, error) {
 			s := v
 			if !isKey {
 				var c MaskCounts
-				s, c = MaskDetail(v)
+				s, c = maskDetailFn(v)
 				total = addMaskCounts(total, c)
 			}
 			if err := write(s); err != nil {
@@ -400,40 +416,47 @@ const headTailSeparator = "\n[…]\n"
 // errTooLarge: the text a gate would mask is larger than its mask budget.
 var errTooLarge = errors.New("text too large to mask within the deadline")
 
-// Worst-case masking cost, measured 2026-10-02 (go1.27.1, GOMAXPROCS=2, this
-// machine; TestMaskProfile, docs/judge.md): 127 ns per byte on dense street
-// addresses, the slowest corpus, plus about 1.25 ns per byte for each name
-// pattern of the names file. Rounded up here.
+// Worst-case masking cost per byte, measured 2026-10-02 (go1.27.1,
+// GOMAXPROCS=2, this machine; TestMaskProfile, docs/judge.md), rounded up:
+//   - all steps on the fast path: 127 ns (dense street addresses), up to 232
+//     under load: 200;
+//   - a text with a rune whose case fold has another length (Kelvin sign, long
+//     s, capital sharp s, ...) or invalid UTF-8 sends some steps back to the
+//     old regex: up to 705 ns: 900;
+//   - per name pattern: 0.9 on the fold-canonical search (Greek names on
+//     Greek text): 1.5; 15.7 when such a text is scanned name by name: 20;
+//     up to 21 with the regexps (invalid UTF-8): 25.
 const (
-	maskWorstNsPerByte        = 200.0
-	maskNsPerBytePerNameRegex = 1.5
-	// A field holding U+017F, U+212A or U+1E9E (or invalid UTF-8) sends
-	// some steps back to the old regex (mask_fast.go): measured up to 705 ns
-	// per byte (dense addresses after one long s), rounded up.
+	maskWorstNsPerByte    = 200.0
 	maskFallbackNsPerByte = 900.0
+	nameFoldNsPerByte     = 1.5
+	nameScanNsPerByte     = 20.0
+	nameRegexNsPerByte    = 25.0
 )
 
-// maskCost is what masking text takes from the budget: its length, or, for a
-// text that takes the old regex for some steps, its length scaled by how much
-// slower that is.
-func maskCost(text string) int {
-	if strings.Contains(text, runeLongS) || strings.Contains(text, runeKelvin) || strings.Contains(text, runeCapSharp) ||
-		!utf8.ValidString(text) {
-		return int(float64(len(text)) * maskFallbackNsPerByte / maskWorstNsPerByte)
+// maskNsPerByte is the worst-case masking cost per byte of text, with the
+// given number of name patterns, on the path the text will take.
+func maskNsPerByte(text string, patterns int) float64 {
+	p := float64(patterns)
+	switch {
+	case !utf8.ValidString(text):
+		return maskFallbackNsPerByte + nameRegexNsPerByte*p
+	case hasFoldLengthRune(text):
+		return maskFallbackNsPerByte + nameScanNsPerByte*p
+	default:
+		return maskWorstNsPerByte + nameFoldNsPerByte*p
 	}
-	return len(text)
 }
 
-// maskBudgetBytes is how many bytes one call may mask so that the worst case
-// takes at most half of the time left until the deadline; capped at the
-// stdin limit. Without a deadline it is the stdin limit.
+// maskBudgetBytes is how many bytes of plain text (the fast path) one call
+// may mask: half the time left until the deadline at the worst-case rate,
+// capped at the stdin limit. Without a deadline it is the stdin limit.
 func maskBudgetBytes(ctx context.Context) int {
 	dl, ok := ctx.Deadline()
 	if !ok {
 		return maxJudgeInput
 	}
-	res, _ := nameRegexps()
-	perByte := maskWorstNsPerByte + maskNsPerBytePerNameRegex*float64(len(res))
+	perByte := maskWorstNsPerByte + nameFoldNsPerByte*float64(len(loadNameSet().res))
 	n := float64(time.Until(dl).Nanoseconds()) / 2 / perByte
 	if n <= 0 {
 		return 0
@@ -442,32 +465,25 @@ func maskBudgetBytes(ctx context.Context) int {
 }
 
 // maskDetailFn is MaskDetail; a test puts a slow one in its place to see
-// that maskCapped stops waiting at the deadline.
+// that masking stops waiting at the deadline.
 var maskDetailFn = MaskDetail
 
-// maskBudget counts down the bytes a call may still mask.
-type maskBudget struct{ left int }
+// maskBudget counts down the masking time (ns, worst case) a call may still
+// spend: half the time left until the deadline.
+type maskBudget struct{ leftNs float64 }
 
-func newMaskBudget(ctx context.Context) *maskBudget { return &maskBudget{left: maskBudgetBytes(ctx)} }
+func newMaskBudget(ctx context.Context) *maskBudget {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return &maskBudget{leftNs: math.Inf(1)}
+	}
+	return &maskBudget{leftNs: float64(time.Until(dl).Nanoseconds()) / 2}
+}
 
-// maskCapped masks the whole text, then keeps at most capChars runes of the
-// masked text (cutMasked). It refuses a text beyond the budget (errTooLarge),
-// does not start once ctx's deadline has passed, and stops waiting when it
-// passes: masking runs in its own goroutine, which is left to finish on its
-// own then (judge is one process per call and exits right after its verdict).
-func (b *maskBudget) maskCapped(ctx context.Context, text string, capChars int, keep string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	cost := maskCost(text)
-	if cost > b.left {
-		return "", errTooLarge
-	}
-	b.left -= cost
-	if len(text) < 64<<10 {
-		m, _ := maskDetailFn(text)
-		return cutMasked(m, capChars, keep), nil
-	}
+// maskWithin runs MaskDetail on text and waits for it at most until ctx's
+// deadline; then it returns ctx's error and leaves the masking goroutine to
+// run out (judge is one process per call and exits right after its verdict).
+func maskWithin(ctx context.Context, text string) (string, error) {
 	done := make(chan string, 1)
 	go func() {
 		m, _ := maskDetailFn(text)
@@ -475,10 +491,30 @@ func (b *maskBudget) maskCapped(ctx context.Context, text string, capChars int, 
 	}()
 	select {
 	case m := <-done:
-		return cutMasked(m, capChars, keep), nil
+		return m, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+}
+
+// maskCapped masks the whole text, then keeps at most capChars runes of the
+// masked text (cutMasked). It refuses a text whose worst-case masking time
+// is over the budget (errTooLarge), does not start once ctx's deadline has
+// passed, and stops waiting when it passes (maskWithin).
+func (b *maskBudget) maskCapped(ctx context.Context, text string, capChars int, keep string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	cost := float64(len(text)) * maskNsPerByte(text, len(loadNameSet().res))
+	if cost > b.leftNs {
+		return "", errTooLarge
+	}
+	b.leftNs -= cost
+	m, err := maskWithin(ctx, text)
+	if err != nil {
+		return "", err
+	}
+	return cutMasked(m, capChars, keep), nil
 }
 
 // headRunes is the first n runes of s (all of s if it is shorter), without

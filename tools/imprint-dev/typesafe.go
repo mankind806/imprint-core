@@ -200,47 +200,57 @@ func loadNames(filePath string) []string {
 // call. It is refreshed when the path, size or modification time changes.
 var nameRegexCache struct {
 	sync.Mutex
-	path     string
-	size     int64
-	mod      time.Time
-	res      []*regexp.Regexp
-	matchers []nameMatcher // nil if a name is not valid UTF-8: then the regexps are used
-	ok       bool
+	path  string
+	size  int64
+	mod   time.Time
+	names nameSet
+	ok    bool
 }
 
-// nameRegexps returns one case-insensitive, word-bounded pattern per name of
-// the names file, longest name first (the order loadNames gives), and the
-// same as literal matchers (nil when a name is not valid UTF-8).
-func nameRegexps() ([]*regexp.Regexp, []nameMatcher) {
+// nameSet is the names file, ready to mask with: one case-insensitive,
+// word-bounded pattern per name, longest name first (the order loadNames
+// gives), and the same names as literal matchers.
+type nameSet struct {
+	res      []*regexp.Regexp
+	matchers []nameMatcher
+	// skipped counts the names left out because they are not valid UTF-8
+	// (a names file in Latin-1, say): no pattern can be made of them. The
+	// names themselves are never logged.
+	skipped int
+}
+
+// loadNameSet reads the names file through the cache.
+func loadNameSet() nameSet {
 	path := getNamesFilePath()
 	if path == "" {
-		return nil, nil
+		return nameSet{}
 	}
 	st, err := os.Stat(path)
 	if err != nil {
-		return nil, nil
+		return nameSet{}
 	}
 	c := &nameRegexCache
 	c.Lock()
 	defer c.Unlock()
 	if c.ok && c.path == path && c.size == st.Size() && c.mod.Equal(st.ModTime()) {
-		return c.res, c.matchers
+		return c.names
 	}
-	var res []*regexp.Regexp
-	var matchers []nameMatcher
-	valid := true
+	var ns nameSet
 	for _, name := range loadNames(path) {
-		res = append(res, regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(name)+`\b`))
-		valid = valid && utf8.ValidString(name)
-		if valid {
-			matchers = append(matchers, newNameMatcher(name))
+		if !utf8.ValidString(name) {
+			ns.skipped++
+			continue
 		}
+		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
+		if err != nil {
+			ns.skipped++
+			continue
+		}
+		ns.res = append(ns.res, re)
+		ns.matchers = append(ns.matchers, newNameMatcher(name))
 	}
-	if !valid {
-		matchers = nil
-	}
-	c.path, c.size, c.mod, c.res, c.matchers, c.ok = path, st.Size(), st.ModTime(), res, matchers, true
-	return res, matchers
+	c.path, c.size, c.mod, c.names, c.ok = path, st.Size(), st.ModTime(), ns, true
+	return ns
 }
 
 // maskLapFn, set only by the profile test, is told when a masking step ends.
@@ -349,28 +359,32 @@ func MaskDetail(text string) (string, MaskCounts) {
 		counts.Name++
 		return "<name>"
 	}
-	res, matchers := nameRegexps()
-	if matchers != nil && utf8.ValidString(text) {
-		// One ASCII-lower-cased copy serves every name until a name changes
-		// the text; names are replaced one after another, as before.
-		anchored := !strings.Contains(text, runeKelvin) && !strings.Contains(text, runeLongS)
-		lower := ""
-		for _, nm := range matchers {
-			if anchored && nm.anchor != "" {
-				if lower == "" {
-					lower = lowerASCII(text)
-				}
-				if next := nm.replaceAnchored(text, lower, nameRepl); next != text {
-					text, lower = next, ""
-				}
+	names := loadNameSet()
+	if utf8.ValidString(text) {
+		// One fold-canonical copy serves every name and is kept in step
+		// with each name's replacements; names are replaced one after
+		// another, as before. A text with a rune whose canonical form has
+		// another length is scanned name by name instead.
+		folded, ok := "", false
+		if len(names.matchers) > 0 {
+			folded, ok = foldCanon(text)
+		}
+		for _, nm := range names.matchers {
+			if ok && nm.foldedOK {
+				text, folded, ok = nm.replaceFolded(text, folded, nameRepl)
 				continue
 			}
 			if next := nm.replace(text, nameRepl); next != text {
-				text, lower = next, ""
+				text = next
+				if ok {
+					folded, ok = foldCanon(text)
+				}
 			}
 		}
 	} else {
-		for _, re := range res {
+		// The literal matchers need valid UTF-8; the patterns treat an
+		// invalid byte as the regexp package does.
+		for _, re := range names.res {
 			text = re.ReplaceAllStringFunc(text, nameRepl)
 		}
 	}

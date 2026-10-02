@@ -2,8 +2,8 @@ package main
 
 import (
 	"regexp"
-	"sort"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -701,32 +701,15 @@ func isREWordRune(r rune) bool {
 type nameMatcher struct {
 	runes []rune
 	first [256]bool // first bytes of the runes the name's first rune folds to
-	// anchor is the name's longest run of ASCII bytes, lower-cased, if it has
-	// at least two; anchorRunes is the number of the name's runes before it.
-	anchor      string
-	anchorRunes int
+	// folded is the name in fold-canonical form (foldCanon); foldedOK is
+	// false if the name holds a rune whose canonical form has another length.
+	folded   string
+	foldedOK bool
 }
 
 func newNameMatcher(name string) nameMatcher {
 	nm := nameMatcher{runes: []rune(name)}
-	// the longest ASCII run (rune index start, length)
-	bestStart, bestLen, start := 0, 0, -1
-	for i, r := range append(nm.runes, utf8.RuneError) {
-		if r < utf8.RuneSelf && r != utf8.RuneError {
-			if start < 0 {
-				start = i
-			}
-			continue
-		}
-		if start >= 0 && i-start > bestLen {
-			bestStart, bestLen = start, i-start
-		}
-		start = -1
-	}
-	if bestLen >= 2 {
-		nm.anchor = strings.ToLower(string(nm.runes[bestStart : bestStart+bestLen]))
-		nm.anchorRunes = bestStart
-	}
+	nm.folded, nm.foldedOK = foldCanon(name)
 	r0 := nm.runes[0]
 	add := func(r rune) {
 		var buf [utf8.UTFMax]byte
@@ -738,6 +721,98 @@ func newNameMatcher(name string) nameMatcher {
 		add(f)
 	}
 	return nm
+}
+
+// Fold-canonical form: every rune replaced by the smallest rune of its
+// simple case-fold orbit, the classes a (?i) literal compares by. Two runes
+// fold equal exactly when their canonical runes are the same. Where every
+// canonical rune has the length of its rune, offsets in the canonical text
+// are offsets in the text.
+var (
+	foldCanonOnce sync.Once
+	foldCanonMap  map[rune]rune // non-ASCII runes whose canonical rune differs
+	foldCanonLead [256]bool     // lead bytes of runes whose canonical rune has another length
+)
+
+func initFoldCanon() {
+	foldCanonMap = map[rune]rune{}
+	for _, cr := range unicode.CaseRanges {
+		for r := rune(cr.Lo); r <= rune(cr.Hi); r++ {
+			m := r
+			for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+				if f < m {
+					m = f
+				}
+			}
+			if m != r {
+				foldCanonMap[r] = m
+				if utf8.RuneLen(m) != utf8.RuneLen(r) {
+					var buf [utf8.UTFMax]byte
+					utf8.EncodeRune(buf[:], r)
+					foldCanonLead[buf[0]] = true
+				}
+			}
+		}
+	}
+}
+
+func canonRune(r rune) rune {
+	if r < utf8.RuneSelf {
+		if r >= 'a' && r <= 'z' {
+			return r - 'a' + 'A'
+		}
+		return r
+	}
+	foldCanonOnce.Do(initFoldCanon)
+	if m, ok := foldCanonMap[r]; ok {
+		return m
+	}
+	return r
+}
+
+// foldCanon returns s in fold-canonical form; ok is false if some rune's
+// canonical rune has another UTF-8 length (the Kelvin sign, long s, capital
+// sharp s, Angstrom sign, Ohm sign, ...) or s is not valid UTF-8.
+func foldCanon(s string) (string, bool) {
+	foldCanonOnce.Do(initFoldCanon)
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			if c >= 'a' && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+			b[i] = c
+			i++
+			continue
+		}
+		r, w := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && w == 1 {
+			return "", false
+		}
+		m := canonRune(r)
+		if utf8.RuneLen(m) != w {
+			return "", false
+		}
+		utf8.EncodeRune(b[i:], m)
+		i += w
+	}
+	return string(b), true
+}
+
+// hasFoldLengthRune reports whether s holds a rune whose canonical rune has
+// another length (the names step then scans name by name).
+func hasFoldLengthRune(s string) bool {
+	foldCanonOnce.Do(initFoldCanon)
+	for i := 0; i < len(s); i++ {
+		if foldCanonLead[s[i]] {
+			r, w := utf8.DecodeRuneInString(s[i:])
+			if utf8.RuneLen(canonRune(r)) != w {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // matchAt returns the end of the name matched at byte i, if it matches there.
@@ -763,71 +838,47 @@ func (nm nameMatcher) matchAt(text string, i int) (int, bool) {
 	return j, true
 }
 
-// lowerASCII lower-cases ASCII letters only, so byte offsets stay the same.
-func lowerASCII(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 'a' - 'A'
-		}
-	}
-	return string(b)
-}
-
-// replaceAnchored is replace for a name with an ASCII anchor, on a text
-// without the Kelvin sign or long s (the only non-ASCII runes that fold onto
-// ASCII letters): every match has the anchor, lower-cased, in lower (the text
-// lower-cased in ASCII) at its start plus the bytes of the runes before it.
-// All occurrences are found with strings.Index, each gives at most one start
-// (walking back over the name's runes before the anchor), every start is
-// checked exactly, and the leftmost non-overlapping ones are replaced, as the
-// regexp replaces a literal's matches.
-func (nm nameMatcher) replaceAnchored(text, lower string, repl func(string) string) string {
-	var starts [][2]int
-	for from := 0; from < len(lower); {
-		k := strings.Index(lower[from:], nm.anchor)
+// replaceFolded is replace on a text whose fold-canonical form is folded
+// (same offsets): every match is an occurrence of the name's canonical form
+// there, so strings.Index finds all candidate starts, each is checked exactly
+// (matchAt, with \b), and the leftmost non-overlapping ones are replaced, as
+// the regexp replaces a literal's matches. It returns the new text and its
+// canonical form, kept in step by the same edits.
+func (nm nameMatcher) replaceFolded(text, folded string, repl func(string) string) (string, string, bool) {
+	var tb, fb strings.Builder
+	done := 0
+	for from := 0; from < len(folded); {
+		k := strings.Index(folded[from:], nm.folded)
 		if k < 0 {
 			break
 		}
 		p := from + k
 		from = p + 1
-		s := p
-		ok := true
-		for r := nm.anchorRunes - 1; r >= 0; r-- {
-			if s == 0 {
-				ok = false
-				break
-			}
-			tr, w := utf8.DecodeLastRuneInString(text[:s])
-			if !foldEqualRune(nm.runes[r], tr) {
-				ok = false
-				break
-			}
-			s -= w
+		if p < done {
+			continue
 		}
+		e, ok := nm.matchAt(text, p)
 		if !ok {
 			continue
 		}
-		if e, ok := nm.matchAt(text, s); ok {
-			starts = append(starts, [2]int{s, e})
+		r := repl(text[p:e])
+		rf, rok := foldCanon(r)
+		if !rok {
+			// cannot happen for "<name>"; recompute the hard way
+			return nm.replace(text, repl), "", false
 		}
+		tb.WriteString(text[done:p])
+		tb.WriteString(r)
+		fb.WriteString(folded[done:p])
+		fb.WriteString(rf)
+		done, from = e, e
 	}
-	if len(starts) == 0 {
-		return text
+	if done == 0 {
+		return text, folded, true
 	}
-	sort.Slice(starts, func(i, j int) bool { return starts[i][0] < starts[j][0] })
-	var b strings.Builder
-	done := 0
-	for _, m := range starts {
-		if m[0] < done {
-			continue
-		}
-		b.WriteString(text[done:m[0]])
-		b.WriteString(repl(text[m[0]:m[1]]))
-		done = m[1]
-	}
-	b.WriteString(text[done:])
-	return b.String()
+	tb.WriteString(text[done:])
+	fb.WriteString(folded[done:])
+	return tb.String(), fb.String(), true
 }
 
 func (nm nameMatcher) replace(text string, repl func(string) string) string {

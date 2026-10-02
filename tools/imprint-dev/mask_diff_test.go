@@ -57,6 +57,11 @@ var diffFragments = []string{
 	"Max Mustermann", "max mustermann", "MAX", "Mustermann", "Erika", "Jürgen Müller", "JÜRGEN", "Özil", "xÖzil", "Özilx",
 	"Kai", "Kai", "kai_", "Max_Mustermann", "Max-Mustermann", "Hans Max Mustermann", "HANS MAX", "Karl Schmidt", "karl schmidt",
 	"Anna Becker", "ANNA", "Ann", "name", "<name>", "Redacted", "\u00d6\u00dfa", "\u00d6SSa", "Schr\u00f6der", "SCHMIDT",
+	// other scripts and fold classes: Greek with final sigma, Cyrillic, the
+	// Ohm and Angstrom signs (their fold has another length), micro sign
+	"\u0391\u039b\u0388\u039e\u0391\u039d\u0394\u03a1\u039f\u03a3", "\u03b1\u03bb\u03ad\u03be\u03b1\u03bd\u03b4\u03c1\u03bf\u03c2",
+	"\u03a3\u039f\u03a6\u0399\u0391", "\u03c3\u03bf\u03c6\u03b9\u03b1", "\u0418\u0412\u0410\u041d \u041f\u0415\u0422\u0420\u041e\u0412",
+	"\u0438\u0432\u0430\u043d", "\u2126", "\u212b", "\u212bngstr\u00f6m", "\u00c5NGSTR\u00d6M", "\u00b5", "\u03bc", "\u03d0", "x\u03a3\u03bf\u03c6\u03af\u03b1",
 	// separators, spaces, odd bytes
 	" ", "  ", "\t", "\n", "\r\n", "\f", "\v", " ", " ", ", ", "; ", ". ", "(", ")", "/", "-", "_", "<", ">",
 	"\xff", "\xc3", "\xe2\x82", "é", "ß", "ẞ", "ſ", "K", "١", "Ä", "ö",
@@ -91,6 +96,9 @@ func TestMaskDifferential(t *testing.T) {
 		fifty = append(fifty, firsts[i%len(firsts)]+" "+lasts[(i*7)%len(lasts)])
 	}
 	_ = os.WriteFile(namesFiles[3], []byte(strings.Join(fifty, "\n")), 0o600)
+	// names without ASCII letters (Greek, Cyrillic): the fold-canonical path
+	namesFiles = append(namesFiles, filepath.Join(dir, "greek.txt"))
+	_ = os.WriteFile(namesFiles[4], []byte(strings.Join(greekNames()[:12], "\n")+"\n\u00c5ngstr\u00f6m\n\u03a3\u03bf\u03c6\u03af\u03b1\n"), 0o600)
 
 	var texts []string
 	for _, kind := range maskCorpusKinds {
