@@ -281,6 +281,7 @@ class Sandbox:
                              stderr=subprocess.PIPE, env=e)
         p.stdin.write(stdin.encode())
         p.stdin.close()
+        p.stdin = None  # communicate() on Python <= 3.12 flushes a closed stdin and raises ValueError
         end = time.monotonic() + wait_s
         while info["pgid"] is None and time.monotonic() < end:
             info["pgid"] = read_pid(info["pidfile"])
