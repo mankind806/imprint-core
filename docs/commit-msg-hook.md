@@ -99,9 +99,10 @@ the `--cwd` subdirectory under `diff.relative=true`, and in a commit that `git r
 in for. After a byte that is not UTF-8, range mode printed "Diff ist leer" and exited 0, and
 `ts-pr-triage` stopped with `UnicodeDecodeError`, exit 1 and no finding. Under `diff.external`
 or a driver's `command` the local alarm read the line, but the net diff for TypeSafe came out
-empty. A commit git could not read passed: range mode "Diff ist leer", exit 0; `ts-pr-triage`
-`fail_open`, no finding. `ts-pr-triage` on a range git cannot resolve, such as the default
-`HEAD~1..HEAD` in a repository with one commit, now exits 1 instead of reporting `fail_open`.
+empty; under `color.ui=always` it carried colour codes. A commit git could not read passed:
+range mode "Diff ist leer", exit 0; `ts-pr-triage` `fail_open`, no finding. `ts-pr-triage` on a
+range git cannot resolve, such as the default `HEAD~1..HEAD` in a repository with one commit,
+now exits 1 instead of reporting `fail_open`.
 
 ## A merge
 
