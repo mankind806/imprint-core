@@ -1,6 +1,6 @@
 {
-  "//": "Shared masking test cases for ts_common.mask_detail (Python, canonical) and its Go counterpart (imprint-core tools/imprint-dev/typesafe.go MaskDetail, run by TestMaskParity in typesafe_test.go). All names/addresses/keys below are synthetic fixtures, never real data. 'names' lists the entries that must be present in TYPESAFE_NAMES_FILE for the 'name' category cases to hit.",
-  "names": ["Max Mustermann", "Erika Musterfrau"],
+  "//": "Shared masking test cases for ts_common.mask_detail (Python, canonical) and its Go counterpart (imprint-core tools/imprint-dev/typesafe.go MaskDetail, run by TestMaskParity in typesafe_test.go). All names/addresses/keys below are synthetic fixtures, never real data. 'names' lists the entries that must be present in TYPESAFE_NAMES_FILE for the 'name' category cases to hit. 'masked' (optional) is the exact expected output; 'superseded' marks a note that no longer holds (date, what, reason) and keeps the old note text. Rules: README.md 'Datenschutz & Maskierung' (aligned 2026-10-02).",
+  "names": ["Max Mustermann", "Erika Musterfrau", "Jose\u0301", "\u00c5ngström", "I\u015eIK", "ilker", "Oz", "O\u0308"],
   "cases": [
     {
       "id": "secret_kw_bearer",
@@ -92,6 +92,7 @@
       "text": "Wohnort laut Formular: 12345 Musterstadt am Fluss",
       "must_not_contain": ["12345 Musterstadt am Fluss", "Fluss"],
       "min_counts": {"address": 1},
+      "superseded": {"date": "2026-10-02", "what": "the remark in the note below that 'im Brief' stays unmasked and that im/ob der are a fixed list in Go", "reason": "user decision \"union of both grammars\" (mask parity spec section 4): the union includes Python's generic im <Word>, so the PLZ line with 'im Brief' is masked in full, see case address_plz_im_generic_union; the old note text is kept unchanged"},
       "note": "Python's PLZ+Ort pattern accepts any '(am|an der|im) <Capitalized word>' suffix generically. Since imprint-core-CL-013a, Go's plzOrtRE generalizes the 'am'/'an der' suffix the same way (any capitalized word); 'im'/'ob der' stay a fixed list (im Breisgau, ob der Tauber) so 'PLZ ist 10115 Berlin im Brief.' still leaves 'im Brief' unmasked (typesafe_test.go TestMaskAddresses) - a narrower parity than Python's fully generic 'im' handling, intentional and covered by both test suites."
     },
     {
@@ -247,6 +248,375 @@
       "text": "Lieferung an Musterstraße 12a - 14b bitte klingeln",
       "must_not_contain": ["Musterstraße", "14b"],
       "min_counts": {"address": 1}
+    },
+    {
+      "id": "secret_kw_bearer_quoted_header",
+      "text": "\"Authorization\": \"Bearer abc\"",
+      "masked": "\"Authorization\": <redacted> <redacted>",
+      "exact_counts": {"secret_kw": 2, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1a/1b (2026-10-02): the measured Go leak. 1a takes the value up to the next ASCII space, closing quote included; 1b then masks Bearer as the value of Authorization (third alternative, which consumes the opening quote)."
+    },
+    {
+      "id": "secret_kw_bearer_after_umlaut",
+      "text": "äBearer x",
+      "masked": "äBearer <redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1a: the trigger only needs no ASCII word character before it."
+    },
+    {
+      "id": "secret_kw_bearer_after_roman_numeral",
+      "text": "\u216bBearer x",
+      "masked": "\u216bBearer <redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_bearer_after_long_s",
+      "text": "\u017fBearer x",
+      "masked": "\u017fBearer <redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1a: the ASCII class must not fold (long s would fold to s inside (?i))."
+    },
+    {
+      "id": "secret_kw_bearer_after_kelvin_sign",
+      "text": "\u212aBearer x",
+      "masked": "\u212aBearer <redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_bearer_after_ascii_letter",
+      "text": "xBearer abc",
+      "masked": "xBearer abc",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_bearer_nbsp_separator",
+      "text": "Bearer\u00a0abc,def;x y",
+      "masked": "Bearer\u00a0<redacted> y",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1a: separator is any Unicode space; the value runs to the next ASCII space and takes commas and semicolons."
+    },
+    {
+      "id": "secret_kw_bearer_value_is_nbsp",
+      "text": "Bearer \u00a0\n",
+      "masked": "Bearer <redacted>\n",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1a, leftmost-first: the separator gives back U+00A0, which is a value character (not ASCII space)."
+    },
+    {
+      "id": "secret_kw_bearer_redacted_again",
+      "text": "Bearer <redacted>",
+      "masked": "Bearer <redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1a: no skip for an already redacted value; it is replaced and counted again."
+    },
+    {
+      "id": "secret_kw_authorization_bearer",
+      "text": "authorization: Bearer abc",
+      "masked": "authorization: <redacted> <redacted>",
+      "exact_counts": {"secret_kw": 2, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1b: no Bearer/Basic exception for key=value."
+    },
+    {
+      "id": "secret_kw_value_crosses_nbsp",
+      "text": "token=abc\u00a0def ghi",
+      "masked": "token=<redacted> ghi",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 1b: unquoted value stops at ASCII whitespace or a quote/comma/semicolon, not at U+00A0."
+    },
+    {
+      "id": "secret_kw_key_unicode_tail",
+      "text": "tokenä=abc",
+      "masked": "tokenä=<redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_unicode_spaces_around_separator",
+      "text": "pwd\u00a0:\u2003wert,rest",
+      "masked": "pwd\u00a0:\u2003<redacted>,rest",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "phone_arabic_indic_digits",
+      "text": "030 \u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668",
+      "masked": "<phone>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 1},
+      "note": "Spec 3: body digits are any Unicode decimal digit."
+    },
+    {
+      "id": "phone_trailing_arabic_digit",
+      "text": "030 123\u0034\u0035\u0036\u0037\u0038\u0661",
+      "masked": "<phone>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 1}
+    },
+    {
+      "id": "phone_after_superscript",
+      "text": "\u00b2030 12345678",
+      "masked": "\u00b2030 12345678",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 3: no match after a Unicode word character (it would cut a word)."
+    },
+    {
+      "id": "phone_after_roman_numeral",
+      "text": "\u216b030 123\u0034\u0035\u0036\u0037\u0038",
+      "masked": "\u216b030 123\u0034\u0035\u0036\u0037\u0038",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_street_strasse_letter",
+      "text": "Musterstrasse 12a",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 4: strasse added to the Python suffixes; union grammar."
+    },
+    {
+      "id": "address_go_preposition_street",
+      "text": "An der Linde 2",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_go_zum",
+      "text": "Zum See 6",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_go_preposition_run",
+      "text": "Am Am Am Am 1",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 4: Go's preposition alternative accepts capitalised words after Am, so the whole run is one street."
+    },
+    {
+      "id": "address_no_suffix_run",
+      "text": "Aaa Aaa Aaa 1",
+      "masked": "Aaa Aaa Aaa 1",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_kudamm_apostrophe",
+      "text": "Ku'damm 3",
+      "masked": "Ku'<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_plz_uppercase_city",
+      "text": "12345 BERLIN",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_plz_two_word_city",
+      "text": "1234\u0035 Bad Homburg",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 4: leftmost-longest picks Python's longer match."
+    },
+    {
+      "id": "address_plz_slash_city",
+      "text": "1234\u0035 Halle/Saale",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_plz_im_breisgau",
+      "text": "7909\u0038 Freiburg im Breisgau",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_plz_ob_der_tauber",
+      "text": "9154\u0031 Rothenburg ob der Tauber",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 4: Go's longer match wins."
+    },
+    {
+      "id": "address_plz_im_generic_union",
+      "text": "PLZ ist 1011\u0035 Berlin im Brief.",
+      "masked": "PLZ ist <address>.",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 4, user decision 2026-10-02 (union of both grammars): Python's generic 'im <Word>' is part of the union, so 'im Brief' is masked too. Supersedes the 'im' remark in the note of address_plz_ort_generic_suffix."
+    },
+    {
+      "id": "address_plz_digit_after_city",
+      "text": "8033\u0031 München1",
+      "masked": "8033\u0031 München1",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 4: a boundary would cut a Unicode word; nothing is masked."
+    },
+    {
+      "id": "address_plz_accent_after_city",
+      "text": "1011\u0035 Berlin\u00e9",
+      "masked": "1011\u0035 Berlin\u00e9",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_street_umlaut_after_number",
+      "text": "Musterstraße 12ä",
+      "masked": "Musterstraße 12ä",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_street_umlaut_before",
+      "text": "äMusterstraße 12",
+      "masked": "äMusterstraße 12",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "name_nfc_text_nfd_list",
+      "text": "Jos\u00e9 kommt",
+      "masked": "<name> kommt",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 5: names are NFC-normalised at load (the list holds Jose + U+0301)."
+    },
+    {
+      "id": "name_nfd_text",
+      "text": "Jose\u0301 kommt",
+      "masked": "<name> kommt",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 5: the text is matched on its NFC copy, replaced in the original."
+    },
+    {
+      "id": "name_angstrom_sign",
+      "text": "\u212bngström",
+      "masked": "<name>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 5: U+212B ANGSTROM SIGN normalises to U+00C5."
+    },
+    {
+      "id": "name_angstrom_decomposed",
+      "text": "A\u030angstro\u0308m",
+      "masked": "<name>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "name_turkish_dotless_i",
+      "text": "\u0131\u015f\u0131k",
+      "masked": "<name>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 0/5: Python's (?i) puts I, i, U+0130 and U+0131 into one class."
+    },
+    {
+      "id": "name_turkish_dotted_capital_i",
+      "text": "\u0130lker",
+      "masked": "<name>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "name_nfd_no_boundary",
+      "text": "Jose\u0301x",
+      "masked": "Jose\u0301x",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 5: boundaries are evaluated on the NFC copy."
+    },
+    {
+      "id": "secret_kw_keyword_dotted_capital_i",
+      "text": "AP\u0130_KEY=abc",
+      "masked": "AP\u0130_KEY=<redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 0: Python (?i) puts I, i, U+0130 and U+0131 into one class, in every case-insensitive part (keyword list here)."
+    },
+    {
+      "id": "secret_kw_basic_dotted_capital_i",
+      "text": "BAS\u0130C abc",
+      "masked": "BAS\u0130C <redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 0/1a: Turkish i in the trigger."
+    },
+    {
+      "id": "secret_kw_bearer_info_separator",
+      "text": "Bearer\u001cabc",
+      "masked": "Bearer\u001c<redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 0: U+001C..U+001F are whitespace (Python \\s)."
+    },
+    {
+      "id": "secret_kw_basic_unit_separator",
+      "text": "Basic\u001fabc def",
+      "masked": "Basic\u001f<redacted> def",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_suffix_dotted_capital_i",
+      "text": "GoetheR\u0130NG 4",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 0/4: Turkish i in a case-insensitive street suffix."
+    },
+    {
+      "id": "address_suffix_dotless_i",
+      "text": "Hauptze\u0131le 3",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_info_separator_before_number",
+      "text": "Musterweg\u001c12",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 0/4: U+001C separates street and house number."
+    },
+    {
+      "id": "address_go_unit_separator",
+      "text": "Zum See\u001f6",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "address_plz_record_separator",
+      "text": "12345\u001eBerlin",
+      "masked": "<address>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 1, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "name_widened_segment",
+      "text": "Oz\u0f74\u0f73 kommt",
+      "masked": "<name> kommt",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0},
+      "superseded": {"date": "2026-10-02", "what": "the reason the note below gives for the single segment (U+0F73 interacting with the segment before it)", "reason": "spec amendment A1 replaced the segment rule: a segment starts only before a character with combining class 0 and NFC quick check Yes; U+0F74 (class 132) and U+0F73 (quick check No) start none, so z, U+0F74 and U+0F73 still form one segment and the result is unchanged; the old note text is kept unchanged"},
+      "note": "Spec 5: z, U+0F74 and U+0F73 form one segment (U+0F73 decomposes to U+0F71 U+0F72, which reorder before U+0F74); the match Oz ends inside it and widens to the whole segment."
+    },
+    {
+      "id": "name_widened_qc_maybe",
+      "text": "Oz\u0b3e und Jose\u0301",
+      "masked": "<name>\u0b3e und <name>",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 2, "opaque": 0, "iban": 0, "phone": 0},
+      "superseded": {"date": "2026-10-02", "what": "the expected output <name> und <name> and the note below (the match Oz widens over U+0B3E because the text is not NFC)", "reason": "spec amendment A8: widening is local, a match edge widens only inside a segment that NFC changes. z and U+0B3E form a segment that NFC leaves unchanged, so offsets map one-to-one and U+0B3E stays, as in NFC text (name_fast_path_no_widening); before A8 the result for the same span depended on whether anything else in the text was not NFC. The id and the old note text are kept unchanged"},
+      "note": "Spec A1: U+0B3E (NFC quick check Maybe) starts no segment, so the match Oz widens over it. The text is not NFC (Jose + U+0301), so the segment path runs; see name_fast_path_no_widening for NFC text."
+    },
+    {
+      "id": "name_fast_path_no_widening",
+      "text": "Oz\u0b3e kommt",
+      "masked": "<name>\u0b3e kommt",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 1, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec 5: text that is already NFC is matched directly (fast path); nothing is widened, U+0B3E stays."
+    },
+    {
+      "id": "name_single_letter_after_nfc",
+      "text": "\u00d6 und O\u0308 kommen",
+      "masked": "\u00d6 und O\u0308 kommen",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec A2: name terms are NFC-normalised first and then need at least 2 code points; the names entry O + U+0308 is one letter (U+00D6) after NFC and no name."
+    },
+    {
+      "id": "secret_kw_keyval_placeholder_uppercase",
+      "text": "token=<REDACTED>",
+      "masked": "token=<redacted>",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0},
+      "note": "Spec A3: only the exact placeholder <redacted> is skipped (case-sensitive), <REDACTED> is masked."
+    },
+    {
+      "id": "secret_kw_keyval_placeholder_mixed_case_quoted",
+      "text": "password: \"<Redacted>\"",
+      "masked": "password: \"<redacted>\"",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_keyval_placeholder_exact_skip",
+      "text": "token=<redacted> secret=\"<redacted>\"",
+      "masked": "token=<redacted> secret=\"<redacted>\"",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
     }
   ]
 }

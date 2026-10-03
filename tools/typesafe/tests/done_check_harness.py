@@ -50,6 +50,10 @@ elif mode == "hang_post":
     def _hang(*a, **k):
         time.sleep(60)
     tc.post = _hang
+elif mode == "quadratic_kv":
+    # The key=value step as it was until 2026-10-03: RX_KEY_VAL.subn, quadratic on a
+    # keyword run and one GIL-holding C call (_update_mask_res picks this up).
+    tc._mask_key_vals = lambda text, repl: tc.RX_KEY_VAL.subn(repl, text)
 elif mode == "garbage":
     sys.stdout.write("this is not json\n"); sys.stdout.flush(); time.sleep(60)
 elif mode == "exit_silently":

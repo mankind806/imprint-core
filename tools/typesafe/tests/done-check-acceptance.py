@@ -68,10 +68,15 @@ def c1(sb):
         ("hanging keyring (sleep 30)", dict(keyring="sleep:30"), CLAIM, "keyring"),
         ("slow keyring 1.5 s, then hanging POST", dict(keyring="slowkey:1.5", url=never.url),
          CLAIM, "post"),
-        ('quadratic RX_ADDRESS "Weg " x 12500 (50k chars)', {}, "Fertig. " + "Weg " * 12500,
-         "startup"),
-        ('quadratic RX_ADDRESS "Abc " x 12500 (50k chars)', {}, "Fertig. " + "Abc " * 12500,
-         "startup"),
+        # Until 2026-10-03: "Weg " and "Abc " x 12500 for master's quadratic RX_ADDRESS; branch
+        # mask-parity-unicode made the address search linear (mask parity spec section 4).
+        # RX_KEY_VAL.subn is quadratic on a keyword repeated without '='/':' (~35 s each).
+        # Since 2026-10-03 (branch mask-kv-linear) mask_detail's key=value step is linear;
+        # the shim's mode quadratic_kv puts RX_KEY_VAL.subn back in the worker.
+        ('quadratic RX_KEY_VAL "token" x 20000 (100k chars)', dict(mode="quadratic_kv"),
+         "Fertig. " + "token" * 20000, "startup"),
+        ('quadratic RX_KEY_VAL "auth-" x 20000 (100k chars)', dict(mode="quadratic_kv"),
+         "Fertig. " + "auth-" * 20000, "startup"),
         ("worker crashes in the keyring step", dict(keyring="key", mode="crash_at_keyring"),
          CLAIM, "keyring"),
         ("worker prints garbage, then hangs", dict(mode="garbage"), CLAIM, "startup"),

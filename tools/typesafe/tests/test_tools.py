@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
@@ -11,6 +12,28 @@ import ts_common as tc  # noqa: E402
 
 
 class TestTsCommon(unittest.TestCase):
+    # Uses its own temporary TYPESAFE_NAMES_FILE with synthetic names only, so these
+    # tests never read or depend on the real, private ~/.config/typesafe/names.txt.
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.names_path = tempfile.mkstemp(prefix="typesafe-tools-names-", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("# synthetic names only\nMax Mustermann\nErika Musterfrau\n")
+        cls._prev_env = os.environ.get("TYPESAFE_NAMES_FILE")
+        os.environ["TYPESAFE_NAMES_FILE"] = cls.names_path
+        tc.get_name_regex(cls.names_path)  # force reload under the isolated names file
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._prev_env is None:
+            os.environ.pop("TYPESAFE_NAMES_FILE", None)
+        else:
+            os.environ["TYPESAFE_NAMES_FILE"] = cls._prev_env
+        try:
+            os.remove(cls.names_path)
+        except OSError:
+            pass
+
     def test_mask_detail_secrets(self):
         # built from parts so this file's own diff carries no real-looking secret
         text = "Hier ist to" + "ken = abcdef1234567890abcdef123456 und pass" + "word = secret123"
@@ -190,13 +213,84 @@ class TestEmailLinear(unittest.TestCase):
         self.assertLess(elapsed, 0.5, f"RX_EMAIL took {elapsed:.2f}s on 500k chars -- not linear")
 
 
+class TestKeyValLinear(unittest.TestCase):
+    """mask_detail's key=value step is tc._mask_key_vals (since 2026-10-03), which drives
+    tc.RX_KEY_VAL from the first keyword of each run of [\\w.-] instead of letting
+    RX_KEY_VAL.subn retry it from every keyword start in the run. The plain subn was
+    quadratic: "token" x 20000 (100k chars), with or without "=<redacted>" after it,
+    took 88 s (measured 2026-10-03, Python 3.14.6). RX_KEY_VAL stays the rule and the
+    oracle: the step must give exactly RX_KEY_VAL.subn's (text, n). Enforced here by a
+    differential test, by the two class facts the run skip rests on (all code points),
+    and by a time bound on the old blow-up shapes."""
+
+    TOKENS = ["tok", "token", "en", "pass", "word", "auth-", "api_key", "PWD", "x", "1", ".", "-", "_",
+              "=", ":", '"', "'", " ", "\t", "\n", "\v", "\x1c", "\x85", "\xa0", " ", "<redacted>",
+              "<REDACTED>", ",", ";", "ſ", "K", "İ", "ı", "é", "é", "<"]
+
+    def assert_same(self, text):
+        self.assertEqual(tc._mask_key_vals(text, tc._key_val_repl),
+                         tc.RX_KEY_VAL.subn(tc._key_val_repl, text), ascii(text))
+
+    def test_differential_against_rx_key_val(self):
+        import itertools
+        import random
+        for n in (1, 2):
+            for combo in itertools.product(self.TOKENS, repeat=n):
+                self.assert_same("".join(combo))
+        rng = random.Random(11)
+        for _ in range(20000):
+            self.assert_same("".join(rng.choice(self.TOKENS) for _ in range(rng.randint(3, 16))))
+
+    def test_run_skip_rests_on_disjoint_classes(self):
+        """No code point of (?i)[\\w.-] can start what follows the run (["']?\\s*[=:]),
+        and every code point a keyword letter matches under (?i) is in (?i)[\\w.-]."""
+        import re
+        tail = re.compile(r"(?i)[\"'\s=:]")
+        kw_letter = re.compile(r"(?i)[" + re.escape("".join(sorted(set(
+            "apikeytokensecretpasswordphrasewortpwdcredentialprivateaccessauthorization_-")))) + "]")
+        both, outside = [], []
+        for cp in range(0x110000):
+            c = chr(cp)
+            in_run = tc._KV_RUN.fullmatch(c) is not None
+            if in_run and tail.fullmatch(c):
+                both.append(hex(cp))
+            if not in_run and kw_letter.fullmatch(c):
+                outside.append(hex(cp))
+        self.assertEqual(both, [])
+        self.assertEqual(outside, [])
+
+    def test_pathological_cases_are_no_longer_quadratic(self):
+        import time
+        from unittest import mock
+        for unit, tail in (("token", "=<redacted>"), ("token", ""), ("auth-", ""), ("token.", "=<redacted>")):
+            self.assert_same(unit * 400 + tail)
+            text = unit * 20000 + tail
+            with mock.patch.dict(os.environ, {"TYPESAFE_NAMES_FILE": "/nonexistent/typesafe-names.txt"}):
+                t0 = time.monotonic()
+                masked, counts = tc.mask_detail(text)
+                elapsed = time.monotonic() - t0
+            self.assertEqual((masked, counts["secret_kw"]), (text, 0))
+            self.assertLess(elapsed, 1.0, f"mask_detail took {elapsed:.2f}s on {unit!r} x 20000 -- not linear")
+
+
 class TestAddressKeyValExactMaster(unittest.TestCase):
     """RX_ADDRESS and RX_KEY_VAL are master's plain regexes again (2026-10-02). The
     windowed rewrites on the done-check-timeout branch bounded each match attempt to a
     fixed window (100/60 chars around an address anchor, 150 chars from a keyword to
     its '='/':') and so left the parts beyond the window unmasked. Exact masking is
     slower on adversarial input (quadratic), which ts-done-check now bounds by time in
-    its supervisor process. Each shape below leaked under the windowed version."""
+    its supervisor process. Each shape below leaked under the windowed version.
+
+    Superseded in part 2026-10-03 (branch mask-parity-unicode, mask parity spec sections
+    4, 1b and A3, user decisions 2026-10-02): RX_ADDRESS is gone. Addresses are the union
+    of the Python and the Go grammar (ts_common._mask_addresses), searched from anchors
+    and linear, still without a window. RX_KEY_VAL is master's regex with the documented
+    parity changes and still quadratic on adversarial input. The intent stays the same:
+    no fixed match window may come back (test_no_fixed_match_window).
+
+    Superseded in part 2026-10-03 (branch mask-kv-linear): RX_KEY_VAL is still this plain
+    regex and still quadratic when run with subn, but mask_detail runs it through
+    ts_common._mask_key_vals, linear and without a window (TestKeyValLinear)."""
 
     _STREET_SUFFIXES = (r"(?:stra[ßs]e|str\b\.?|weg|gasse|platz|allee|ring|damm|ufer|chaussee"
                         r"|zeile|stieg|gässchen|pfad|markt)")
@@ -221,9 +315,65 @@ class TestAddressKeyValExactMaster(unittest.TestCase):
         r"(?:(?P<dq>\")(?!<redacted>\")[^\"\n]+\"|(?P<sq>')(?!<redacted>')[^'\n]+'|[\"']?(?!<redacted>)[^\s\"',;]+)"
     )
 
-    def test_patterns_are_the_master_regexes(self):
-        self.assertEqual(tc.RX_ADDRESS.pattern, self.MASTER_ADDRESS)
-        self.assertEqual(tc.RX_KEY_VAL.pattern, self.MASTER_KEY_VAL)
+    # SUPERSEDED 2026-10-03: test_patterns_are_the_master_regexes asserted
+    #     self.assertEqual(tc.RX_ADDRESS.pattern, self.MASTER_ADDRESS)
+    #     self.assertEqual(tc.RX_KEY_VAL.pattern, self.MASTER_KEY_VAL)
+    # Reason: the mask parity spec (branch mask-parity-unicode, user decisions 2026-10-02)
+    # replaces RX_ADDRESS by the union of the Python and the Go grammar (section 4) and
+    # changes RX_KEY_VAL (section 1b: the unquoted value runs over U+00A0; A3: the
+    # placeholder skip is case-sensitive). The pin's intent, that the windowed matchers
+    # of the done-check-timeout branch must not come back, is checked on the new code
+    # by test_no_fixed_match_window below.
+
+    # The parity changes to master's RX_KEY_VAL (spec 1b, A3), each applied exactly once.
+    KEY_VAL_PARITY_CHANGES = (
+        (r'(?!<redacted>\")', r'(?-i:(?!<redacted>\"))'),
+        ("(?!<redacted>')", "(?-i:(?!<redacted>'))"),
+        (r"(?!<redacted>)[^\s\"',;]+", r"(?-i:(?!<redacted>))[^\t\n\f\r \"',;]+"),
+    )
+
+    def test_no_fixed_match_window(self):
+        """Replaces test_patterns_are_the_master_regexes (2026-10-03). RX_KEY_VAL is still
+        one plain regex: master's with exactly the parity changes, so no window can creep
+        in. The address union and RX_KEY_VAL mask whole matches far past the windows the
+        done-check-timeout rewrite had (100/60 chars around an address anchor, 150 from
+        a keyword to its '='/':'), with exact output."""
+        derived = self.MASTER_KEY_VAL
+        for old, new in self.KEY_VAL_PARITY_CHANGES:
+            self.assertEqual(derived.count(old), 1, old)
+            derived = derived.replace(old, new)
+        self.assertIsInstance(tc.RX_KEY_VAL, __import__("re").Pattern)
+        self.assertEqual(tc.RX_KEY_VAL.pattern, derived)
+
+        words = ["Wachtelberg", "Oberhausener", "Unterbacher", "Mittelfelder", "Kaiserin",
+                 "Friedrichs", "Wilhelminen", "Viktorias", "Luisen", "Augusta"]
+        city_words = ["Wachtstadt", "Oberdorf", "Unterdorf", "Mitteldorf", "Hinterdorf",
+                      "Vorderdorf", "Wachtneudorf"]
+        value = "wachWert" + "Delta4711"  # built from parts: no real-looking secret in the diff
+        for reps in (30, 300):  # about 2,300 to 32,000 characters
+            hyphen_chain = "-".join(words * reps)
+            space_chain = " ".join(words * reps)
+            city = "-".join(city_words * reps)
+            self.assertGreater(len(city), 2000)
+            cases = [  # the PLZ is put together at runtime, as elsewhere in this file
+                ("Wohnt in der " + hyphen_chain + "strasse 12 im Hinterhaus",
+                 "Wohnt in der <address> im Hinterhaus"),
+                ("Adresse: " + space_chain + " Weg 12.", "Adresse: <address>."),
+                ("Wohnort: 8033" + "1 " + city + ", Deutschland", "Wohnort: <address>, Deutschland"),
+            ]
+            for text, want in cases:
+                with self.subTest(reps=reps, text=text[:30]):
+                    self.assertEqual(tc._mask_addresses(text), (want, 1))
+        for ids in ("a1b2c3d4" * 19 + "a1", "a1b2c3d4" * 125, "a1b2c3d4" * 625):  # 154, 1000, 5000
+            text = "tok" + "en" + ids + "=" + value
+            with self.subTest(identifier_chars=len(ids)):
+                self.assertEqual(tc.RX_KEY_VAL.subn(tc._key_val_repl, text),
+                                 ("token" + ids + "=<redacted>", 1))
+        for n in (200, 5000):
+            text = "pass" + "word:" + " " * n + value
+            with self.subTest(spaces=n):
+                self.assertEqual(tc.RX_KEY_VAL.subn(tc._key_val_repl, text),
+                                 ("password:" + " " * n + "<redacted>", 1))
 
     def test_shapes_that_leaked_past_a_fixed_window_are_masked(self):
         value = "wachWert" + "Delta4711"  # built from parts: no real-looking secret in the diff

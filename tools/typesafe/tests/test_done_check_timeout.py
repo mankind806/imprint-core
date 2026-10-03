@@ -129,10 +129,22 @@ class TestTimeoutPaths(_SandboxCase):
         self.assertEqual(h.leftovers(info), [])
 
     def test_quadratic_masking_is_cut_off_as_startup(self):
-        """The exact master RX_ADDRESS is quadratic on a long run of capitalised words
-        without a house number (20k chars take ~5 s); the GIL-holding match is cut off
-        by the supervisor's SIGKILL, not by anything inside the worker."""
-        r, elapsed, info = self.run_hook(msg="Fertig. " + "Weg " * 5000, session_id="sess-regex")
+        """RX_KEY_VAL (the key=value step) is quadratic on a keyword repeated without a
+        '='/':' (re retries the greedy [\\w.-]* from every keyword start; "token" x 8000,
+        40k chars, take ~5 s, measured 2026-10-03); the GIL-holding match is cut off by
+        the supervisor's SIGKILL, not by anything inside the worker.
+
+        Until 2026-10-03 the fixture was "Weg " x 5000 for master's quadratic RX_ADDRESS;
+        branch mask-parity-unicode replaced that by a linear address search (mask parity
+        spec section 4), which masks it in milliseconds. If RX_KEY_VAL is ever made
+        linear too, this test fails loudly (no log line) and needs another slow fixture
+        or a masker injected through the worker shim.
+
+        Superseded in part 2026-10-03 (branch mask-kv-linear): mask_detail's key=value
+        step is linear now. The shim's mode quadratic_kv puts the old step back in the
+        worker (RX_KEY_VAL.subn, the same GIL-holding regex), so the input stays as is."""
+        r, elapsed, info = self.run_hook(msg="Fertig. " + "token" * 8000, session_id="sess-regex",
+                                         mode="quadratic_kv")
         rec = self.assert_one_error_line(r, elapsed, info, "startup", "timeout")
         self.assertEqual(rec["session_id"], "sess-regex")
 
@@ -461,7 +473,12 @@ class TestOrphanBackstops(_SandboxCase):
         self.kill_supervisor_mid_run(keyring="key", mode="hang_post")
 
     def test_worker_in_a_gil_holding_regex_dies_with_its_supervisor(self):
-        self.kill_supervisor_mid_run(msg="Fertig. " + "Weg " * 12500)
+        """The worker is inside RX_KEY_VAL's quadratic match ("token" x 20000, 100k chars,
+        ~35 s uncut, measured 2026-10-03) when its supervisor is killed. Until 2026-10-03
+        the fixture was "Weg " x 12500 for master's RX_ADDRESS, now linear (see
+        test_quadratic_masking_is_cut_off_as_startup). Since 2026-10-03 (branch
+        mask-kv-linear) the shim's mode quadratic_kv puts that match back in the worker."""
+        self.kill_supervisor_mid_run(msg="Fertig. " + "token" * 20000, mode="quadratic_kv")
 
     def test_worker_has_a_cpu_time_limit(self):
         p, info = self.sb.start(self.sb.stdin(CLAIM_MSG, transcript=self.transcript),

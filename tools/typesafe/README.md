@@ -85,6 +85,50 @@ Repository-Wurzelverzeichnis ([`LICENSE`](../../LICENSE)); dieses Verzeichnis ha
 
 ## Datenschutz & Maskierung
 
+Abgeglichene Regeln für `ts_common.mask_detail`; der Go-Port `MaskDetail` (imprint-core) folgt
+denselben Regeln. Dieser Abschnitt ist die maßgebliche Beschreibung der Maskierungsregeln:
+
+| Regel | Was jetzt maskiert wird | Entschieden von / durch | Stand |
+|---|---|---|---|
+| Zeichenklassen | Wortzeichen, Leerraum, Ziffern, Groß/klein wie Pythons `\w`, `\s`, `\d`, `(?i)`; I, i, İ, ı sind eine Klasse | Kriterium des Nutzers „sicherer = maskiert mehr, ohne Wörter zu zerschneiden“, Messung | 2026-10-02 |
+| Bearer/Basic | Auslöser nicht nach ASCII-Wortzeichen (auch `äBearer x`); Wert bis zum nächsten ASCII-Leerraum, samt Anführungszeichen, Komma, U+00A0; schon `<redacted>` wird erneut ersetzt | Kriterium des Nutzers | 2026-10-02 |
+| Schlüssel = Wert | Wert ohne Anführungszeichen bis ASCII-Leerraum oder `"`, `'`, `,`, `;` (über U+00A0 hinweg); `authorization: Bearer x` ergibt zwei `<redacted>`; übersprungen wird nur der Platzhalter genau als `<redacted>` geschrieben, `token=<REDACTED>` wird maskiert | Kriterium des Nutzers; Spezifikation A3 | 2026-10-02 |
+| Telefon | Ziffern = jede Unicode-Dezimalziffer; kein Treffer direkt nach Wortzeichen, `+` oder `.` | Kriterium des Nutzers (Pythons Regel) | 2026-10-02 |
+| Adresse | Vereinigung der Python- und der Go-Grammatik, erst Straße, dann PLZ + Ort; frühester Start, dort längster Treffer, Unicode-Wortgrenzen an beiden Enden; `im <Wort>` nach dem Ort wird mitmaskiert; jeder der beiden Durchgänge ist eine eigene NFC-Vereinigung (Zeile darunter), der PLZ-Durchgang auf dem Ergebnis des Straßen-Durchgangs | Entscheidung des Nutzers „Union of both“; NFC: Entscheidung „Union“ | 2026-10-02 |
+| NFC-Vereinigung (E-Mail, Straße, PLZ + Ort) | Jeder dieser drei Durchgänge nimmt seine Treffer im Text und, ist seine Eingabe nicht NFC, dazu die Treffer desselben Suchers auf einer eigenen NFC-Sicht dieser Eingabe (Wortgrenzen auf der Sicht geprüft; Segmente und Rückabbildung wie bei Namen: ein Rand in einem Segment, das NFC verändert, wird auf das Segment verbreitert); beide Listen nach Start sortiert, eine Spanne, die echt vor dem bisherigen Ende beginnt, verschmilzt mit ihr, angrenzende bleiben getrennt; jede verschmolzene Spanne wird ersetzt und zählt 1. Text in NFC ergibt genau die Treffer im Text. So wird „Mu“ + U+0308 + „hlenweg 3“ ganz `<address>` (vorher blieb „Mu“ + U+0308 stehen), und nirgends wird weniger maskiert als vorher | Entscheidung des Nutzers „Union“ (Auswahlfrage in der Lead-Sitzung) | 2026-10-02 |
+| Namen | Namensdatei und Text werden NFC-normalisiert verglichen, ersetzt wird im Originaltext (NFD „José“ trifft); ein Name braucht nach NFC mindestens 2 Zeichen (ein einzelnes „Ö“ ist keiner); liegt ein Rand eines Treffers (Anfang oder Ende) in einem Segment, das NFC verändert, wird das ganze Segment ersetzt (Segment beginnt vor Kombinationsklasse 0 mit NFC_Quick_Check Yes, linear; „ K“ mit dem Kelvin-Zeichen U+212A vor einem Namen nimmt so das Leerzeichen mit); in einem Segment, das NFC nicht verändert, wird Zeichen für Zeichen abgebildet und nichts verbreitert („Max“ + U+0B3E ergibt `<name>` + U+0B3E, egal was sonst im Text steht); Text in NFC ist damit derselbe Fall und wird direkt verglichen; gesucht wird nur auf der NFC-Sicht, überlappende Spannen verschmelzen wie bei der NFC-Vereinigung, gezählt wird aber jeder Treffer | Entscheidung des Nutzers „Tables from Python“ (NFC in Go) und Kriterium; Spezifikation A1, A2, A8 | 2026-10-02 |
+| E-Mail | Muster unverändert (gemessen gleich in beiden Sprachen); gesucht als NFC-Vereinigung (Zeile oben) | Messung; NFC: Entscheidung des Nutzers „Union“ | 2026-10-02 |
+| IBAN, AWS-Schlüssel-IDs, bekannte Token-Präfixe | unverändert (gemessen gleich in beiden Sprachen) | Messung | 2026-10-02 |
+| Token (opaque) | Eine Folge R aus `[A-Za-z0-9_+/-]` (danach bis zu zwei `=` als Padding) wird maskiert, wenn R mindestens 24 Zeichen hat, einen ASCII-Buchstaben enthält und entweder eine ASCII-Ziffer enthält oder direkt nach R (vor jedem `=`) eine Unicode-Dezimalziffer (Nd) steht, etwa U+0661; `ts_common.py` maskiert schon so (`RX_OPAQUE`), Go übernimmt die Regel | Kriterium des Nutzers „maskiert mehr“ (Pythons Regel); Spezifikation A9, ersetzt A4 | 2026-10-03 |
+
+Bekannte Folgen und Grenzen:
+
+| Thema | Folge | Entschieden von / Status | Stand |
+|---|---|---|---|
+| Präpositionen der Go-Grammatik (A5) | Auch Prosa wird `<address>`: „Im Jahr 2024 wurde“, „Am Montag 12 Uhr“, „Im PR 41 gefixt“. Gemessen (Paket P1, Python-Mischkorpus): Adress-Treffer 2.670 → 3.187, davon 403 der +519 aus diesem Zweig | Entscheidung des Nutzers (zweite Auswahlfrage): Vereinigung bleibt samt Präpositionen | 2026-10-02 |
+| Türkisches i (A6) | Text mit U+0130 oder U+0131 nimmt in Go den langsamen Weg (Budget 900+20p ns/Byte); Ergebnis gleich | bekannte Kosten, nicht geändert | 2026-10-02 |
+| Namensdatei lesen (A7) | Python und Go lesen verschieden: Zeilen mit mehreren Leerzeichen, U+001C..U+001F als Trenner, Datei nicht UTF-8 (Python verwirft sie, Go liest Latin-1) | bekannte Grenze; die Namensliste der Testfälle meidet alle drei | 2026-10-02 |
+| NFC-Vereinigung, Zähler und Reste | Verbindet eine Spanne der NFC-Sicht zwei Treffer im Text, zählt das 1 (vorher 2). Setzt NFC ein Zeichen am Ende mit einer folgenden Marke zusammen (n + U+0301 wird U+0144), findet die Sicht dort nichts: es bleibt beim Treffer im Text, die Marke bleibt stehen. Im Goldkorpus ändern sich nur vier Fälle `g/email*/mark_after` (Marke jetzt mitmaskiert), kein Zähler | gemessen am Goldkorpus | 2026-10-02 |
+
+Überholte Regeltexte (stehen hier, statt gelöscht zu werden):
+
+| Regel | Alter Text | Überholt am | Grund |
+|---|---|---|---|
+| Namen | „ist der Text nicht schon NFC und endet ein Treffer in einem NFC-Segment, wird das ganze Segment ersetzt (…); Text in NFC wird direkt verglichen, ohne Verbreiterung“ | 2026-10-02 | Spezifikation A8: Das Ergebnis für dieselbe Stelle hing vom Rest des Texts ab („Max“ + U+0B3E blieb in NFC-Text `<name>` + U+0B3E, wurde aber `<name>`, sobald irgendwo sonst etwas nicht NFC war). Jetzt verbreitert nur ein Segment, das NFC verändert |
+| E-Mail, IBAN, Token | „unverändert (gemessen gleich in beiden Sprachen)“ | 2026-10-02 | Entscheidung des Nutzers „Union“ (Auswahlfrage in der Lead-Sitzung, 2026-10-02): E-Mail-Adressen mit zerlegten Umlauten (NFD) blieben ganz oder teilweise stehen; die NFC-Vereinigung behebt das, ohne irgendwo weniger zu maskieren. Für IBAN, AWS-Schlüssel-IDs und bekannte Token-Präfixe gilt der Text weiter; Token (opaque) hat seit Spezifikation A9 eine eigene Zeile (Eintrag vom 2026-10-03 unten) |
+| Adresse | „Vereinigung der Python- und der Go-Grammatik, erst Straße, dann PLZ + Ort; frühester Start, dort längster Treffer, Unicode-Wortgrenzen an beiden Enden; `im <Wort>` nach dem Ort wird mitmaskiert“ (nur im Text gesucht) | 2026-10-02 | Entscheidung des Nutzers „Union“ (wie oben): Straßen- und Ortsnamen in NFD wurden nur bis vor die erste Marke oder gar nicht maskiert; der Text gilt weiter, ergänzt um die NFC-Vereinigung je Durchgang |
+| Token vor Nicht-ASCII-Ziffer (A4), Tabelle „Bekannte Folgen und Grenzen“ | „≥ 24 Token-Zeichen ohne ASCII-Ziffer direkt vor einer anderen Dezimalziffer (z. B. „١“): Python maskiert (`RX_OPAQUE` prüft Unicode-`\d`), Go nicht; Ziel ist Gos Verhalten“; Status: „bekannte Abweichung, `RX_OPAQUE` bleibt, bis der Branch `done-check-timeout` gemergt ist; nicht im Golden-Korpus“ (Stand 2026-10-02) | 2026-10-03 | Spezifikation A9: Die Annahme von A4, der Branch `done-check-timeout` verhalte sich wie Go, ist widerlegt; masters lineares `RX_OPAQUE` (63673d7/9a30e8d) bildet den alten Regex samt dieser Folge nach. Auch die Begründung „Maskieren zerschneidet ein Unicode-Wort“ trägt nicht, kein Opaque-Schritt achtet sonst auf Wortgrenzen. Nach dem Kriterium „maskiert mehr“ ist Pythons Regel das Ziel; Go übernimmt sie (Paket G6), der Golden-Korpus enthält solche Folgen (Fragmente `a9_*`) |
+| E-Mail, IBAN, Token | „unverändert (gemessen gleich in beiden Sprachen)“ (Stand 2026-10-02) | 2026-10-03 | Für Token galt das nicht (die Folge aus A4); Token hat nach Spezifikation A9 eine eigene Zeile |
+
+Geprüft durch:
+
+| Datei | Inhalt | Geprüft von |
+|---|---|---|
+| `tests/mask-parity-cases.json` | benannte Fälle mit Notiz | Python `tests/test_mask_parity.py`, Go `TestMaskParity` |
+| `tests/mask-golden.json` | Goldkorpus (Spezifikation Abschnitt 8): Texte mit genauer Ausgabe und allen 7 Zählern, mehrsprachig; Kopf mit Fallzahl, Namensliste und Ausschlüssen; erzeugt von `tests/gen_mask_golden.py` (fester Seed) | Python `tests/test_mask_golden.py`, Go (Kopie in imprint-core) |
+| `tests/test_mask_unicode.py` | Adressen gegen eine Brute-Force-Referenz der Vereinigung, E-Mail und Adressen gegen eine einfache Referenz der NFC-Vereinigung (Gold- und Parity-Texte, Zufallstexte mit NFD), Laufzeit großer NFD-Texte, NFC-Segmente gegen eine einfache Referenz, Quick-Check-Tabelle gegen `unicodedata`; Eigenschaftstest zu A8: die Maskierung eines Texts T ist allein, vor einem NFC-Rest und vor einem Rest, der nicht NFC ist, dieselbe | Python |
+| `tests/test_mask_email.py` | `RX_EMAIL` (masters linearer Matcher) und der E-Mail-Schritt gegen den alten Regex, der nur im Test kompiliert wird: Spannen und `RX_EMAIL.subn` auf jedem Text, `_mask_emails` (Ersetzung und Zähler) auf Text in NFC; Laufzeit linear | Python |
+
 Vor dem Senden an TypeSafe maskiert `ts_common.mask_detail` den Text lokal; `ts_common.post`
 maskiert zusätzlich jeden String-Wert von `state` und `questions` und folgt keinen Redirects.
 Das ist ein Musterfilter, keine Garantie. Die Tests in `tests/` belegen diese Fälle:

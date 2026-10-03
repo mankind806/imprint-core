@@ -2,12 +2,14 @@
 
 The API key is never printed, logged or written anywhere.
 """
+import bisect
 import collections
 import json
 import math
 import os
 import re
 import subprocess
+import unicodedata
 import urllib.error
 import urllib.request
 
@@ -162,30 +164,334 @@ def post(state, questions, timeout=TIMEOUT, key=None, detail=None):
 # data goes to TypeSafe). Pattern filter, not a proof: unusual secrets and names slip through.
 DEFAULT_CATEGORIES = ("secret_kw", "email", "address", "name", "opaque", "iban", "phone")
 
-_STREET_SUFFIXES = r"(?:stra[ßs]e|str\b\.?|weg|gasse|platz|allee|ring|damm|ufer|chaussee|zeile|stieg|gässchen|pfad|markt)"
-# The range end is capped at 4 digits so a following 5-digit postcode is never read as a
-# range end (its PLZ+Ort then gets its own match).
-_PAT_STREET = (
-    r"\b(?:"
-    r"(?:[A-ZÄÖÜ][a-zäöüß]+(?:\s+|-))*"
-    r"(?:[A-ZÄÖÜ][a-zäöüß]+)?(?i:" + _STREET_SUFFIXES + r")"
-    r"|"
-    r"[a-zäöüß]+(?i:" + _STREET_SUFFIXES + r")"
-    r")"
-    r"\s+\d+(?:\s*[a-zA-Z])?(?:\s*[-/]\s*\d{1,4}(?:\s*[a-zA-Z])?)?\b"
-)
-_PAT_PLZ = (
-    r"\b\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+(?:[-/][A-ZÄÖÜ][a-zäöüß]+)*(?:\s+(?:(?:am|an\s+der|im)\s+)?[A-ZÄÖÜ][a-zäöüß]+)?\b"
-)
-RX_ADDRESS = re.compile(rf"{_PAT_STREET}|{_PAT_PLZ}")
-RX_BEARER = re.compile(r"(?i)(\b(?:bearer|basic)\s+)\S+")
+# Mask rules aligned with the Go port (imprint-core MaskDetail), user decisions 2026-10-02;
+# the canonical description is the table in README.md "Datenschutz & Maskierung".
+# Character classes are Python's on str everywhere: \w, \s, \d and (?i) as re defines them.
+
+# --- Addresses: UNION of the Python and the Go grammar, leftmost-longest ------------------
+# A candidate (i, j) is valid if text[i:j] is in the union language (full match) and a
+# Unicode word boundary (Python \b) holds at i and at j. The smallest i with a valid j
+# wins, at that i the largest j; scanning continues at j. The street pass runs over the
+# whole text, then the postcode pass over its result, each as an NFC union (_nfc_union:
+# also on the NFC view of text that is not NFC). Classes stay literal as written.
+_SUF_PY = (r"stra[ßs]e|strasse|str\.?|weg|gasse|platz|allee|ring|damm|ufer|chaussee|zeile"
+           r"|stieg|gässchen|pfad|markt")
+_SUF_GO = (r"straße|strasse|str\.|str|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile"
+           r"|pfad|steig|gäßchen|gaesschen")
+_WGO = r"[a-zäöüßA-ZÄÖÜ0-9.-]"
+# Each street grammar is PREFIX \s+ NUMBER. No prefix contains \s followed by \d or ends
+# in \s, so the house number always starts at the first "\s+\d" after the start (the
+# anchor): every anchor only has to look back to the previous anchor, which keeps the
+# search linear. The range end is capped at 4 digits so a following 5-digit postcode
+# is never read as a range end (the postcode pass then matches it on its own).
+_STREET_PREFIX_PY = (r"(?:[A-ZÄÖÜ][a-zäöüß]+(?:\s+|-))*(?:[A-ZÄÖÜ][a-zäöüß]+)?(?i:" + _SUF_PY + r")"
+                     r"|[a-zäöüß]+(?i:" + _SUF_PY + r")")
+_STREET_NUMBER_PY = r"\d+(?:\s*[a-zA-Z])?(?:\s*[-/]\s*\d{1,4}(?:\s*[a-zA-Z])?)?"
+_STREET_PREFIX_GO = (r"(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)"
+                     r"\s+[A-ZÄÖÜ]" + _WGO + r"+(?:\s+[A-ZÄÖÜ]" + _WGO + r"+)*"
+                     r"|(?:[A-ZÄÖÜ]" + _WGO + r"+\s+)*(?:Straße|Strasse|Str\.|Str|[A-ZÄÖÜ]" + _WGO
+                     + r"*(?i:" + _SUF_GO + r"))")
+_STREET_NUMBER_GO = r"\d+[a-zA-Z]?(?:\s*[-/]\s*\d{1,4}[a-zA-Z]?)?"
+_PLZ_PY = (r"\d{5}\s+[A-ZÄÖÜ][a-zäöüß]+(?:[-/][A-ZÄÖÜ][a-zäöüß]+)*"
+           r"(?:\s+(?:(?:am|an\s+der|im)\s+)?[A-ZÄÖÜ][a-zäöüß]+)?")
+_PLZ_GO = (r"\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+"
+           r"(?:\s+(?:(?:am|an der)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+|im Breisgau|ob der Tauber))?")
+_RX_ANCHOR = re.compile(r"(?<!\s)\s+(?=\d)")
+_RX_PLZ_START = re.compile(r"(?<!\w)(?=\d{5}\s)")
+
+
+def _is_word(c):
+    """Python's \\w on one character of a str."""
+    return c == "_" or c.isalnum()
+
+
+def _word_boundary(text, p):
+    """Python's \\b at position p (outside the text counts as non-word)."""
+    return (p > 0 and _is_word(text[p - 1])) != (p < len(text) and _is_word(text[p]))
+
+
+_ATOMS = {}
+
+
+def _atom(src, ci):
+    """Membership test for one character class, compiled by re itself (Python semantics)."""
+    key = (src, ci)
+    if key not in _ATOMS:
+        _ATOMS[key] = re.compile(("(?i:%s)" if ci else "(?:%s)") % src).fullmatch
+    return _ATOMS[key]
+
+
+def _parse_grammar(pattern):
+    """Tree of the regex subset the address grammars use: ("atom", test), ("seq", [..]),
+    ("alt", [..]), ("rep", node, min, max or None). Groups (?:...) and (?i:...), classes,
+    \\s \\d \\. and literals; anything else is refused."""
+    pos = 0
+
+    def alt(ci):
+        nonlocal pos
+        branches = [seq(ci)]
+        while pos < len(pattern) and pattern[pos] == "|":
+            pos += 1
+            branches.append(seq(ci))
+        return branches[0] if len(branches) == 1 else ("alt", branches)
+
+    def seq(ci):
+        nonlocal pos
+        items = []
+        while pos < len(pattern) and pattern[pos] not in "|)":
+            items.append(quant(atom(ci)))
+        return ("seq", items)
+
+    def atom(ci):
+        nonlocal pos
+        c = pattern[pos]
+        if c == "(":
+            for opener, flag in (("(?:", ci), ("(?i:", True)):
+                if pattern.startswith(opener, pos):
+                    pos += len(opener)
+                    node = alt(flag)
+                    if pattern[pos:pos + 1] != ")":
+                        raise ValueError("unbalanced group in address grammar")
+                    pos += 1
+                    return node
+            raise ValueError("unsupported group in address grammar")
+        if c == "[":
+            end = pattern.index("]", pos + 2)
+            src, pos = pattern[pos:end + 1], end + 1
+        elif c == "\\":
+            src, pos = pattern[pos:pos + 2], pos + 2
+            if src not in (r"\s", r"\d", r"\."):
+                raise ValueError("unsupported escape in address grammar")
+        elif c in ".^$*+?{}":
+            raise ValueError("unsupported token in address grammar")
+        else:
+            src, pos = re.escape(c), pos + 1
+        return ("atom", _atom(src, ci))
+
+    def quant(node):
+        nonlocal pos
+        c = pattern[pos:pos + 1]
+        if c in ("*", "+", "?"):
+            pos += 1
+            node = ("rep", node, 1 if c == "+" else 0, 1 if c == "?" else None)
+        elif c == "{":
+            end = pattern.index("}", pos)
+            lo, _, hi = pattern[pos + 1:end].partition(",")
+            pos = end + 1
+            node = ("rep", node, int(lo), int(hi) if hi else int(lo))
+        if pattern[pos:pos + 1] in ("*", "+", "?", "{"):
+            raise ValueError("stacked quantifier in address grammar")
+        return node
+
+    tree = alt(False)
+    if pos != len(pattern):
+        raise ValueError("trailing text in address grammar")
+    return tree
+
+
+def _reverse_grammar(node):
+    """Tree of the reversed language (for the backward scan from the anchor)."""
+    if node[0] == "seq":
+        return ("seq", [_reverse_grammar(n) for n in reversed(node[1])])
+    if node[0] == "alt":
+        return ("alt", [_reverse_grammar(n) for n in node[1]])
+    if node[0] == "rep":
+        return ("rep", _reverse_grammar(node[1]), node[2], node[3])
+    return node
+
+
+class _Automaton:
+    """Thompson NFA over tagged grammars, run as a lazily built DFA. scan_* report every
+    position where some grammar accepts, with the tags of the accepting grammars."""
+
+    _CACHE_LIMIT = 1 << 16  # transitions per automaton; cleared when full
+
+    def __init__(self, branches):
+        self.kind, self.arg, self.out = [], [], []
+        starts = [self._build(tree, self._new("acc", tag, None)) for tree, tag in branches]
+        self.sets, self.index, self.tags, self.moves, self.trans = [], {}, [], [], {}
+        self.start = self._dstate(self._closure(starts))
+
+    def _new(self, kind, arg, out):
+        self.kind.append(kind)
+        self.arg.append(arg)
+        self.out.append(out)
+        return len(self.kind) - 1
+
+    def _build(self, node, nxt):
+        kind = node[0]
+        if kind == "atom":
+            return self._new("atom", node[1], nxt)
+        if kind == "seq":
+            for child in reversed(node[1]):
+                nxt = self._build(child, nxt)
+            return nxt
+        if kind == "alt":
+            return self._new("split", None, [self._build(child, nxt) for child in node[1]])
+        _, child, lo, hi = node
+        if hi is None:  # child{lo,}: lo copies, then a loop
+            loop = self._new("split", None, None)
+            self.out[loop] = [self._build(child, loop), nxt]
+            tail = loop
+        else:  # child{lo,hi}: lo copies, then hi-lo nested optional copies
+            tail = nxt
+            for _ in range(hi - lo):
+                tail = self._new("split", None, [self._build(child, tail), nxt])
+        for _ in range(lo):
+            tail = self._build(child, tail)
+        return tail
+
+    def _closure(self, ids):
+        seen, stack, res = set(), list(ids), []
+        while stack:
+            s = stack.pop()
+            if s in seen:
+                continue
+            seen.add(s)
+            if self.kind[s] == "split":
+                stack.extend(self.out[s])
+            else:
+                res.append(s)
+        return frozenset(res)
+
+    def _dstate(self, states):
+        if not states:
+            return -1
+        d = self.index.get(states)
+        if d is None:
+            d = self.index[states] = len(self.sets)
+            self.sets.append(states)
+            self.tags.append(frozenset(self.arg[s] for s in states if self.kind[s] == "acc"))
+            moves = {}
+            for s in states:
+                if self.kind[s] == "atom":
+                    moves.setdefault(self.arg[s], []).append(self.out[s])
+            self.moves.append(list(moves.items()))
+        return d
+
+    def step(self, d, c):
+        key = (d, c)
+        nd = self.trans.get(key)
+        if nd is None:
+            nd = self._dstate(self._closure([t for test, outs in self.moves[d] if test(c) for t in outs]))
+            if len(self.trans) >= self._CACHE_LIMIT:
+                self.trans.clear()
+            self.trans[key] = nd
+        return nd
+
+    def scan_forward(self, text, i):
+        """[(j, tags)] for every j > i where text[i:j] is accepted, j increasing."""
+        d, res, step, tags = self.start, [], self.step, self.tags
+        for k in range(i, len(text)):
+            d = step(d, text[k])
+            if d < 0:
+                break
+            if tags[d]:
+                res.append((k + 1, tags[d]))
+        return res
+
+    def scan_backward(self, text, r, lo):
+        """[(i, tags)] for every lo <= i < r where text[i:r] is accepted by the reversed
+        automaton, i decreasing."""
+        d, res, step, tags = self.start, [], self.step, self.tags
+        for k in range(r - 1, lo - 1, -1):
+            d = step(d, text[k])
+            if d < 0:
+                break
+            if tags[d]:
+                res.append((k, tags[d]))
+        return res
+
+
+_ADDRESS_AUTOMATA = []  # built on first use: importing ts_common stays cheap
+
+
+def _address_automata():
+    if not _ADDRESS_AUTOMATA:
+        g = _parse_grammar
+        _ADDRESS_AUTOMATA.extend((
+            _Automaton([(_reverse_grammar(g(_STREET_PREFIX_PY)), "py"),
+                        (_reverse_grammar(g(_STREET_PREFIX_GO)), "go")]),
+            _Automaton([(g(_STREET_NUMBER_PY), "py"), (g(_STREET_NUMBER_GO), "go")]),
+            _Automaton([(g(_PLZ_PY), "py"), (g(_PLZ_GO), "go")]),
+        ))
+    return _ADDRESS_AUTOMATA
+
+
+def _street_spans(text):
+    """[(start, end), ...] of the street pass on text, ascending and non-overlapping."""
+    prefix, number, _ = _address_automata()
+    spans, pos, h_prev = [], 0, -1
+    for m in _RX_ANCHOR.finditer(text):
+        r, h = m.span()  # whitespace run text[r:h], house number from h
+        lo = max(pos, h_prev + 1)  # a start never lies before the previous anchor
+        h_prev = h
+        if r <= lo:
+            continue
+        starts = [(i, tags) for i, tags in prefix.scan_backward(text, r, lo)
+                  if i == 0 or not _is_word(text[i - 1])]
+        if not starts:
+            continue
+        ends = {}
+        for j, tags in number.scan_forward(text, h):
+            if _word_boundary(text, j):
+                ends.update(dict.fromkeys(tags, j))  # j increasing: the largest stays
+        for i, tags in reversed(starts):  # smallest start first
+            js = [ends[t] for t in tags if t in ends]
+            if js:
+                pos = max(js)
+                spans.append((i, pos))
+                break
+    return spans
+
+
+def _postcode_spans(text):
+    """[(start, end), ...] of the postcode pass on text, ascending and non-overlapping."""
+    plz = _address_automata()[2]
+    spans, pos = [], 0
+    for m in _RX_PLZ_START.finditer(text):
+        i = m.start()
+        if i < pos:
+            continue
+        ends = [j for j, _ in plz.scan_forward(text, i) if _word_boundary(text, j)]
+        if ends:
+            pos = ends[-1]
+            spans.append((i, pos))
+    return spans
+
+
+def _mask_addresses(text, repl="<address>"):
+    """Street pass, then postcode pass over its result, each an NFC union (_nfc_union);
+    (text, merged spans of both passes)."""
+    text, n1 = _nfc_union(text, _street_spans, repl)
+    text, n2 = _nfc_union(text, _postcode_spans, repl)
+    return text, n1 + n2
+
+
+class _Step:
+    """A masking step with the re.subn interface, for steps that are not one regex."""
+
+    def __init__(self, fn):
+        self.fn = fn
+
+    def subn(self, repl, text):
+        return self.fn(text, repl)
+
+
+# Bearer/Basic: the trigger must not follow an ASCII word character (exactly ASCII, so
+# the class sits outside (?i), where it would fold ſ, K, ı and İ in); separator \s+; the
+# value runs to the next ASCII whitespace and takes quotes, commas and U+00A0 along.
+RX_BEARER = re.compile(r"(?i)((?-i:(?<![A-Za-z0-9_]))(?:bearer|basic)\s+)[^\t\n\f\r ]+")
 _MASK_KW = (r"(?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential"
             r"|private[_-]?key|access[_-]?key|auth(?:orization)?)")
 # A quoted value is masked as a whole, whitespace included; an unquoted one up to the
-# next whitespace/quote/comma/semicolon.
+# next ASCII whitespace/quote/comma/semicolon (it crosses U+00A0 and other Unicode spaces).
+# A value that already is the placeholder is skipped case-sensitively (spec A3): only
+# the exact "<redacted>"; "token=<REDACTED>" is masked.
 RX_KEY_VAL = re.compile(
     r"(?i)(" + _MASK_KW + r"[\w.-]*[\"']?\s*[=:]\s*)"
-    r"(?:(?P<dq>\")(?!<redacted>\")[^\"\n]+\"|(?P<sq>')(?!<redacted>')[^'\n]+'|[\"']?(?!<redacted>)[^\s\"',;]+)"
+    r"(?:(?P<dq>\")(?-i:(?!<redacted>\"))[^\"\n]+\"|(?P<sq>')(?-i:(?!<redacted>'))[^'\n]+'"
+    r"|[\"']?(?-i:(?!<redacted>))[^\t\n\f\r \"',;]+)"
 )
 
 
@@ -194,19 +500,54 @@ def _key_val_repl(m):
     return m.group(1) + q + "<redacted>" + q
 
 
+# RX_KEY_VAL.subn is quadratic on a long run of [\w.-] with keywords in it and no match
+# after the run: re tries every keyword start in the run, and each try runs the greedy
+# [\w.-]* to the run's end and fails there. Measured 2026-10-03 (Python 3.14.6):
+# "token" x 20000 (100k chars), with or without "=<redacted>" after it, took 88 s.
+# _mask_key_vals finds the same matches in linear time; RX_KEY_VAL stays the rule.
+# What a keyword start s decides lies at the end e of the run of (?i)[\w.-] from s:
+# every keyword alternative and its [\w.-]* end at e (all keyword letters, U+0130,
+# U+0131, U+017F and U+212A included, are in the class), [\w.-]* never gives a
+# character back (no code point of (?i)[\w.-] can start ["']?\s*[=:]; both checked
+# over all code points, 2026-10-03), and the rest of the pattern looks only forward
+# from e. So all keyword starts in one run match or fail alike: the first one is the
+# leftmost match start, and a run that fails is skipped whole.
+_KV_KEYWORD = re.compile(r"(?i)" + _MASK_KW)
+_KV_RUN = re.compile(r"(?i)[\w.-]*")
+
+
+def _mask_key_vals(text, repl):
+    """RX_KEY_VAL.subn(repl, text) for a callable repl, in linear time."""
+    out, count, last, pos = [], 0, 0, 0
+    while True:
+        k = _KV_KEYWORD.search(text, pos)
+        if k is None:
+            break
+        m = RX_KEY_VAL.match(text, k.start())
+        if m is None:
+            pos = _KV_RUN.match(text, k.start()).end()
+            continue
+        out += (text[last:m.start()], repl(m))
+        count += 1
+        last = pos = m.end()
+    out.append(text[last:])
+    return "".join(out), count
+
+
 # [\w.+-]+@ is quadratic in practice for the same reason RX_OPAQUE's lookaheads
 # were: re retries the greedy local-part scan from every position in a long run
 # of the charset with no '@' reachable from there. Confirmed empirically
 # (2026-10-02): 50k such characters took 5.5s (letters) to 10.7s (hex) to mask.
 # _LinearEmailMatcher below is a drop-in replacement supporting every way this
-# module uses RX_EMAIL -- .subn(str, text) (mask_detail), .sub(callable, text)
-# (alarm_view, which needs a real-enough match object for m.group(0)), and
-# .search(text) (local_alarm) -- finding the same matches in linear time: '@'
-# is never itself part of any surrounding character class, so once anchored on
-# a real '@' there is no backtracking ambiguity in what can match around it
-# (the local part before it, the domain and TLD after it are each a single
-# greedy run with a required literal in between, checked once per '@', not
-# once per starting position).
+# module uses RX_EMAIL -- ._spans(text) (mask_detail, through _email_spans and
+# the NFC union _mask_emails below), .sub(callable, text) (alarm_view, which
+# needs a real-enough match object for m.group(0)), and .search(text)
+# (local_alarm), plus .subn(repl, text) -- finding the same matches in linear
+# time: '@' is never itself part of any surrounding character class, so once
+# anchored on a real '@' there is no backtracking ambiguity in what can match
+# around it (the local part before it, the domain and TLD after it are each a
+# single greedy run with a required literal in between, checked once per '@',
+# not once per starting position).
 _EMAIL_LOCAL_CHAR = re.compile(r"[\w.+-]")
 _EMAIL_DOMAIN_CHAR = re.compile(r"[\w-]")
 _EMAIL_TLD_CHAR = re.compile(r"[\w.-]")
@@ -288,6 +629,22 @@ class _LinearEmailMatcher:
 
 
 RX_EMAIL = _LinearEmailMatcher()
+
+
+def _email_spans(text):
+    """[(start, end), ...] of the email pass on text, ascending and non-overlapping:
+    the RX_EMAIL matches (_LinearEmailMatcher._spans, linear)."""
+    return RX_EMAIL._spans(text)
+
+
+def _mask_emails(text, repl):
+    """(text, n): the RX_EMAIL matches as an NFC union (_nfc_union), each merged span
+    replaced by repl (inserted literally, not as a backreference template: fine here
+    since repl is always a plain string like "<email>"). On NFC text this is exactly
+    RX_EMAIL.subn."""
+    return _nfc_union(text, _email_spans, repl)
+
+
 RX_IBAN = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Za-z0-9])")
 # German numbers: +49 or a leading 0, then at least 8 more digits, separators allowed.
 RX_PHONE = re.compile(r"(?<![\w+.])(?:\+49|0)(?:[ \t./()-]*\d){8,}(?!\d)")
@@ -362,30 +719,171 @@ def load_names(filepath=None):
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             for raw_line in f:
-                line = raw_line.split("#")[0].strip()
+                # NFC first, then the length filter (spec A2): a term needs at least two
+                # code points in NFC, so a lone "O" + U+0308 (one letter) is no name.
+                line = unicodedata.normalize("NFC", raw_line.split("#")[0].strip())
                 if len(line) >= 2:
                     terms.add(line)
                     for part in line.split():
-                        part = part.strip()
                         if len(part) >= 2:
                             terms.add(part)
     except Exception:
         return []
-    return sorted(terms, key=lambda s: (len(s), s), reverse=True)
+    return sorted(terms, key=lambda s: (len(s), s), reverse=True)  # longest first
+
+
+_RX_NON_ASCII_RUN = re.compile(r"[^\x00-\x7f]+")
+
+# Characters with canonical combining class 0 and NFC_Quick_Check=Maybe in Unicode
+# 16.0.0: they compose with the character before them (second character of a primary
+# composite: Bengali/Oriya/Tamil/... vowel signs, Hangul vowels and trailing
+# consonants) or decompose to one that does (Unicode 16 vowel signs of Tulu-Tigalari,
+# Gurung Khema and Kirat Rai). unicodedata has no quick check accessor;
+# tests/test_mask_unicode.py derives this set from unicodedata and compares, and it
+# equals the Maybe set of imprint-core's gen_nfc_tables.py for class 0.
+_NFC_QC_MAYBE_STARTERS = frozenset(map(chr, (
+    0x09BE, 0x09D7, 0x0B3E, 0x0B56, 0x0B57, 0x0BBE, 0x0BD7, 0x0CC2, 0x0CD5, 0x0CD6,
+    0x0D3E, 0x0D57, 0x0DCF, 0x0DDF, 0x102E,
+    *range(0x1161, 0x1176),  # Hangul vowels
+    *range(0x11A8, 0x11C3),  # Hangul trailing consonants
+    0x1B35, 0x11127, 0x1133E, 0x11357, 0x113B8, 0x113BB, 0x113C2, 0x113C5, 0x113C7,
+    0x113C8, 0x113C9, 0x114B0, 0x114BA, 0x114BD, 0x115AF, 0x11930,
+    *range(0x1611E, 0x1612A), 0x16D67, 0x16D68,
+)))
+
+
+def _nfc_boundary(c):
+    """True if a new NFC segment starts before c (spec A1): combining class 0 and
+    NFC_Quick_Check Yes, the "boundary before" of ICU and of Go's nfcBoundary. For a
+    class-0 character, quick check No is exactly NFC(c) != c."""
+    return (unicodedata.combining(c) == 0 and c not in _NFC_QC_MAYBE_STARTERS
+            and unicodedata.normalize("NFC", c) == c)
+
+
+def _nfc_view(text):
+    """NFC copy of text and a map back to the original, segment by segment.
+
+    A segment starts at the first character and before every boundary character
+    (_nfc_boundary: combining class 0 and NFC_Quick_Check Yes). Nothing before a
+    boundary reorders or composes with it or anything after it, so the copy equals
+    NFC(text), and finding the segments takes one test per character (linear). Every
+    ASCII character is a boundary, so only runs of non-ASCII characters and the ASCII
+    character before them are examined.
+    Returns (copy, starts, blocks): blocks[k] = (copy_start, orig_start, orig_end,
+    identity) in copy order, starts[k] = copy_start. A block is one segment, or a
+    stretch of ASCII characters between runs (each one a segment). An identity block
+    is text that NFC leaves unchanged: copy offsets map one-to-one to original offsets
+    (spec A8, also for a segment of several characters such as "x" + U+0301)."""
+    norm, boundary = unicodedata.normalize, _nfc_boundary
+    parts, blocks, cpos, opos = [], [], 0, 0
+
+    def identity(a, b):
+        nonlocal cpos
+        if a < b:
+            parts.append(text[a:b])
+            blocks.append((cpos, a, b, True))
+            cpos += b - a
+
+    for m in _RX_NON_ASCII_RUN.finditer(text):
+        a, b = m.span()
+        area = a - 1 if a > 0 else a  # the ASCII character before the run may take marks
+        identity(opos, area)
+        seg_starts = [area] + [k for k in range(max(a, 1), b) if boundary(text[k])] + [b]
+        for s, e in zip(seg_starts, seg_starts[1:]):
+            piece = norm("NFC", text[s:e])
+            if piece == text[s:e]:  # spec A8: an unchanged segment maps one-to-one
+                identity(s, e)
+            else:
+                parts.append(piece)
+                blocks.append((cpos, s, e, False))
+                cpos += len(piece)
+        opos = b
+    identity(opos, len(text))
+    return "".join(parts), [blk[0] for blk in blocks], blocks
+
+
+def _orig_span(starts, blocks, s, e):
+    """The span of the original text behind the non-empty span [s, e) of an _nfc_view
+    copy (spec A8): in an identity block offsets map one-to-one; inside a segment that
+    NFC changes, the start widens to the segment start and the end (taken through the
+    last character, e - 1) to the segment end."""
+    cs, os_, oe, ident = blocks[bisect.bisect_right(starts, s) - 1]
+    a = os_ + (s - cs) if ident else os_
+    cs, os_, oe, ident = blocks[bisect.bisect_right(starts, e - 1) - 1]
+    b = os_ + (e - cs) if ident else oe
+    return a, b
+
+
+def _merge_spans(spans):
+    """spans sorted by start (ties in any order), merged left to right: a span that
+    starts before the current end (strictly) extends it, any other one starts a new
+    span; adjacent spans (start == current end) stay separate."""
+    merged = []
+    for a, b in sorted(spans, key=lambda span: span[0]):
+        if merged and a < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged
+
+
+def _splice(text, spans, repl):
+    """text with each span (ascending, non-overlapping) replaced by repl, inserted
+    literally; everything else is copied unchanged."""
+    out, last = [], 0
+    for a, b in spans:
+        out += (text[last:a], repl)
+        last = b
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _nfc_union(text, find, repl):
+    """One masking pass as an NFC union (user decision "Union", 2026-10-02; README
+    "Datenschutz & Maskierung"); find(text) gives the pass's spans, ascending and
+    non-overlapping. Text in NFC: exactly find(text). Otherwise also find on a fresh
+    _nfc_view copy of text (same scanner, its boundary rules evaluated on the copy),
+    each span mapped back with _orig_span; the union of both lists is merged with
+    _merge_spans and every merged span is replaced by repl. Returns (text, number of
+    merged spans). Linear in len(text) apart from sorting the spans: find is linear, and
+    so are the view and the mapping (one bisect per span)."""
+    spans = find(text)
+    if not unicodedata.is_normalized("NFC", text):
+        copy, starts, blocks = _nfc_view(text)
+        spans = _merge_spans(spans + [_orig_span(starts, blocks, s, e) for s, e in find(copy)])
+    return _splice(text, spans, repl), len(spans)
+
+
+def _mask_names(rx, text, repl):
+    """Names on the NFC view of text (spec section 5, A8): a match edge inside a segment
+    that NFC changes widens to the segment edge; inside a segment that NFC leaves
+    unchanged it maps one-to-one, nothing widens (_orig_span). Overlapping widened spans
+    merge into one replacement (_merge_spans), every match counts, and text outside the
+    spans stays unchanged. Unlike _nfc_union, only the copy is searched.
+    The result for a span depends only on its own segments, not on the rest of the text.
+    Text that is already NFC consists of unchanged segments only, so the fast path
+    below gives exactly what the segment path would (spec A8)."""
+    if unicodedata.is_normalized("NFC", text):
+        return rx.subn(repl, text)
+    copy, starts, blocks = _nfc_view(text)
+    # Matches on the copy are ascending and _orig_span is monotone, so the stable sort
+    # in _merge_spans keeps match order: the same merge as before the helpers existed.
+    spans = [_orig_span(starts, blocks, *m.span()) for m in rx.finditer(copy)]
+    return _splice(text, _merge_spans(spans), repl), len(spans)
 
 
 def _update_mask_res(name_rx=None):
     global MASK_RES
     base = [
         ("secret_kw", RX_BEARER, r"\1<redacted>"),
-        ("secret_kw", RX_KEY_VAL, _key_val_repl),
-        ("email", RX_EMAIL, "<email>"),
+        ("secret_kw", _Step(_mask_key_vals), _key_val_repl),
+        ("email", _Step(_mask_emails), "<email>"),
         ("iban", RX_IBAN, "<iban>"),
         ("phone", RX_PHONE, "<phone>"),
-        ("address", RX_ADDRESS, "<address>"),
+        ("address", _Step(_mask_addresses), "<address>"),
     ]
     if name_rx is not None:
-        base.append(("name", name_rx, "<name>"))
+        base.append(("name", _Step(lambda text, repl: _mask_names(name_rx, text, repl)), "<name>"))
     base.append(("opaque", RX_AWS_KEY_ID, "<redacted>"))
     base.append(("opaque", RX_KNOWN_TOKEN, "<redacted>"))
     base.append(("opaque", RX_OPAQUE, "<redacted>"))
