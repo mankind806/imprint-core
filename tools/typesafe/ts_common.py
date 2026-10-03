@@ -637,18 +637,25 @@ def local_alarm(text):
     return any(_kv_alarm(m) for m in LOCAL_KV_RE.finditer(text))
 
 
+# Besides \n, str.splitlines() breaks a line at these; git does not. added_lines splits
+# at \n only and reads each of these as a space, so the rest of such a line - also one
+# that then starts with "diff " - stays part of the added line.
+_LINE_BREAKS = str.maketrans({c: " " for c in "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"})
+
+
 def added_lines(diff_text):
     """The added lines of a unified diff, without the leading '+'. '+++' is skipped only
     in file headers (between 'diff ...' and the first '@@'), so an added line that itself
-    starts with '++' still counts. Text without any 'diff ' header counts as one hunk."""
+    starts with '++' still counts. Text without any 'diff ' header counts as one hunk.
+    A line ends at a newline only, as git writes it; see _LINE_BREAKS."""
     out, in_hunk = [], True
-    for line in diff_text.splitlines():
+    for line in diff_text.split("\n"):
         if line.startswith("diff "):
             in_hunk = False
         elif line.startswith("@@"):
             in_hunk = True
         elif in_hunk and line.startswith("+"):
-            out.append(line[1:])
+            out.append(line[1:].translate(_LINE_BREAKS))
     return "\n".join(out)
 
 

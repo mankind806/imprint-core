@@ -15,6 +15,9 @@ Validates:
     Range mode: TypeSafe judges the net diff and the last message; the local alarm
     checks every commit of the range on its own (git rev-list), so a value added in
     one commit and removed in the next still blocks.
+    Normal mode (--msg-file or --cached, no MERGE_HEAD): the index against HEAD, read
+    as text even for a NUL byte, a -diff file or bytes that are not UTF-8 (cached_added).
+    A git error exits 1 rather than check less.
     Merge mode (--msg-file or --cached while MERGE_HEAD exists): the diff is only what
     the index adds against EVERY parent (HEAD and each MERGE_HEAD entry), i.e. conflict
     resolutions and lines an evil merge writes itself; the file names are only paths
@@ -104,9 +107,10 @@ def get_diff_and_msg(args, cwd=None):
                 return None, None, None, None, merged
             diff_text, stat_text, names = merged
             return commit_msg, diff_text, stat_text, [(commit_msg, diff_text, names)], None
-        diff_text = run_cmd(["git", "diff", "--cached"], cwd=cwd)
-        stat_text = run_cmd(["git", "diff", "--cached", "--stat"], cwd=cwd)
-        names = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=cwd)
+        read = cached_added(cwd)
+        if isinstance(read, str):
+            return None, None, None, None, read
+        diff_text, stat_text, names = read
         return commit_msg, diff_text, stat_text, [(commit_msg, diff_text, names)], None
 
     resolved = resolve_range(args.range or "HEAD~1..HEAD", cwd)
@@ -126,6 +130,21 @@ def get_diff_and_msg(args, cwd=None):
     if args.msg:  # an explicit message is checked too
         units.append((commit_msg, "", ""))
     return commit_msg, diff_text, stat_text, units, None
+
+
+def cached_added(cwd=None):
+    """(diff, stat, file names) of what the index changes against HEAD, for a
+    normal commit, or an error text. Read the way merge_added reads: as text even with
+    a NUL byte or a -diff attribute, without an external diff, textconv or colour
+    (color.ui=always would hide every '+'), and a byte that is not UTF-8 as U+FFFD.
+    The environment stays, so `git commit -a` and `git commit <path>` keep their
+    GIT_INDEX_FILE. A git error exits 1 rather than check less."""
+    diff = _git_text(["diff", "--cached", "--text", "--no-ext-diff", "--no-textconv", "--no-color"], cwd)
+    stat = _git_text(["diff", "--cached", "--stat", "--no-color"], cwd)
+    names = _git_text(["diff", "--cached", "--name-only"], cwd)
+    if diff is None or stat is None or names is None:
+        return "Diff des Index (git diff --cached) nicht lesbar"
+    return diff.rstrip("\n"), stat.rstrip("\n"), names.rstrip("\n")
 
 
 def merge_parents(cwd=None):
@@ -164,9 +183,6 @@ def _git_text(args, cwd=None):
 
 
 _HUNK_RE = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-# Besides \n, str.splitlines() - which ts_common.added_lines uses - breaks a line at
-# these; git does not, so the rest of such a line would be lost to the alarm.
-_LINE_BREAKS = str.maketrans({c: " " for c in "\r\x0b\x0c\x1c\x1d\x1e\x85  "})
 
 
 def _added_records(diff_text):
@@ -230,7 +246,7 @@ def merge_added(parents, cwd=None):
             files.append(shown)
         if last is None or last != (path, ln - 1):
             out.append(f"@@ +{ln} @@")
-        out.append("+" + content.translate(_LINE_BREAKS))
+        out.append("+" + content)
         last = (path, ln)
     names = "\n".join(sorted(new_names))
     stat = "\n".join(files + [n for n in sorted(new_names) if n not in files])

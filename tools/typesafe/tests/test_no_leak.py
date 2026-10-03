@@ -295,9 +295,10 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         subprocess.run(["git", "init", "-q", self.repo], check=True)
 
     def run_check(self, content, msg="feat: add config", path="config.py"):
+        """Stage CONTENT (str, or bytes written as they are) at PATH and run --cached."""
         full = os.path.join(self.repo, path)
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        with open(full, "w") as f:
+        with open(full, "wb" if isinstance(content, bytes) else "w") as f:
             f.write(content)
         subprocess.run(["git", "-C", self.repo, "add", path], check=True)
         return self.run_tool("ts-commit-check", "--cached", "--msg", msg)
@@ -418,6 +419,52 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         self.assertTrue(tc.leak_found("feat: x", diff, "x"))
         header_only = "diff --git a/x b/x\n--- a/x\n+++ b/" + REAL_KEY_LINE + "\n@@ -0,0 +1 @@\n+ok\n"
         self.assertFalse(tc.leak_found("feat: x", header_only, "x"))
+
+    # --- docs/commit-msg-hook.md: a diff is read as git writes it ---
+    def test_added_lines_end_at_newline_only(self):
+        head = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1,2 @@\n"
+        for c in "\r\v\f\x1c\x1d\x1e\x85  ":  # str.splitlines() breaks at each
+            with self.subTest(char=repr(c)):
+                self.assertEqual(tc.added_lines(head + "+a" + c + "b\n"), "a b")
+                self.assertTrue(tc.leak_found("feat: x", head + "+x" + c + REAL_KEY_LINE + "\n", "x"))
+                # the rest starting with "diff " must not end the hunk
+                later = head + "+x" + c + "diff y\n+" + REAL_KEY_LINE + "\n"
+                self.assertTrue(tc.leak_found("feat: x", later, "x"))
+
+    def test_cached_reads_binary_and_non_utf8_files(self):
+        key = REAL_KEY_LINE.encode()
+        with open(os.path.join(self.repo, ".gitattributes"), "w") as f:
+            f.write("*.bin -diff\n")
+        for name, path, content in (
+                ("not UTF-8", "latin1.txt", b"caf\xe9\n" + key + b"\n"),
+                ("NUL byte", "nul.dat", b"a\x00b\n" + key + b"\n"),
+                ("marked -diff", "attr.bin", key + b"\n"),
+                ("lone CR", "cr.txt", b"x\r" + key + b"\n"),
+                ("lone CR, then diff", "crdiff.txt", b"x\rdiff y\n" + key + b"\n")):
+            with self.subTest(case=name):
+                r = self.run_check(content, path=path)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("ABBRUCH", r.stdout)
+                subprocess.run(["git", "-C", self.repo, "rm", "-q", "--cached", path], check=True)
+        r = self.run_check(b"a\x00b\n\xff\xfe plain\n", path="clean.dat")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_cached_git_error_refuses(self):
+        # Before: an unreadable diff read as empty, "Diff ist leer", exit 0.
+        env = dict(self.env, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="nosection", GIT_CONFIG_VALUE_0="x")
+        r = subprocess.run([os.path.join(BIN, "ts-commit-check"), "--cached", "--msg", "feat: x",
+                            "--cwd", self.repo], capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Fehler: Diff des Index", r.stdout)
+
+    def test_range_mode_and_pr_triage_read_past_a_form_feed(self):
+        # Shared added_lines; their own git reads are unchanged (docs/commit-msg-hook.md).
+        self.commit("retries = 3\n", "chore: base")
+        self.commit("x\f" + REAL_KEY_LINE + "\n", "feat: key")
+        r = self.run_tool("ts-commit-check", "HEAD~1..HEAD")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        res = json.loads(self.run_tool("ts-pr-triage", "HEAD~1..HEAD", "--json").stdout)
+        self.assertEqual(res["leak_prob"], 1.0)
 
     def test_known_prefix_without_keyword_blocks(self):
         for line in FREE_PREFIX_LINES:
