@@ -67,6 +67,9 @@ Not enforced:
   the same line pre-push needs. It is fail-open: without `ts-commit-check` on `PATH` it
   checks nothing and exits 0.
 - **`git commit --no-verify` and `git merge --no-verify` skip it silently.**
+- **`MERGE_HEAD` is taken as it stands.** If someone writes it by hand and names an ancestor of
+  `HEAD`, git can record a commit with one parent, while the hook still reads it as a merge.
+  Only a hand edit of the git directory produces this; `--no-verify` is the shorter way past.
 - **A clean `git cherry-pick` or `git revert` does not run it**, with or without the editor
   (`-e`); a conflicted one does, when `git commit` or `--continue` concludes it (*measured
   with git 2.55.0, 2026-10-03*).
