@@ -223,6 +223,7 @@ func maskSecretKW(text string, repl func(string) string) string {
 	if strings.Contains(text, runeLongS) || strings.Contains(text, runeKelvin) || hasTurkishI(text) {
 		return secretKWRE.ReplaceAllStringFunc(text, repl)
 	}
+	var scans secretKWScans // one per call: the scans of all its candidates share it
 	return replaceFound(text, func(pos int) (int, int, bool) {
 		for i := pos; i < len(text); i++ {
 			if !secretKWFirst[text[i]] {
@@ -238,7 +239,7 @@ func maskSecretKW(text string, repl func(string) string) string {
 			if !cand || !secretKWHead.MatchString(text[i:min(len(text), i+16)]) {
 				continue
 			}
-			if e, ok := secretKWAt.matchAt(text, i, secretKWWindow(text, i)-i); ok {
+			if e, ok := secretKWAt.matchAt(text, i, secretKWWindow(text, i, &scans)-i); ok {
 				return i, e, true
 			}
 			// The keyword matched but nothing after it did: whatever follows
@@ -259,9 +260,23 @@ func maskSecretKW(text string, repl func(string) string) string {
 // ASCII). A value after fewer of the S runes (Python's backtracking, which
 // the pattern keeps) ends no later. The pattern looks at nothing past its
 // end, so the window loses nothing, and it is usually small enough for
-// regexp's backtracker. Each scan covers text that belongs to this candidate
-// only (see maskSecretKW), so the scans add up to linear time.
-func secretKWWindow(text string, i int) int {
+// regexp's backtracker.
+//
+// The two value scans go through scans, which remembers for each of its byte
+// sets the last scan's start and the byte it stopped at (secretKWNext). Until
+// 2026-10-03 every candidate scanned its value afresh, and a value is not the
+// candidate's own: in "token=<redacted>" repeated without whitespace the
+// unquoted value of every keyword runs to the end of the text, so the scans
+// added up to quadratic time (MaskDetail on 256 KB: 2.8-3.4 s, against about
+// 51 ms in the 200 ns/B budget; measured 2026-10-03). A window is the same as
+// before, byte for byte (TestSecretKWLinearDifferential compares both at every
+// candidate); only the scanning is shared. Candidates come left to right and
+// their value scans start no earlier than the previous one's (between a
+// keyword and its value lie only a quote, S, "=" or ":", none of which starts
+// a keyword), so each byte is scanned at most once per byte set; a start
+// before a remembered one scans afresh, so the result never depends on that
+// order. The key run and the S runs belong to one candidate each.
+func secretKWWindow(text string, i int, scans *secretKWScans) int {
 	j := skipRunes(text, i, isSecretKWRunRune)
 	if j < len(text) && (text[j] == '"' || text[j] == '\'') {
 		j++
@@ -273,21 +288,55 @@ func secretKWWindow(text string, i int) int {
 	j = skipRunes(text, j+1, isPySpace)
 	end := j
 	if j < len(text) && (text[j] == '"' || text[j] == '\'') {
-		q := text[j]
-		k := j + 1
-		for k < len(text) && text[k] != q && text[k] != '\n' {
-			k++
+		var k int
+		if text[j] == '"' {
+			k = scans.dq.next(text, j+1, isDQuoteEnd)
+		} else {
+			k = scans.sq.next(text, j+1, isSQuoteEnd)
 		}
-		if k < len(text) && text[k] == q {
+		if k < len(text) && text[k] == text[j] {
 			k++
 		}
 		end = k
 		j++
 	}
-	for j < len(text) && !isRESpace(text[j]) && text[j] != '"' && text[j] != '\'' && text[j] != ',' && text[j] != ';' {
-		j++
-	}
+	j = scans.value.next(text, j, isUnquotedValueEnd)
 	return min(len(text), max(end, j)+1)
+}
+
+// secretKWScans holds secretKWWindow's remembered scans for one masking call:
+// to the end of a "..." value, of a '...' value, of an unquoted value.
+type secretKWScans struct{ dq, sq, value secretKWNext }
+
+// secretKWNext remembers one forward scan for the first byte of a set: no
+// byte of the set lies in text[from:at], at excluded, and at is such a byte
+// or len(text).
+type secretKWNext struct {
+	from, at int
+	ok       bool
+}
+
+// next is the index of the first byte at or after j that is in the set (or
+// len(text)). A j in [from, at] has the remembered answer; any other j scans.
+func (c *secretKWNext) next(text string, j int, in func(byte) bool) int {
+	if c.ok && c.from <= j && j <= c.at {
+		return c.at
+	}
+	k := j
+	for k < len(text) && !in(text[k]) {
+		k++
+	}
+	c.from, c.at, c.ok = j, k, true
+	return k
+}
+
+func isDQuoteEnd(c byte) bool { return c == '"' || c == '\n' }
+func isSQuoteEnd(c byte) bool { return c == '\'' || c == '\n' }
+
+// isUnquotedValueEnd: an A character, a quote, a comma or a semicolon ends an
+// unquoted value.
+func isUnquotedValueEnd(c byte) bool {
+	return isRESpace(c) || c == '"' || c == '\'' || c == ',' || c == ';'
 }
 
 // --- 3. email -----------------------------------------------------------------------------
