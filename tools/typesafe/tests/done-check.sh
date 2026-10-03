@@ -28,4 +28,4 @@ echo "log lines added by test 4: $(( $(wc -l < "$HOME_LOG") - n0 ))"
 mkdir -p $D/fakebin; printf '#!/bin/sh\nexit 1\n' > $D/fakebin/secret-tool; chmod +x $D/fakebin/secret-tool
 echo "--- 5 key missing (env unset, secret-tool shadowed)"
 out=$(printf '%s' "{\"transcript_path\":\"$D/unbacked.jsonl\",\"last_assistant_message\":\"$MSG\"}" | env -u TYPESAFE_API_KEY PATH="$D/fakebin:$PATH" ts-done-check); echo "exit=$? stdout=[$out]"
-echo "--- log tail (no message text expected)"; tail -n 3 "$HOME_LOG"
+echo "--- log tail (lines that attempted a TypeSafe call now carry payload_masked -- masked message/tool-call text, never raw -- check it stayed masked here too)"; tail -n 3 "$HOME_LOG"
