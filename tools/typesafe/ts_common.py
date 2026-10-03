@@ -685,8 +685,9 @@ def _git(args, cwd=None):
 
 
 # How every diff the local alarm reads is read: as text even with a NUL byte or a -diff
-# attribute, without an external diff, textconv or colour (color.ui=always hides every '+').
-DIFF_AS_TEXT = ["--text", "--no-ext-diff", "--no-textconv", "--no-color"]
+# attribute, without an external diff, textconv or colour (color.ui=always hides every '+'),
+# and for the whole tree (diff.relative=true and a subdirectory as cwd would hide the rest).
+DIFF_AS_TEXT = ["--text", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative"]
 
 
 def commit_units(rng, cwd=None):
@@ -694,15 +695,18 @@ def commit_units(rng, cwd=None):
     against the first parent: a value added in one commit and removed in the next is
     still in history, so the local alarm must see every commit, not the net diff.
     None if git cannot read the range or one of its commits: a commit not read must
-    not pass as one without a leak."""
+    not pass as one without a leak. --root: log.showRoot=false would show a root
+    commit without its diff."""
     shas = git_text(["rev-list", "--reverse", rng], cwd)
     if shas is None:
         return None
     units = []
     for sha in shas.split():
         unit = (git_text(["log", "-1", "--format=%B", sha], cwd),
-                git_text(["show", "--format=", *DIFF_AS_TEXT, "--diff-merges=first-parent", "-p", sha], cwd),
-                git_text(["show", "--format=", "--name-only", "--diff-merges=first-parent", sha], cwd))
+                git_text(["show", "--format=", "--root", *DIFF_AS_TEXT, "--diff-merges=first-parent", "-p", sha],
+                         cwd),
+                git_text(["show", "--format=", "--root", "--name-only", "--no-relative",
+                          "--diff-merges=first-parent", sha], cwd))
         if None in unit:
             return None
         units.append(unit)

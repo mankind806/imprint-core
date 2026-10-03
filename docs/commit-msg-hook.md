@@ -20,10 +20,12 @@ way out.
 ## How a diff is read
 
 Both rows of the table read a diff the same way, with the flags `.githooks/pre-push` uses for
-a pushed commit:
+a pushed commit, plus `--no-relative`:
 
 - A normal commit's lines come from `git diff --cached --text --no-ext-diff --no-textconv
-  --no-color`, a merge's from one such diff per parent (below). `GIT_DIFF_OPTS` is dropped and
+  --no-color --no-relative`, a merge's from one such diff per parent (below). `--no-relative`
+  keeps `diff.relative=true` from narrowing the diff to the directory `ts-commit-check --cwd`
+  names; the hook itself runs at the top of the worktree. `GIT_DIFF_OPTS` is dropped and
   `GIT_NO_REPLACE_OBJECTS=1` is set. The rest of the environment stays, so `git commit -a`
   and `git commit <path>` are read through the temporary index git names in `GIT_INDEX_FILE`.
 - A file is read as text even when it holds a NUL byte or is marked binary (`-diff`). A byte
@@ -42,7 +44,11 @@ A normal commit used to be read with a plain `git diff --cached` (*measured with
 not UTF-8 anywhere in the diff (the whole diff read as empty), after a lone CR or a form feed
 on its own line, in a file with a NUL byte, marked `-diff` or given a driver's `textconv` or
 `command`, and under `color.ui=always` or `diff.external`. `ts-commit-check --cached` also
-read a git error as an empty diff and exited 0.
+read a git error as an empty diff and exited 0. Run by hand with `--cwd` in a subdirectory
+under `diff.relative=true`, `--cached` still read only that subdirectory until `--no-relative`
+was added ("Diff ist leer", exit 0). The hook was not affected: a `git commit` from a
+subdirectory with that setting was refused (*both measured with git 2.55.0, 2026-10-03, no
+TypeSafe key*).
 
 Reading binaries has a cost. A compressed file, such as an image or an archive, is close to
 random bytes, and random bytes hold an e-mail shape by chance: 2 of 5 random 1 MB samples
@@ -56,12 +62,13 @@ The pre-push hook reads binaries the same way; whether it refuses such a file to
 checked**.
 
 `ts-commit-check A..B` (range mode) and `ts-pr-triage` run in no hook. They read each commit of
-the range with `git show --text --no-ext-diff --no-textconv --no-color`, and the net diff they
-hand to TypeSafe with `git diff` and the same four flags, all through `git_text` in
-`tools/typesafe/ts_common.py`: as bytes, a byte that is not UTF-8 as U+FFFD, with
-`GIT_NO_REPLACE_OBJECTS=1`, so a commit that `git replace` stands in for is read as it is
-pushed. If git cannot read the range or one of its commits, both print `Fehler: …` and exit 1;
-`ts-pr-triage --json` prints `"status": "error"`. An unread commit used to pass as one without
+the range with `git show --root --text --no-ext-diff --no-textconv --no-color --no-relative`
+(`--root`: under `log.showRoot=false`, `git show` prints a root commit without its diff), and
+the net diff they hand to TypeSafe with `git diff` and the last five of those flags, all
+through `git_text` in `tools/typesafe/ts_common.py`: as bytes, a byte that is not UTF-8 as
+U+FFFD, with `GIT_NO_REPLACE_OBJECTS=1`, so a commit that `git replace` stands in for is read as
+it is pushed. If git cannot read the range or one of its commits, both exit 1 and print
+`Fehler: …`, or with `--json` `"status": "error"`. An unread commit used to pass as one without
 a leak, and with a TypeSafe key `ts-pr-triage` would have judged an empty diff. What the local
 alarm reads of a secret-shaped line (*measured with git 2.55.0, 2026-10-03, no TypeSafe key*):
 
@@ -73,12 +80,17 @@ alarm reads of a secret-shaped line (*measured with git 2.55.0, 2026-10-03, no T
 | in a file with a NUL byte, or marked `-diff` | read | read | read |
 | in a file a driver's `textconv` or `command` is set for | read | read | read |
 | under `color.ui=always` or `diff.external` | read | read | read |
+| in a root commit, under `log.showRoot=false` | — | read | read |
+| outside the subdirectory `--cwd` names, under `diff.relative=true` | read | read | read |
+| in a file in UTF-16 | **not read** | **not read** | **not read** |
 | where git cannot produce the diff (range mode, `ts-pr-triage`: a missing object) | **refused**: `Fehler: …`, exit 1 | **refused**: `Fehler: …`, exit 1 | **refused**: `Fehler: …`, exit 1 |
 
 Range mode and `ts-pr-triage` used to read each commit with their own `git show` and
 `text=True`, and their git errors as empty (*measured with git 2.55.0, 2026-10-03, no TypeSafe
 key*). A secret-shaped line then passed after a lone CR, in a file with a NUL byte, marked
-`-diff` or given a driver's `textconv`, and in a commit that `git replace` stood in for. After
+`-diff` or given a driver's `textconv`, in a root commit under `log.showRoot=false`, outside
+the `--cwd` subdirectory under `diff.relative=true`, and in a commit that `git replace` stood
+in for. After
 a byte that is not UTF-8, range mode printed "Diff ist leer" and exited 0, and `ts-pr-triage`
 stopped with `UnicodeDecodeError`, exit 1 and no finding. Under `diff.external` or a driver's
 `command` the local alarm read the line, but the net diff for TypeSafe came out empty. A
@@ -96,7 +108,7 @@ refused (*measured 2026-10-03: merging `main` into #60's branch, three fixture l
 merge:
 
 - The index is diffed once per parent: `git diff-index --cached -p -M -U0 --text
-  --no-ext-diff --no-textconv --no-color <parent>`, read as [above](#how-a-diff-is-read). A
+  --no-ext-diff --no-textconv --no-color --no-relative <parent>`, read as [above](#how-a-diff-is-read). A
   line counts only when every one of those diffs adds it at the same place: same path, same
   line number in the index, same content. A line that is new against every parent is
   therefore always read. A line is skipped as soon as one parent's diff does not add it: that
@@ -129,8 +141,9 @@ secret-shaped line in each of the cases the merge tests read plus under `color.u
 `diff.external`, and a file with a NUL byte but no leak shape, which passes.
 `tools/typesafe/tests/test_no_leak.py` covers `added_lines` at every break character,
 `--cached` on such files and a git error there, and range mode and `ts-pr-triage` on every
-row of the table above, with the net diff they would hand to TypeSafe, a commit git
-cannot read, a range git cannot resolve, and a commit that `git replace` stands in for.
+row of the table above but UTF-16 (`--cached` on the `diff.relative` row too), with the net diff
+they would hand to TypeSafe, a commit git cannot read, a range git cannot resolve, and a
+commit that `git replace` stands in for.
 
 Not enforced:
 
@@ -147,3 +160,7 @@ Not enforced:
 - **A large compressed file can be refused without a leak in it**, by the hook, range mode
   and `ts-pr-triage` alike ([above](#how-a-diff-is-read)).
 - **Range mode and `ts-pr-triage` run in no hook.** They check only when someone runs them.
+- **A file in UTF-16 is not read as text.** Its ASCII letters arrive with a NUL byte between
+  them, which no leak shape matches. A secret-shaped line in such a file passes `--cached`,
+  range mode and `ts-pr-triage` alike (*measured with git 2.55.0, 2026-10-03, no TypeSafe
+  key*).

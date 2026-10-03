@@ -305,8 +305,8 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         subprocess.run(["git", "-C", self.repo, "add", path], check=True)
         return self.run_tool("ts-commit-check", "--cached", "--msg", msg)
 
-    def run_tool(self, tool, *args):
-        return subprocess.run([os.path.join(BIN, tool), *args, "--cwd", self.repo],
+    def run_tool(self, tool, *args, cwd=None):
+        return subprocess.run([os.path.join(BIN, tool), *args, "--cwd", cwd or self.repo],
                               capture_output=True, text=True, timeout=60, env=self.env)
 
     def commit(self, content, msg):
@@ -475,21 +475,26 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         subprocess.run(["git", "-C", self.repo, "add", path], check=True)
         subprocess.run(["git", "-C", self.repo, *ident, "commit", "-q", "-m", msg], check=True)
 
-    def net_diffs_toward_typesafe(self):
-        """The diff range mode and ts-pr-triage would send for HEAD~1..HEAD, from a
-        Recorder in place of tc.post; no names file is read."""
+    def assert_adds_a_line(self, diff):
+        """DIFF holds an added line, not just a '+++' header."""
+        self.assertTrue(any(line.startswith("+") and not line.startswith("+++") for line in diff.split("\n")),
+                        diff[:300])
+
+    def net_diffs_toward_typesafe(self, rng="HEAD~1..HEAD", tools=("ts-commit-check", "ts-pr-triage")):
+        """The diff range mode and ts-pr-triage would send for RNG, from a Recorder in
+        place of tc.post; no names file is read."""
         diffs = []
         names = os.path.join(self.tmp.name, "no-names.txt")
-        for tool in ("ts-commit-check", "ts-pr-triage"):
+        for tool in tools:
             mod, rec = load_tool(tool), Recorder()
             with mock.patch.object(tc, "post", rec), mock.patch.dict(os.environ, TYPESAFE_NAMES_FILE=names):
                 if tool == "ts-commit-check":
-                    args = mod.argparse.Namespace(msg_file=None, msg=None, cached=False, range="HEAD~1..HEAD")
+                    args = mod.argparse.Namespace(msg_file=None, msg=None, cached=False, range=rng)
                     msg, diff, stat, units, err = mod.get_diff_and_msg(args, cwd=self.repo)
                     self.assertIsNone(err)
                     mod.check_commit(msg, diff, stat, units)
                 else:
-                    mod.evaluate_diff("HEAD~1..HEAD", cwd=self.repo)
+                    mod.evaluate_diff(rng, cwd=self.repo)
             self.assertEqual(len(rec.calls), 1, tool)
             diffs.append(json.loads(rec.calls[0])["state"]["diff"])
         return diffs
@@ -521,10 +526,12 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
                 r = self.run_tool("ts-pr-triage", "HEAD~1..HEAD", "--json")
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertEqual(json.loads(r.stdout)["leak_prob"], 1.0)
-                # The net diff TypeSafe would see holds the added line, without colour.
+                # The net diff TypeSafe would see holds the added line itself: no colour,
+                # no textconv output.
                 for diff in self.net_diffs_toward_typesafe():
-                    self.assertIn("\n+", diff)
+                    self.assert_adds_a_line(diff)
                     self.assertNotIn("\x1b", diff)
+                    self.assertNotIn("hidden", diff)
         self.new_repo("clean")
         self.commit_file("base.txt", b"retries = 3\n", "chore: base")
         self.commit_file("clean.dat", b"a\x00b\n\xff\xfe plain\r\n")
@@ -542,16 +549,62 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
                               capture_output=True, text=True, check=True).stdout.strip()
         os.remove(os.path.join(self.repo, ".git", "objects", blob[:2], blob[2:]))
         self.assertIsNone(tc.commit_units("HEAD~1..HEAD", cwd=self.repo))
-        r = self.run_tool("ts-commit-check", "HEAD~1..HEAD")
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("Fehler: Commit-Bereich", r.stdout)
-        r = self.run_tool("ts-pr-triage", "HEAD~1..HEAD", "--json")
-        self.assertEqual((r.returncode, json.loads(r.stdout)["status"]), (1, "error"), r.stdout + r.stderr)
-        for args in (["HEAD~1..HEAD"], ["HEAD..nicht-da"]):
+        self.assertIsNone(tc.commit_units("HEAD..nicht-da", cwd=self.repo))
+        self.commit("retries = 4\n", "fix: drop key")
+        # HEAD~2..HEAD: the net diff no longer needs the missing blob, one commit does.
+        for rng in ("HEAD~2..HEAD~1", "HEAD~2..HEAD"):
+            with self.subTest(rng=rng):
+                r = self.run_tool("ts-commit-check", rng)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("Fehler: Commit-Bereich", r.stdout)
+                r = self.run_tool("ts-pr-triage", rng, "--json")
+                self.assertEqual((r.returncode, json.loads(r.stdout)["status"]), (1, "error"), r.stdout + r.stderr)
+        for args in (["HEAD~2..HEAD"], ["HEAD..nicht-da"]):
             with self.subTest(args=args):
                 r = self.run_tool("ts-pr-triage", *args)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                 self.assertIn("Fehler: git liest den Bereich", r.stdout)
+
+    def test_range_mode_and_pr_triage_read_a_root_commit(self):
+        # Before: under log.showRoot=false, git show printed a root commit without its diff.
+        self.git_config(("log.showRoot", "false"))
+        self.commit("retries = 3\n", "chore: base")
+        subprocess.run(["git", "-C", self.repo, "branch", "-M", "main"], check=True)
+        subprocess.run(["git", "-C", self.repo, "switch", "-q", "--orphan", "neu"], check=True)
+        self.commit_file("nul.dat", b"a\x00b\n" + REAL_KEY_LINE.encode() + b"\n", "feat: first")
+        for rng in ("HEAD~1..HEAD", "main..neu"):  # the root branch of range mode, then A..B
+            with self.subTest(rng=rng):
+                r = self.run_tool("ts-commit-check", rng)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("ABBRUCH", r.stdout)
+                tools = ("ts-commit-check",) if rng == "HEAD~1..HEAD" else ("ts-commit-check", "ts-pr-triage")
+                for diff in self.net_diffs_toward_typesafe(rng, tools):
+                    self.assert_adds_a_line(diff)
+        r = self.run_tool("ts-pr-triage", "main..neu", "--json")
+        self.assertEqual((r.returncode, json.loads(r.stdout)["leak_prob"]), (0, 1.0), r.stdout + r.stderr)
+
+    def test_a_subdirectory_with_diff_relative_reads_the_whole_tree(self):
+        # Before: diff.relative=true and --cwd in a subdirectory hid every other file.
+        self.git_config(("diff.relative", "true"))
+        os.mkdir(os.path.join(self.repo, "docs"))
+        self.commit_file("docs/readme.txt", b"hallo\n", "chore: base")
+        os.mkdir(os.path.join(self.repo, "src"))
+        self.commit_file("src/config.py", REAL_KEY_LINE.encode() + b"\n")
+        sub = os.path.join(self.repo, "docs")
+        r = self.run_tool("ts-commit-check", "HEAD~1..HEAD", cwd=sub)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("Diff ist leer", r.stdout)
+        r = self.run_tool("ts-pr-triage", "HEAD~1..HEAD", "--json", cwd=sub)
+        self.assertEqual(json.loads(r.stdout)["leak_prob"], 1.0, r.stdout + r.stderr)
+        self.commit_file(f"src/max.mustermann{AT}gmx.de.txt", b"hallo\n")  # only the name leaks
+        r = self.run_tool("ts-commit-check", "HEAD~1..HEAD", cwd=sub)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        with open(os.path.join(self.repo, "src", "more.py"), "w") as f:
+            f.write(REAL_KEY_LINE + "\n")
+        subprocess.run(["git", "-C", self.repo, "add", "src/more.py"], check=True)
+        r = self.run_tool("ts-commit-check", "--cached", "--msg", "feat: more", cwd=sub)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ABBRUCH", r.stdout)
 
     def test_range_mode_reads_a_replaced_commit_itself(self):
         # Before: git show read the replacement, which a push does not send.

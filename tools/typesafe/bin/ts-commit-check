@@ -36,7 +36,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
@@ -75,11 +74,10 @@ QUESTIONS = {
 
 
 def run_cmd(cmd, cwd=None):
-    try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=10)
-        return r.stdout.strip()
-    except Exception:
-        return ""
+    """stdout of the git command CMD (["git", ...]), stripped; "" if git fails. Read
+    as tc.git_text reads it: as bytes, and without `git replace`, like every diff."""
+    out = tc.git_text(cmd[1:], cwd)
+    return "" if out is None else out.strip()
 
 
 def get_diff_and_msg(args, cwd=None):
@@ -123,11 +121,12 @@ def get_diff_and_msg(args, cwd=None):
         commit_msg = tc.git_text(["log", "-1", "--format=%B", end], cwd)
     if start is None:  # the range reaches back past the root commit: diff the root itself
         diff_text = tc.git_text(["diff-tree", "-p", "--root", "--no-commit-id", *tc.DIFF_AS_TEXT, end], cwd)
-        stat_text = tc.git_text(["diff-tree", "--stat", "--root", "--no-commit-id", "--no-color", end], cwd)
+        stat_text = tc.git_text(["diff-tree", "--stat", "--root", "--no-commit-id", "--no-color", "--no-relative",
+                                 end], cwd)
         units = tc.commit_units(end + "^!", cwd=cwd)
     else:
         diff_text = tc.git_text(["diff", *tc.DIFF_AS_TEXT, start, end], cwd)
-        stat_text = tc.git_text(["diff", "--stat", "--no-color", start, end], cwd)
+        stat_text = tc.git_text(["diff", "--stat", "--no-color", "--no-relative", start, end], cwd)
         units = tc.commit_units(f"{start}..{end}", cwd=cwd)
     if None in (commit_msg, diff_text, stat_text) or units is None:
         return None, None, None, None, f"Commit-Bereich {rng!r}: git liest einen Commit nicht"
@@ -145,8 +144,8 @@ def cached_added(cwd=None):
     The environment stays, so `git commit -a` and `git commit <path>` keep their
     GIT_INDEX_FILE. A git error exits 1 rather than check less."""
     diff = tc.git_text(["diff", "--cached", *tc.DIFF_AS_TEXT], cwd)
-    stat = tc.git_text(["diff", "--cached", "--stat", "--no-color"], cwd)
-    names = tc.git_text(["diff", "--cached", "--name-only"], cwd)
+    stat = tc.git_text(["diff", "--cached", "--stat", "--no-color", "--no-relative"], cwd)
+    names = tc.git_text(["diff", "--cached", "--name-only", "--no-relative"], cwd)
     if diff is None or stat is None or names is None:
         return "Diff des Index (git diff --cached) nicht lesbar"
     return diff.rstrip("\n"), stat.rstrip("\n"), names.rstrip("\n")

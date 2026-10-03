@@ -66,9 +66,9 @@ def run_cmd(cmd, cwd=None):
 
 def evaluate_diff(commit_range, cwd=None):
     log_text = run_cmd(["git", "log", "-n", "3", "--oneline", "--no-color", commit_range], cwd=cwd)
-    stat_text = run_cmd(["git", "diff", "--stat", "--no-color", commit_range], cwd=cwd)
+    stat_text = run_cmd(["git", "diff", "--stat", "--no-color", "--no-relative", commit_range], cwd=cwd)
     diff_text = run_cmd(["git", "diff", *tc.DIFF_AS_TEXT, commit_range], cwd=cwd)
-    paths = run_cmd(["git", "diff", "--name-only", commit_range], cwd=cwd)
+    paths = run_cmd(["git", "diff", "--name-only", "--no-relative", commit_range], cwd=cwd)
     units = tc.commit_units(commit_range, cwd=cwd)
     # A range git cannot read is no clean range: an empty diff would pass as risk 0.
     if None in (log_text, stat_text, diff_text, paths) or units is None:

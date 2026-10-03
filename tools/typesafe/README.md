@@ -124,9 +124,11 @@ jeden Elternteil neu sind, und nur Dateinamen, die kein Elternteil hat. Das gilt
 Alarm und für TypeSafe; Details in [`docs/commit-msg-hook.md`](../../docs/commit-msg-hook.md).
 Jeder Diff wird als Text gelesen, mit `--cached` und `--msg-file` ebenso wie im Bereichsmodus und
 in `ts-pr-triage`: auch eine Datei mit NUL-Byte, mit `-diff`, mit einem `textconv`-Treiber oder mit
-Bytes, die kein UTF-8 sind. Liefert git keinen Diff, endet die Prüfung mit `Fehler: …` und exit 1.
-Die Tabelle in [`docs/commit-msg-hook.md`](../../docs/commit-msg-hook.md#how-a-diff-is-read) zeigt,
-was gelesen wird. `ts-pr-triage` meldet einen lokalen Treffer ohne Key als Hinweis und bleibt
+Bytes, die kein UTF-8 sind, auch der Root-Commit unter `log.showRoot=false` und mit `--cwd` in
+einem Unterverzeichnis unter `diff.relative=true` der ganze Baum. Eine Datei in UTF-16 wird nicht
+gelesen. Scheitert git beim Lesen, endet die Prüfung mit `Fehler: …` und exit 1. Die Tabelle in
+[`docs/commit-msg-hook.md`](../../docs/commit-msg-hook.md#how-a-diff-is-read) zeigt, was gelesen
+wird. `ts-pr-triage` meldet einen lokalen Treffer ohne Key als Hinweis und bleibt
 fail-open (exit 0). Liest git den Bereich nicht, endet es mit exit 1 statt einer leeren Prüfung,
 auch beim Standardbereich `HEAD~1..HEAD` in einem Repository mit nur einem Commit (*gemessen mit
 git 2.55.0, 2026-10-03, ohne Key*). Bis dahin brach `ts-pr-triage` an einem Byte, das kein UTF-8
