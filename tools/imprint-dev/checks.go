@@ -936,6 +936,7 @@ var imprintHostDefLineRE = regexp.MustCompile(`^\s*(?:function\s+)?imprint_host\
 //     after optional whitespace, or right after ;, & or |, which also covers
 //     && and ||, since the character immediately before the name is still
 //     one of those three), followed by end of line, whitespace, ;, ), | or >.
+//
 // The scan below checks imprintHostDefLineRE first on every candidate line,
 // so a definition line is never even offered to this regexp.
 var imprintHostCallRE = regexp.MustCompile(

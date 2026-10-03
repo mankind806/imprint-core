@@ -72,7 +72,7 @@ class Recorder:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, state, questions, timeout=None):
+    def __call__(self, state, questions, timeout=None, key=None, detail=None):
         self.calls.append(json.dumps({"state": state, "questions": questions}, ensure_ascii=False))
         return None
 
@@ -87,7 +87,22 @@ class _NamesFileMixin:
         os.environ["TYPESAFE_NAMES_FILE"] = cls.names_path
         tc.get_name_regex(cls.names_path)
         cls.tmp = tempfile.mkdtemp(prefix="typesafe-noleak-")
+        # ts-done-check's LOG is a module-level constant read from this env var at
+        # import time (load_tool() below imports it): without this, every test
+        # driving ts-done-check would append real lines to the user's own
+        # ~/.local/state/typesafe-dev/done-check.jsonl instead of a throwaway file.
+        # TS_DONE_CHECK_LOG is only honoured when TS_DONE_CHECK_TESTING=1 is
+        # also set (a real environment can't have its log redirected by a
+        # stray env var) -- both are module-level constants read at import
+        # time (load_tool() below imports it).
+        cls._prev_log = os.environ.get("TS_DONE_CHECK_LOG")
+        cls._prev_testing = os.environ.get("TS_DONE_CHECK_TESTING")
+        os.environ["TS_DONE_CHECK_LOG"] = os.path.join(cls.tmp, "done-check.jsonl")
+        os.environ["TS_DONE_CHECK_TESTING"] = "1"
         cls.mods = {name: load_tool(name) for name in TOOLS}
+        assert cls.mods["ts-done-check"].LOG.startswith(cls.tmp), (
+            "ts-done-check.LOG did not pick up TS_DONE_CHECK_LOG; refusing to risk "
+            "writing to the real log")
 
     @classmethod
     def tearDownClass(cls):
@@ -95,6 +110,14 @@ class _NamesFileMixin:
             os.environ.pop("TYPESAFE_NAMES_FILE", None)
         else:
             os.environ["TYPESAFE_NAMES_FILE"] = cls._prev_names
+        if cls._prev_log is None:
+            os.environ.pop("TS_DONE_CHECK_LOG", None)
+        else:
+            os.environ["TS_DONE_CHECK_LOG"] = cls._prev_log
+        if cls._prev_testing is None:
+            os.environ.pop("TS_DONE_CHECK_TESTING", None)
+        else:
+            os.environ["TS_DONE_CHECK_TESTING"] = cls._prev_testing
         os.remove(cls.names_path)
         for f in os.listdir(cls.tmp):
             os.remove(os.path.join(cls.tmp, f))
@@ -129,8 +152,11 @@ class TestNoSentinelReachesPost(_NamesFileMixin, unittest.TestCase):
                         {"type": "tool_result", "tool_use_id": "t1", "is_error": False}]}}) + "\n")
                 stdin = json.dumps({"transcript_path": tp,
                                     "last_assistant_message": f"Fertig, erledigt für {text}."})
-                with mock.patch.object(sys, "stdin", io.StringIO(stdin)):
-                    mod.main()
+                # The hook's work runs in check() (the worker; main() is the supervisor
+                # that spawns it). check() fetches the key itself (capped keyring
+                # timeout), so the key lookup needs its own stand-in here too.
+                with mock.patch.object(tc, "get_key", lambda timeout=5, **kw: "dummy-test-value"):
+                    mod.check(stdin.encode())
             elif tool == "ts-pr-triage":
                 def fake_run(cmd, cwd=None):
                     if "--name-only" in cmd:
@@ -171,8 +197,9 @@ class TestMaskThenCut(_NamesFileMixin, unittest.TestCase):
         self.assertTrue(msg[-mod.MAX_MSG:].startswith("_key=wachWertBeta"))
         rec = Recorder()
         stdin = json.dumps({"last_assistant_message": msg})
-        with mock.patch.object(tc, "post", rec), mock.patch.object(sys, "stdin", io.StringIO(stdin)):
-            mod.main()
+        with mock.patch.object(tc, "post", rec), \
+                mock.patch.object(tc, "get_key", lambda timeout=5, **kw: "dummy-test-value"):
+            mod.check(stdin.encode())
         self.assertEqual(len(rec.calls), 1)
         self.assertNotIn("wachWertBeta", rec.calls[0])
 
