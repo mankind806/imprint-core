@@ -59,6 +59,14 @@ jobs:
         run: bash setup/vorlagen/rechte-anwenden-test.sh
       - name: imprint-dev check
         run: go run ./tools/imprint-dev check --root . --sarif "$RUNNER_TEMP/imprint-dev.sarif"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # For the typesafe step below only (the steps above keep the
+          # runner's python3): its golden corpus and ts_common's NFC quick
+          # check table are Unicode 16.0.0, which Python 3.14's unicodedata
+          # has; the runner's python3 3.12 has 15.0.0, and the tests that
+          # need 16.0.0 would skip there.
+          python-version: "3.14"
       - name: typesafe Python tests (offline, no key)
         env:
           # CI has no TypeSafe key/network: ts_common.get_key() fails open by
@@ -74,6 +82,7 @@ jobs:
         run: |
           printf 'Max Mustermann\nErika Musterfrau\n' >"$RUNNER_TEMP/typesafe-names.txt"
           export TYPESAFE_NAMES_FILE="$RUNNER_TEMP/typesafe-names.txt"
+          python3 -c 'import sys, unicodedata; print("python3", sys.version.split()[0], "unicodedata", unicodedata.unidata_version)'
           python3 -m unittest discover -s tools/typesafe -v
           python3 tools/typesafe/tests/mask-test.py
       - name: imprint-dev commit-check

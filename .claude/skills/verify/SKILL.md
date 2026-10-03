@@ -49,7 +49,7 @@ bash setup/vorlagen/rechte-anwenden-test.sh
 go run ./tools/imprint-dev check --root .
 ```
 
-6. typesafe Python tests (offline, no key):
+6. typesafe Python tests (offline, no key). CI runs them on Python 3.14 (unicodedata 16.0.0, `actions/setup-python`); with another `python3`, the tests that need Unicode 16.0.0 skip and say so:
 ```sh
 (
   names_dir=$(mktemp -d)
