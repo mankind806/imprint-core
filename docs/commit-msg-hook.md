@@ -17,6 +17,53 @@ An IBAN, a phone number or a postal address is **not** a leak shape for this hoo
 (*measured 2026-10-03*). Those are shapes [the pre-push hook](pre-push-hook.md) matches, on the
 way out.
 
+## How a diff is read
+
+Both rows of the table read a diff the same way, with the flags `.githooks/pre-push` uses for
+a pushed commit:
+
+- A normal commit's lines come from `git diff --cached --text --no-ext-diff --no-textconv
+  --no-color`, a merge's from one such diff per parent (below). `GIT_DIFF_OPTS` is dropped and
+  `GIT_NO_REPLACE_OBJECTS=1` is set. The rest of the environment stays, so `git commit -a`
+  and `git commit <path>` are read through the temporary index git names in `GIT_INDEX_FILE`.
+- A file is read as text even when it holds a NUL byte or is marked binary (`-diff`). A byte
+  that is not UTF-8 is read as U+FFFD rather than dropping the diff. `color.ui=always`, an
+  external diff (`diff.external`, or a diff driver's `command`) and a driver's `textconv`
+  change nothing that is read.
+- A line ends at `\n` only, as git writes it. A lone CR, a form feed, U+2028 and the other
+  characters Python's `str.splitlines()` also breaks at are read as spaces (`added_lines` in
+  `tools/typesafe/ts_common.py`). The rest of such a line reaches the alarm, also when it
+  starts with `diff `.
+- If git cannot produce a diff, the hook prints `Fehler: …` and refuses the commit rather
+  than check less.
+
+A normal commit used to be read with a plain `git diff --cached` (*measured with git 2.55.0,
+2026-10-03, no TypeSafe key*). A secret-shaped line then passed after one staged byte that is
+not UTF-8 anywhere in the diff (the whole diff read as empty), after a lone CR or a form feed
+on its own line, in a file with a NUL byte, marked `-diff` or given a driver's `textconv` or
+`command`, and under `color.ui=always` or `diff.external`. `ts-commit-check --cached` also
+read a git error as an empty diff and exited 0.
+
+Reading binaries has a cost. A compressed file, such as an image or an archive, is close to
+random bytes, and random bytes hold an e-mail shape by chance: 2 of 5 random 1 MB samples
+held one, and 5 of 5 random 5 MB samples (*measured against `local_alarm`, 2026-10-03*). Such a
+file is refused although it holds no address. Checking a staged random 20 MB file took 8.7 s
+and about 330 MB of memory (*measured 2026-10-03*). The pre-push hook reads binaries the same
+way; whether it refuses such a file too is **not checked**.
+
+`ts-commit-check A..B` (range mode) and `ts-pr-triage` run in no hook. They read each commit
+with their own `git show`, which this does not change; they share only `added_lines`. What
+the local alarm reads of a secret-shaped line (*measured with git 2.55.0, 2026-10-03, no
+TypeSafe key*):
+
+| The line comes … | `--msg-file`, `--cached` | range mode | `ts-pr-triage` |
+|---|---|---|---|
+| after a form feed, `\v`, `\x1c`–`\x1e`, U+0085, U+2028 or U+2029 | read | read | read |
+| after a lone CR | read | **not read** | **not read** |
+| in a file with a byte that is not UTF-8 | read | **not read**: "Diff ist leer", exit 0 | **stops**: `UnicodeDecodeError`, exit 1, no finding |
+| in a file with a NUL byte, or marked `-diff` | read | **not read** | **not read** |
+| under `color.ui=always` or `diff.external` | read | read | read |
+
 ## A merge
 
 A line from either parent was checked at that parent, or it is already published. Checking
@@ -27,16 +74,12 @@ refused (*measured 2026-10-03: merging `main` into #60's branch, three fixture l
 merge:
 
 - The index is diffed once per parent: `git diff-index --cached -p -M -U0 --text
-  --no-ext-diff --no-textconv --no-color <parent>`, with `GIT_DIFF_OPTS` dropped and
-  `GIT_NO_REPLACE_OBJECTS=1`. A line counts only when every one of those diffs adds it at
-  the same place: same path, same line number in the index, same content. A line that is new
-  against every parent is therefore always read. A line is skipped as soon as one parent's
-  diff does not add it: that parent has the same content in the same file, or in a file
-  that `-M` pairs with it as renamed. Content a parent has only in some other file is read.
-- A file is read as text even when it holds a NUL byte or is marked binary. A byte that is
-  not UTF-8 is read as U+FFFD rather than dropping the file. A lone CR, a form feed, U+2028
-  and the other characters Python's `str.splitlines()` breaks at are read as spaces, so the
-  rest of a line after one still reaches the alarm.
+  --no-ext-diff --no-textconv --no-color <parent>`, read as [above](#how-a-diff-is-read). A
+  line counts only when every one of those diffs adds it at the same place: same path, same
+  line number in the index, same content. A line that is new against every parent is
+  therefore always read. A line is skipped as soon as one parent's diff does not add it: that
+  parent has the same content in the same file, or in a file that `-M` pairs with it as
+  renamed. Content a parent has only in some other file is read.
 - An octopus merge has one parent per `MERGE_HEAD` entry, plus `HEAD`. `MERGE_HEAD` is found
   with `git rev-parse --git-path`, so a linked worktree's own one is read.
 - A new file name is a path no parent has. A path one parent already has passes, also when
@@ -59,7 +102,11 @@ brings in only lines a parent has, a conflict resolved to one side, a conflict r
 an evil merge that add a new secret-shaped line or file name (below lines only one parent has,
 in a file with a NUL byte, marked `-diff` or not UTF-8, after a lone CR, a form feed or
 U+2028, and a file the merge renames), a merge that cannot be read, an octopus merge, a merge
-in a linked worktree, and normal commits, a squash included.
+in a linked worktree, and normal commits: a squash, `commit -a`, `commit <path>`, a
+secret-shaped line in each of the cases the merge tests read plus under `color.ui=always` and
+`diff.external`, and a file with a NUL byte but no leak shape, which passes.
+`tools/typesafe/tests/test_no_leak.py` covers `added_lines` at every break character,
+`--cached` on such files, a git error, and range mode and `ts-pr-triage` past a form feed.
 
 Not enforced:
 
@@ -73,7 +120,8 @@ Not enforced:
 - **A clean `git cherry-pick` or `git revert` does not run it**, with or without the editor
   (`-e`); a conflicted one does, when `git commit` or `--continue` concludes it (*measured
   with git 2.55.0, 2026-10-03*).
-- **Known gaps, normal commits only** (*measured 2026-10-03*): if a staged file holds a byte
-  that is not UTF-8, the whole diff reads as empty and the commit passes, even with a leak
-  line in it; the rest of a line after a lone CR, a form feed or U+2028 is not read; and a
-  file with a NUL byte or marked `-diff` is not read at all. Merge mode reads all three.
+- **A large compressed file can be refused without a leak in it**
+  ([above](#how-a-diff-is-read)).
+- **Range mode and `ts-pr-triage` still miss** a line after a lone CR, a file with a byte that
+  is not UTF-8, and a file with a NUL byte or marked `-diff` (the table above). Neither runs
+  as a hook.

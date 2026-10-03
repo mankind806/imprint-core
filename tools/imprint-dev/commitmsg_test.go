@@ -460,4 +460,81 @@ func TestCommitMsgNormalCommitsCheckTheWholeDiff(t *testing.T) {
 		}
 		r.mustRefuse("commit", "-m", "squash main")
 	})
+	// A normal commit reads its diff the way a merge does (see
+	// TestCommitMsgEvilMergeRefused): none of these may make the line vanish.
+	for _, tc := range []struct {
+		name string
+		add  func(r *cmRepo)
+	}{
+		{"line in a file with a NUL byte", func(r *cmRepo) {
+			r.write("nul.dat", "a\x00b\n"+cmShapeA+"\n")
+		}},
+		{"line in a file marked -diff", func(r *cmRepo) {
+			r.write(".gitattributes", "*.dat -diff\n")
+			r.write("attr.dat", cmShapeA+"\n")
+		}},
+		{"line in a file that is not UTF-8", func(r *cmRepo) {
+			// One Latin-1 byte turned the whole diff into nothing.
+			r.write("latin1.txt", "caf\xe9\n"+cmShapeA+"\n")
+		}},
+		{"line after a lone CR", func(r *cmRepo) {
+			r.write("conf.txt", "x\r"+cmShapeA+"\n")
+		}},
+		{"line after a form feed", func(r *cmRepo) {
+			r.write("conf.txt", "x\f"+cmShapeA+"\n")
+		}},
+		{"line after U+2028", func(r *cmRepo) {
+			r.write("conf.txt", "x "+cmShapeA+"\n")
+		}},
+		{"lone CR before a line that starts with diff", func(r *cmRepo) {
+			r.write("conf.txt", "x\rdiff y\n"+cmShapeA+"\n")
+		}},
+		{"form feed before a line that starts with diff", func(r *cmRepo) {
+			r.write("conf.txt", "x\fdiff y\n"+cmShapeA+"\n")
+		}},
+		// Repository config, since cmSetup's environment reads no global one.
+		{"color.ui=always", func(r *cmRepo) {
+			r.git("config", "color.ui", "always")
+			r.write("conf.txt", cmShapeA+"\n")
+		}},
+		{"diff.external that prints nothing", func(r *cmRepo) {
+			r.git("config", "diff.external", "true")
+			r.write("conf.txt", cmShapeA+"\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := cmSetup(t)
+			t.Parallel()
+			r.write("base.txt", "base\n")
+			r.commit("base")
+			tc.add(r)
+			r.git("add", "-A")
+			r.mustRefuse("commit", "-m", "add a file")
+		})
+	}
+	// Both commit through a temporary index that git names in GIT_INDEX_FILE.
+	for _, tc := range []struct {
+		name   string
+		commit []string
+	}{
+		{"commit -a", []string{"commit", "-a", "-m", "edit base"}},
+		{"commit <path>", []string{"commit", "-m", "edit base", "base.txt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := cmSetup(t)
+			t.Parallel()
+			r.write("base.txt", "base\n")
+			r.commit("base")
+			r.write("base.txt", "base\n"+cmShapeA+"\n")
+			r.mustRefuse(tc.commit...)
+		})
+	}
+	t.Run("file with a NUL byte and no leak shape", func(t *testing.T) {
+		r := cmSetup(t)
+		t.Parallel()
+		r.write("base.txt", "base\n")
+		r.commit("base")
+		r.write("clean.dat", "a\x00b\n\xff\xfe plain\n")
+		r.commit("add clean.dat")
+	})
 }

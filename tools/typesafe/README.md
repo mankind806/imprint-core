@@ -122,7 +122,13 @@ jeden Commit einzeln; TypeSafe sieht den Netto-Diff und die letzte Nachricht. Mi
 oder `--msg-file` während eines Merges (`MERGE_HEAD` vorhanden) zählen nur Zeilen, die gegen
 jeden Elternteil neu sind, und nur Dateinamen, die kein Elternteil hat. Das gilt für den lokalen
 Alarm und für TypeSafe; Details in [`docs/commit-msg-hook.md`](../../docs/commit-msg-hook.md).
-`ts-pr-triage` meldet einen lokalen Treffer ohne Key als Hinweis und bleibt fail-open (exit 0).
+Mit `--cached` oder `--msg-file` wird jeder Diff als Text gelesen, auch eine Datei mit NUL-Byte,
+mit `-diff` oder mit Bytes, die kein UTF-8 sind; liefert git keinen Diff, endet die Prüfung mit
+exit 1. Bereichsmodus und `ts-pr-triage` lesen solche Dateien noch nicht; die Tabelle in
+[`docs/commit-msg-hook.md`](../../docs/commit-msg-hook.md#how-a-diff-is-read) zeigt, was ihnen fehlt.
+`ts-pr-triage` meldet einen lokalen Treffer ohne Key als Hinweis und bleibt fail-open (exit 0);
+an einem Byte, das kein UTF-8 ist, bricht es aber mit exit 1 ab, ohne Befund (*gemessen
+2026-10-03*).
 
 ## Konfiguration (projektspezifisch, keine harten Pfade/IDs im Code)
 
