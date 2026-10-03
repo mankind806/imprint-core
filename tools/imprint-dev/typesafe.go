@@ -429,7 +429,11 @@ func MaskDetail(text string) (string, MaskCounts) {
 	})
 	maskLap("secret_kw")
 
-	// 3. email
+	// 3. email. Since 2026-10-02 (the NFC union) the email, street and
+	// postcode steps also scan an NFC copy of their own input and replace
+	// the union of both, merged where they overlap, one count per merged
+	// span (maskSpansNFC, mask_nfc.go): "mu" + U+0308 + "nchen" in a domain
+	// or after a postcode no longer ends the match at the mark.
 	text = maskEmail(text, func(m string) string {
 		counts.Email++
 		return "<email>"
@@ -460,14 +464,15 @@ func MaskDetail(text string) (string, MaskCounts) {
 	})
 	maskLap("phone")
 
-	// 6. address: Straße + Hausnummer
+	// 6. address: Straße + Hausnummer (NFC union as in 3.)
 	text = maskStreet(text, func(m string) string {
 		counts.Address++
 		return "<address>"
 	})
 	maskLap("street")
 
-	// 7. address: PLZ + Ort
+	// 7. address: PLZ + Ort, on the street step's output (NFC union as in 3.,
+	// with a copy of that output)
 	text = maskPlzOrt(text, func(m string) string {
 		counts.Address++
 		return "<address>"

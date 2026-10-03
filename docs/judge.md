@@ -11,7 +11,7 @@
 | Modell | gepinnt `jev-1.13.0`, nie `jev-latest` | gebaut; `TestRegistryPinningAndVersion`; live 2026-10-02: API nennt `model: jev-1.13.0` |
 | Maskierung | jedes Textfeld ganz maskieren, dann kappen (nie mitten in einem Platzhalter; *seit 2026-10-02 auch nie direkt hinter dem Vorsatz eines Geheimnisses, dessen Wert der Schnitt abschneidet, siehe „Maskieren und Kappen“*); höchstens so viel Text je Aufruf, wie im ungünstigsten Fall in der halben Deadline maskiert ist (3 s: 7,2 MB, 6 s: 14,4 MB), sonst `too_large` und nichts gesendet; `PostState` maskiert jedes String-Blatt noch einmal; Regeln gleich mit `ts_common.py` (siehe „Parität mit ts_common.py“) | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestCutMaskedProperty` (50 × 200 Läufe), `TestCutMaskedDanglingSecretLead`, `TestMaskCappedIsCutOfWholeMask`, `TestJudgeMaskBudget`, `TestMaskGolden` |
 | Maskier-Geschwindigkeit | dieselben Treffer wie vorher, aus Kandidaten statt NFA über jedes Byte; linear auch auf abgelehnten Treffern (*Adressen seit 2026-10-02 absichtlich anders: Vereinigung beider Grammatiken über Automaten, siehe „Adressen“; Opaque seit 2026-10-03 absichtlich anders: Pythons Regel, siehe „Opaque: Pythons Regel“*) | gebaut; `TestMaskDifferential` (alt gegen neu, Byte für Byte), `TestMaskLinearOnRejectedRuns`, `TestAddressAutomata` |
-| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage; Maskieren hört am Ende der Deadline auf zu warten | gebaut; `TestJudgeDeadlineCoversBuild` (dichteste Adressen in Budgetgröße, 15 MiB, 10.000 Aufrufe; *überholt am 2026-10-02: seit der Adress-Vereinigung ist dichtes `schluessel=wert` der langsamste Text, der Test nimmt es: 6,5 MB in 0,52–0,54 s geurteilt, mit Adressen waren es 0,28 s*; *bis 2026-10-02 wackelig: der gekappte Text war manchmal 1–7 Zeichen über 8000, behoben durch die Vorsatz-Regel beim Kappen, seither 10 von 10 Läufen grün*), `TestJudgeMaskingStopsAtTheDeadline` |
+| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage; Maskieren hört am Ende der Deadline auf zu warten | gebaut; `TestJudgeDeadlineCoversBuild` (dichteste Adressen in Budgetgröße, 15 MiB, 10.000 Aufrufe; *überholt am 2026-10-02: seit der Adress-Vereinigung ist dichtes `schluessel=wert` der langsamste Text, der Test nimmt es: 6,5 MB in 0,52–0,54 s geurteilt, mit Adressen waren es 0,28 s*; *überholt am 2026-10-02 durch die NFC-Vereinigung (aa9d2d4): der langsamste Text ist jetzt `nfdanchors` (dichte NFD-Adressen und -Mails, nicht NFC) mit 116 ns je Byte bei 2 MiB und 109 bei 16 MiB, dichtes `schluessel=wert` 75–84 (`TestMaskProfile`, `GOMAXPROCS=2`, Zahlen aus der Commit-Nachricht von aa9d2d4, hier nicht nachgemessen); auch gemessen am Preis, den `maskNsPerByte` erlaubt (208,3 und 209 ns), ist `nfdanchors` langsamer (0,52–0,56 gegen 0,36–0,40). Seit 2026-10-03 nimmt der Test beide, je in Budgetgröße und mit 15 MiB; gemessen 2026-10-03, 10 Läufe, ohne `GOMAXPROCS`, Last um 12 bei 20 Kernen: 6,5 MB `schluessel=wert` in 0,52–0,93 s geurteilt, `nfdanchors` in 0,79–1,41 s (8 von 10 bis 0,85 s; der langsamste Lauf rund 218 ns je Byte gegen 208,3 ns erlaubt, Lastschwankung wie der Lauf mit 232 ns in `typesafe_state.go`, siehe Entscheid „Budget bleibt bei 200 ns je Byte“ unten in „Parität mit ts_common.py“); 15 MiB beider in 56–129 ms `too_large`*; *bis 2026-10-02 wackelig: der gekappte Text war manchmal 1–7 Zeichen über 8000, behoben durch die Vorsatz-Regel beim Kappen, seither 10 von 10 Läufen grün*), `TestJudgeMaskingStopsAtTheDeadline` |
 | Log | eine JSONL-Zeile je Aufruf, ohne Texte und ohne unbekannte Namen | gebaut; `TestJudgeLogOneLinePerCall`, `TestJudgeNeverEchoesUnknownNames` |
 | Durchsetzung | keine: kein Hook ruft `judge` | **nichts setzt hier etwas durch** |
 
@@ -383,7 +383,10 @@ maskiert): „Im Jahr 2024 wurde“ wird `<address> wurde`; in Go war das schon 
 Pythons Zweig in Kleinbuchstaben maskiert Wörter, die auf eine Endung ausgehen, vor einer Zahl („string 3“,
 „during 2“). In NFD (zerlegte Umlaute) ist ein Kombinationszeichen kein Wortzeichen, davor liegt also eine
 Wortgrenze: aus PLZ + „Mu“ + U+0308 + „nchen“ wird `<address>` + U+0308 + „nchen“, der Ortsname bleibt halb
-stehen, in Python ebenso (Grenze, nicht behoben; Abschnitt 4 definiert die Grenze über W). „Gäßchen 4“
+stehen, in Python ebenso (Grenze, nicht behoben; Abschnitt 4 definiert die Grenze über W) (*überholt am
+2026-10-02 durch die NFC-Vereinigung, siehe „Parität mit ts_common.py“: Straße und PLZ + Ort suchen auch auf
+einer eigenen NFC-Kopie, PLZ + „Mu“ + U+0308 + „nchen“ wird `<address>`, in beiden Sprachen; offen bleibt
+eine Marke nach dem letzten Buchstaben des Orts, dort unter „Bekannte Grenzen“*). „Gäßchen 4“
 allein bleibt unmaskiert: Gos Endung „gäßchen“ verlangt einen Großbuchstaben davor, Pythons heißt
 „gässchen“ (wörtlich nach Spezifikation, in beiden Sprachen gleich, vorher in Go ebenso).
 
@@ -402,9 +405,14 @@ eines Prozesses kostet 0,44–0,65 ms mehr (Grundgerüst 0,35–0,52 ms), alle Z
 Budget; er ist kleiner als 0,2 % der kürzesten Deadline (3 s).
 
 **Geprüft:** `TestMaskAddressExamples` (36 Fälle; die Erwartung ist die Ausgabe von `ts_common.mask_detail`
-des Python-Zweigs, typesafe-dev 6fc6326, dessen Adress-Code der von 3fa4dfe ist, ohne Namensdatei);
+des Python-Zweigs, typesafe-dev 6fc6326, dessen Adress-Code der von 3fa4dfe ist, ohne Namensdatei;
+*überholt am 2026-10-02 durch die NFC-Vereinigung für die zwei NFD-Fälle, PLZ + „Mu“ + U+0308 + „nchen“
+und „Mu“ + U+0308 + „hlenweg 3“: sie erwarten seit aa9d2d4 `<address>`; am 2026-10-02 gegen
+`ts_common.mask_detail` von typesafe-dev b340863 nachgeprüft, ohne Namensdatei: gleich, ebenso alle Fälle
+von `TestMaskNFCUnion`*);
 `TestMaskAddresses` (die Zeile „im Brief“ als überholt markiert, die alte Erwartung im Kommentar);
-`TestMaskDifferential` gegen `refAddressStep`, die Regel der Spezifikation wörtlich (jeder Anfang mit
+`TestMaskDifferential` gegen `refAddressStep` (*seit der NFC-Vereinigung, 2026-10-02, `refAddressSpans`
+unter `refUnionStep`*), die Regel der Spezifikation wörtlich (jeder Anfang mit
 Wortgrenze von links, dort das größte Ende mit Wortgrenze, gefunden über die längsten Treffer von `regexp`
 auf immer kürzeren Texten), mit den Beispielen als Fragmenten und vier Adress-Korpora zu 16 KiB;
 `TestAddressAutomata` (alle Zustände gebaut, Schranke 400/40/160, sonst rot; die Zeichenklassen gegen
@@ -435,7 +443,11 @@ in einer Sitzung am 2026-10-02 gemessen; neue Korpora `streetchain`, `anchors`, 
 | `schluessel=wert` dicht | 1,24 s (74 ns) | 1,22 s (73 ns) | 0,05 s |
 
 Ungünstigster Fall des schnellen Wegs jetzt dichte `schluessel=wert` mit 77 ns je Byte (mit Namensdatei;
-vorher dichte Straßenadressen mit 130 ns, und die erst jetzt gemessenen Wortketten mit 937 ns). Mit ſ oder ı
+vorher dichte Straßenadressen mit 130 ns, und die erst jetzt gemessenen Wortketten mit 937 ns) (*überholt
+am 2026-10-02 durch die NFC-Vereinigung (aa9d2d4): Text, der nicht NFC ist und „@“ oder Ziffern hat, ist
+jetzt langsamer, `nfdanchors` 116 ns je Byte bei 2 MiB; dichte `schluessel=wert` bleibt der langsamste
+Text in NFC, 79 ns, in einer zweiten Sitzung 84; siehe „Bekannte Grenzen“, Zeile „NFC-Vereinigung
+kostet“*). Mit ſ oder ı
 davor höchstens 266 ns je Byte (`schluessel=wert`; vorher 467 ns, dichte Straßenadressen). Keine Konstante
 geändert: 200 ns und 900 ns je Byte decken beide Wege mit Abstand.
 
@@ -473,7 +485,10 @@ verglichen, wie `ts_common._mask_names` es tut. Gemessen am 2026-10-02 mit `Mask
 keine Segmentgrenze; das Zeichen davor gehört zu seinem Segment und geht mit: „Hallo “ + Kelvin-Zeichen +
 „laus“ wird `Hallo<name>` (maskiert mehr, zerteilt kein Wort; A8 lässt das bewusst stehen). Ein Name, der
 in einem früheren Platzhalter trifft (`name` in `<name>`), verhält sich wie auf NFC-Text (`<<name>>`).
-Adressen werden nicht normalisiert (Abschnitt 4; siehe „Adressen“, NFD).
+Adressen werden nicht normalisiert (Abschnitt 4; siehe „Adressen“, NFD) (*überholt am 2026-10-02 durch die
+NFC-Vereinigung, siehe „Parität mit ts_common.py“: E-Mail, Straße und PLZ + Ort suchen zusätzlich auf je
+einer eigenen NFC-Kopie, mit denselben Segmenten und derselben Verbreiterung wie hier; anders als bei Namen
+gelten auch die Treffer im Text selbst, und jede verschmolzene Spanne zählt einmal*).
 
 **Geprüft:** `TestNamesNFC` (26 Texte; die Erwartung ist die Ausgabe von `ts_common.mask_detail` des
 Python-Zweigs, typesafe-dev 752698b, mit derselben Namensdatei; die Referenz stimmt überein, und die
@@ -541,7 +556,12 @@ normalen Lauf 3.659 Texte, 3,1 MB, 18.295 Vergleiche; mit `IMPRINT_MASK_DIFF_SEE
 `refNamesStep` wendet den allgemeinen NFC-Weg auf jeden gültigen Text an, `refLoadNames` lädt die Namen
 selbst, die Lookaheads von `refSecretKWStep` vergleichen genau; mit 6 Namensdateien, den NFC-Fragmenten
 und fünf NFC-Korpora im normalen Lauf 3.793 Texte, 3,2 MB, 22.758 Vergleiche; mit
-`IMPRINT_MASK_DIFF_SEEDS=400` 41.668 Texte, 39 MB, 250.008 Vergleiche, alle gleich*) (*überholt am 2026-10-03 durch Nachtrag A9: der Opaque-Schritt der alten
+`IMPRINT_MASK_DIFF_SEEDS=400` 41.668 Texte, 39 MB, 250.008 Vergleiche, alle gleich*) (*überholt am
+2026-10-02 durch die NFC-Vereinigung: E-Mail, Straße und PLZ laufen in der alten Fassung durch
+`refUnionStep` (`refEmailSpans` und `refAddressSpans` auf dem Text und auf `refNFCCopy`, die Herkunft je
+Byte wie in `refNamesStep`), wie dort der allgemeine Weg auf jedem gültigen Text; mit den NFD-Fragmenten
+und den Korpora `nfdpii` und `nfdanchors` im normalen Lauf 3.917 Texte, 3,2 MB, 23.502 Vergleiche; mit
+`IMPRINT_MASK_DIFF_SEEDS=400` 41.792 Texte, 39 MB, 250.752 Vergleiche, alle gleich, gemessen nach 5e77bad*) (*überholt am 2026-10-03 durch Nachtrag A9: der Opaque-Schritt der alten
 Fassung ist `refOpaqueStep`, `RX_OPAQUE` Stelle für Stelle; mit den A9-Fragmenten im normalen Lauf 3.888
 Texte, 3,2 MB, 23.328 Vergleiche; mit `IMPRINT_MASK_DIFF_SEEDS=400` 41.763 Texte, 39 MB, 250.578 Vergleiche,
 alle gleich, 38,5 s, vorher 44,2 s*). Die Python-Parität
@@ -557,7 +577,7 @@ dem Weg, den es nimmt (`maskNsPerByte`):
 | gültiges UTF-8 ohne Sonderzeichen (schneller Weg) | 200 ns + 1,5 ns je Namensmuster | 127 ns (bei Last 156, einmal 232) + 0,9 ns (*überholt am 2026-10-02: Wortketten vor einer Hausnummer kosteten 937 ns, siehe „Adressen“; seit der Adress-Vereinigung höchstens 77 ns*) |
 | mit K, ſ, ẞ, İ, ı, Ohm-, Angström-Zeichen … | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns (*seit der Adress-Vereinigung, 2026-10-02, mit ſ oder ı davor höchstens 266 ns*) |
 | ungültiges UTF-8 | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns |
-| gültiges UTF-8, nicht in NFC, mit Namen (seit 2026-10-02) | wie oben, nur der Preis je Namensmuster mal Länge der NFC-Kopie durch Länge des Textes; 20 ns statt 1,5, wenn die Kopie ein Zeichen wie İ enthält, das der Text nicht hat („I“ + U+0307) | 79 ns (dichte `schluessel=wert` hinter „I“ + U+0307; die fünf NFC-Korpora 69 ns; Kopie bauen und zurückbilden eingeschlossen) |
+| gültiges UTF-8, nicht in NFC, mit Namen (seit 2026-10-02) | wie oben, nur der Preis je Namensmuster mal Länge der NFC-Kopie durch Länge des Textes; 20 ns statt 1,5, wenn die Kopie ein Zeichen wie İ enthält, das der Text nicht hat („I“ + U+0307) | 79 ns (dichte `schluessel=wert` hinter „I“ + U+0307; die fünf NFC-Korpora 69 ns; Kopie bauen und zurückbilden eingeschlossen) (*überholt am 2026-10-02 durch die NFC-Vereinigung: dichte NFD-Adressen und -Mails (`nfdanchors`) 116 ns bei 2 MiB, 109 ns bei 16 MiB; Preis unverändert, erlaubt sind dort 208 ns; Zahlen aus der Commit-Nachricht von aa9d2d4, siehe „Parität mit ts_common.py“, „Bekannte Grenzen“*) |
 
 Für Text, der nicht in NFC ist, baut `maskNsPerByte` die Kopie selbst (einmal mehr `nfc`, außerhalb des
 Budgets: gemessen 2026-10-02 höchstens 32 ns je Byte, 0,5 s für 15 MiB „a“ + U+0F73 oder Markenläufe;
@@ -585,7 +605,12 @@ der Bau der Adress-Automaten, höchstens 5,6 ms gemessen, außerhalb des Preises
 `TestJudgeDeadlineCoversBuild` und `TestJudgeBudgetCoversFallbackRunes` dichtes `schluessel=wert` statt
 dichter Straßenadressen als langsamsten Text (gemessen 2026-10-02, je 3 Läufe: 6,5 MB in 0,52–0,54 s
 geurteilt, vorher mit Adressen 0,28 s; nach ſ, K, İ oder ı 1,3 MB in 0,35–0,39 s, vorher 0,24–0,28 s;
-6,5 MB nach einem solchen Zeichen sofort `too_large`). Nachgemessen am 2026-10-03 nach Nachtrag A9
+6,5 MB nach einem solchen Zeichen sofort `too_large`) (*für `TestJudgeDeadlineCoversBuild` überholt am
+2026-10-02 durch die NFC-Vereinigung: dort ist `nfdanchors` jetzt langsamer, der Test nimmt seit
+2026-10-03 beide, siehe Zeile „Deadline“ oben; für `TestJudgeBudgetCoversFallbackRunes` gilt es weiter:
+mit ſ davor dichte `schluessel=wert` 272 und 270 ns je Byte bei 2 und 16 MiB, `nfdanchors` 254 und 250,
+erlaubt sind etwa 1.020 und 1.010; nur mit ſ gemessen, nicht mit K, ẞ, İ oder ı; Zahlen aus der
+Commit-Nachricht von aa9d2d4*). Nachgemessen am 2026-10-03 nach Nachtrag A9
 (Tabelle unter „Opaque: Pythons Regel“): schneller Weg höchstens 74 ns je Byte (vorher 75); keine Konstante
 geändert. Mehr endet mit `error_class: too_large`, ohne
 Anfrage, und der Fail-Modus entscheidet; bei einem Hinweis-Gate heißt das `allow`. **Grenze, nicht
@@ -622,17 +647,26 @@ Alias `jev-latest` (welche Version er damals war: nicht festgehalten), nicht neu
 | Adressen: Vereinigung beider Grammatiken | Straße mit Hausnummer oder PLZ + Ort ist, was Pythons oder Gos bisherige Grammatik erkennt | 2026-10-02, Auswahlfrage in der Lead-Sitzung („Union of both“) |
 | Vereinigung bleibt, obwohl sie Prosa maskiert | Gos Präpositions-Zweig bleibt: „Im Jahr 2024 wurde“, „Am Montag 12 Uhr“, „Im PR 41 gefixt“ werden `<address>` (in Go schon vorher, in Python neu; Paket P1 maß auf Pythons Mischkorpus 2.670 → 3.187 Adress-Treffer, 403 der +519 aus diesem Zweig) | 2026-10-02, zweite Auswahlfrage (Nachtrag A5) |
 | NFC in Go aus Pythons Tabellen | `tools/imprint-dev/gen_nfc_tables.py` erzeugt `nfc_tables.go` aus `unicodedata` 16.0.0; `go.mod` bleibt ohne Abhängigkeit | 2026-10-02, Auswahlfrage („Tables from Python“) |
+| E-Mail und Adressen: NFC-Vereinigung | Je Durchgang (E-Mail, Straße, PLZ + Ort) die Spannen auf dem Text vereinigt mit den Spannen desselben Suchers auf einer eigenen NFC-Kopie dieses Textes (Segmente und Verbreiterung wie bei Namen), verschmolzen nur bei echter Überlappung (angrenzende bleiben getrennt), ersetzt im Original, eine Zählung je verschmolzener Spanne; Text in NFC ergibt genau die Spannen im Text. Behebt Mail-Adressen, Straßen und Orte in NFD, ohne irgendwo weniger zu maskieren (nur auf der Kopie zu suchen hätte in 53 Goldfällen weniger maskiert: Prototyp-Messung der Lead-Sitzung, hier nicht nachgemessen). Regeltext: Zeile „NFC-Vereinigung (E-Mail, Straße, PLZ + Ort)“ im README; Go aa9d2d4, Python typesafe-dev 85fce61, 0f7f16a und b340863, hier übernommen in 5e77bad | 2026-10-02, Auswahlfrage in der Lead-Sitzung („Union“) |
+| Budget bleibt bei 200 ns je Byte | `maskWorstNsPerByte` bleibt 200; der langsamste von 10 Läufen von `TestJudgeDeadlineCoversBuild` auf `nfdanchors` erreichte rund 218 ns je Byte gegen 208,3 erlaubte (1,41 s für 6,5 MB, ganzer Aufruf, nicht wörtlich in ns/Byte gemessen; Last etwa 12 auf 20 Kernen, 2026-10-03; die 3-s-Frist hielt, 8 von 10 Läufen 0,79–0,85 s für 6,5 MB) gilt als Lastschwankung, wie zuvor schon der Lauf mit 232 ns (Kommentar in `typesafe_state.go`); Quelle der Messung: Commit 41deba4 | 2026-10-03, Auswahlfrage in der Lead-Sitzung („Keep 200 ns/B“) |
 | alles Übrige | das sicherere Verhalten maskiert mehr, ohne Wörter zu zerteilen | 2026-10-02, Kriterium der Person |
+
+NFC-Vereinigung und Budget bleibt bei 200 ns je Byte: Einträge im Entscheidungsregister
+`imprint/docs/umbau-2026-09-25/entscheide.md` stehen aus (Schreiber: Antigravity, CL-116; Stand 2026-10-02,
+für „Budget bleibt bei 200 ns je Byte“ seit 2026-10-03).
 
 `MaskDetail` (Go) und `ts_common.mask_detail` (Python, Kopie in `tools/typesafe/`) folgen denselben Regeln; diese stehen nur in der Tabelle „Datenschutz & Maskierung“ von [`tools/typesafe/README.md`](../tools/typesafe/README.md).
 
 | Geprüft durch (Go) | Was | ohne python3 |
 |---|---|---|
-| `TestMaskGolden` | Goldkorpus `tools/typesafe/tests/mask-golden.json` (Kopie aus typesafe-dev 752698b, 6.686 Fälle, 16 synthetische Namen; *überholt am 2026-10-03: mit typesafe-dev b64a949 abgeglichen, jetzt 7.269 Fälle, sha256 7b52aae2…*): je Fall genau die Ausgabe und alle 7 Zähler. Rot bei 0 Fällen, bei einer anderen Fallzahl als im Kopf, bei fehlenden Zählern und wenn `unidata_version` des Kopfs nicht `nfcUnicodeVersion` ist (beide 16.0.0; Gos Tabellen stammen aus derselben `unicodedata`, also müssen sie gleich sein); beide Versionen stehen im Log | läuft |
+| `TestMaskGolden` | Goldkorpus `tools/typesafe/tests/mask-golden.json` (Kopie aus typesafe-dev 752698b, 6.686 Fälle, 16 synthetische Namen; *überholt am 2026-10-02 durch die NFC-Vereinigung: Kopie aus typesafe-dev b340863, übernommen in 5e77bad, 7.063 Fälle, dieselben 16 Namen*; *überholt am 2026-10-03: mit typesafe-dev b64a949 abgeglichen, jetzt 7.269 Fälle, sha256 7b52aae2…*): je Fall genau die Ausgabe und alle 7 Zähler. Rot bei 0 Fällen, bei einer anderen Fallzahl als im Kopf, bei fehlenden Zählern und wenn `unidata_version` des Kopfs nicht `nfcUnicodeVersion` ist (beide 16.0.0; Gos Tabellen stammen aus derselben `unicodedata`, also müssen sie gleich sein); beide Versionen stehen im Log | läuft |
 | `TestMaskParity` | `tools/typesafe/tests/mask-parity-cases.json` (96 benannte Fälle); seit 2026-10-02 `masked` genau, wo der Fall es hat (56), und rot bei 0 Fällen | läuft |
 | `TestGrammarSyncWithTsCommon` | Straßen- und PLZ-Grammatiken (Vorsatz und Hausnummer, beide Endungslisten), Schlüsselwortliste, Schlüssel=Wert-Vorsatz und Bearer/Basic in `typesafe.go` gegen ihre Quelle in `ts_common.py`, nach der Abbildung `\s` → S, `\d` → D, `\w` → W, jedes I und i eines `(?i)`-Teils → `turkishI` (`pyToGo`; was die Abbildung nicht festlegt, ist ein Fehler); beide Seiten müssen zum selben Ausdruck parsen | SKIP mit Meldung |
 
-Gemessen 2026-10-02: `TestMaskGolden` 6.686 von 6.686 Fällen gleich (0,07 s); `TestGrammarSyncWithTsCommon`
+Gemessen 2026-10-02: `TestMaskGolden` 6.686 von 6.686 Fällen gleich (0,07 s) (*überholt am 2026-10-02 durch
+die NFC-Vereinigung: nach 5e77bad 7.063 von 7.063 gleich (0,08 s); von aa9d2d4 bis dahin rot auf genau den
+vier Fällen `g/email/mark_after`, `g/email_plus/mark_after`, `g/email_umlaut/mark_after` und
+`g/email_cyrillic/mark_after`, deren Erwartung erst der neue Goldkorpus nachzog*); `TestGrammarSyncWithTsCommon`
 11 Paare, alle derselbe Ausdruck, 10 auch derselbe Text (Pythons Schlüssel=Wert-Vorsatz schreibt die Klasse
 der Anführungszeichen `[\"']`, Go `["']`). (*überholt am 2026-10-03, nach dem Abgleich mit typesafe-dev
 b64a949: `TestMaskGolden` 7.269 von 7.269 Fällen gleich (0,08 s), Header `tests/gen_mask_golden.py,
@@ -661,7 +695,10 @@ beides neu: `nfc_tables.go` (`go generate` mit `gen_nfc_tables.py`) und den Gold
 | Nachtrag A4: Token vor einer Ziffer anderer Schrift | 24 oder mehr Token-Zeichen ohne ASCII-Ziffer direkt vor z. B. „١“: Python maskiert (`RX_OPAQUE` sucht die Ziffer mit Unicode-`\d`), Go nicht; Ziel ist Gos Verhalten (ein Treffer dort teilte ein Wort) | bis der typesafe-dev-Branch `done-check-timeout` gemergt ist, der `RX_OPAQUE` ersetzt; nicht im Goldkorpus (*überholt am 2026-10-03 durch Nachtrag A9: die Prämisse ist widerlegt, auch der lineare Matcher von typesafe-dev master liest die Ziffer mit Unicode-`\d`; Ziel ist Pythons Regel, Go maskiert seitdem ebenso, siehe „Opaque: Pythons Regel“; der Goldkorpus schloss die Form aus, bis er neu erzeugt war, und ist inzwischen, noch am 2026-10-03, mit typesafe-dev b64a949 neu erzeugt (7.269 Fälle, sha256 7b52aae2…), die A9-Fälle sind jetzt enthalten*) |
 | Nachtrag A6: türkisches i kostet | Text mit U+0130 oder U+0131 nimmt in Go für Bearer/Basic, Schlüsselwörter und Namen den alten Weg; das Budget rechnet ihn mit 900 + 20 ns je Namensmuster und Byte statt 200 + 1,5 (bei 3 s etwa 1,6 MB statt 7,2 MB); Ergebnis gleich | bekannte Kosten, nicht geändert; ein schneller Weg, der diese Faltung kennt, wäre ein Folgeschritt |
 | Nachtrag A7: Namensdatei | Python und Go lesen verschieden: Zeilen mit zwei Leerzeichen hintereinander, U+001C–U+001F als Trenner, eine Datei, die nicht UTF-8 ist (Python verwirft sie ganz, Go liest die Zeile als Latin-1). Dazu ersetzt Python alle Namen in einer Alternation, Go Name für Name: gleich, solange sich Namen nicht überlappen | bekannt; die Namensliste des Goldkorpus meidet alle vier |
-| NFD bei Adressen und E-Mail | Nur Namen laufen über eine NFC-Kopie. In NFD ist ein Kombinationszeichen kein Wortzeichen: PLZ + „Mu“ + U+0308 + „nchen“ wird `<address>` + U+0308 + „nchen“, der Ort bleibt halb stehen; bei einer Mail-Adresse mit zerlegtem Umlaut vor dem @ bleibt alles bis zum letzten Kombinationszeichen stehen, mit zerlegtem Umlaut im Domain-Teil wird gar nichts maskiert. In beiden Sprachen gleich (gemessen 2026-10-02) | nicht behoben; Kandidat für einen Folgeschritt (Adressen und E-Mail auf derselben NFC-Kopie wie Namen) |
+| NFD bei Adressen und E-Mail | Nur Namen laufen über eine NFC-Kopie. In NFD ist ein Kombinationszeichen kein Wortzeichen: PLZ + „Mu“ + U+0308 + „nchen“ wird `<address>` + U+0308 + „nchen“, der Ort bleibt halb stehen; bei einer Mail-Adresse mit zerlegtem Umlaut vor dem @ bleibt alles bis zum letzten Kombinationszeichen stehen, mit zerlegtem Umlaut im Domain-Teil wird gar nichts maskiert. In beiden Sprachen gleich (gemessen 2026-10-02) | nicht behoben; Kandidat für einen Folgeschritt (Adressen und E-Mail auf derselben NFC-Kopie wie Namen) (*Zeile überholt am 2026-10-02 durch die NFC-Vereinigung, Entscheid oben; Go aa9d2d4, typesafe-dev 85fce61, 0f7f16a und b340863, hier 5e77bad: behoben, alle drei Fälle werden ganz `<address>` oder `<email>`, in beiden Sprachen; „Nur Namen laufen über eine NFC-Kopie“ gilt nicht mehr; was bleibt, steht in den drei Zeilen darunter*) |
+| NFC-Vereinigung: Marke nach dem letzten Buchstaben des Orts | Setzt NFC eine Marke hinter dem letzten Buchstaben eines Ortsnamens mit ihm zu einem Zeichen zusammen, das nicht in den Klassen der Grammatik liegt, endet auf der Kopie dort kein Ort. PLZ + „Bad Du“ + U+0308 + „rkheim“ + U+0301 („m“ + U+0301 wird U+1E3F): im Text endet der Treffer vor U+0308 (PLZ + „Bad Du“), auf der Kopie findet sich nur PLZ + „Bad“, das darin liegt; maskiert wird PLZ + „Bad Du“, U+0308 + „rkheim“ + U+0301 bleibt stehen, Adresse 1. Ohne die Marke am Ende wird alles `<address>`. In beiden Sprachen gleich | gemessen 2026-10-02 vom Python-Schreiber in typesafe-dev; hier am selben Tag nachgemessen mit `ts_common.mask_detail` (5e77bad) und `MaskDetail` (aa9d2d4), ohne Namensdatei: dieselbe Ausgabe und Zählung; nicht behoben |
+| Lokaler Alarm ohne NFC-Vereinigung | Der lokale Alarm von `ts-commit-check` (`alarm_view` und `local_alarm` in `ts_common.py`; nur Python, Go hat keinen) sucht weiter mit `RX_EMAIL` im Text selbst: eine Mail-Adresse mit zerlegtem Umlaut im Domain-Teil löst ihn nicht aus, auch auf einer Domain, die nicht reserviert ist; mit zerlegtem Umlaut nur vor dem @ löst sie ihn aus wie bisher. Maskiert wird sie in beiden Fällen. Beide Aufrufe laufen noch mit Pythons Rückverfolgung über `RX_EMAIL` und sind quadratisch auf langen Läufen von Zeichen des lokalen Teils: `RX_EMAIL.search` auf 10.000 „a“ 0,22 s, auf 20.000 0,88 s. Linear ist seit typesafe-dev 85fce61 nur der E-Mail-Schritt der Maskierung | außerhalb der drei Durchgänge, nicht geändert; gemessen 2026-10-02 (Python 3.14.6; das Verhalten mit `local_alarm(alarm_view(…))` auf Beispielen aus Teilen, die Zeiten von `RX_EMAIL.search` allein mit `time.perf_counter`, je ein Lauf; der ganze Aufruf brauchte etwa doppelt so lang, 0,44 s und 1,76 s) |
+| NFC-Vereinigung kostet | Text, der nicht NFC ist, baut je Durchgang eine eigene NFC-Kopie, bis zu drei mehr als vorher (Go überspringt die Kopie für E-Mail ohne „@“, für Straße und PLZ ohne Ziffer D). `TestMaskProfile` (`GOMAXPROCS=2`, ns je Byte aufgerundet, der schlechtere von zwei Läufen, vorher = c9ed39a mit denselben Korpora): `nfdanchors` (dichte NFD-Adressen und -Mails) 73 → 116 bei 2 MiB, 68 → 109 bei 16 MiB; `nfdpii` (NFD-Adressen in Fließtext) 66 → 92 und 63 → 88; Text in NFC unverändert (`keyvalues` 76 → 79 und 75 → 75); mit ſ davor `nfdanchors` 218 → 254 und 214 → 250. Das Budget erlaubt `nfdanchors` 208,3 und `nfdpii` 208,6 ns je Byte (6 Namensmuster), mit ſ davor etwa 1.010 | gemessen 2026-10-02, Zahlen aus der Commit-Nachricht von aa9d2d4, hier nicht nachgemessen; keine Konstante geändert |
 | „Gäßchen 4“ allein | bleibt in beiden Grammatiken unmaskiert: Gos Endung „gäßchen“ braucht einen Großbuchstaben davor, Pythons heißt „gässchen“; „Am Gäßchen 4“ wird maskiert | wörtlich nach Spezifikation, in beiden Sprachen gleich (gemessen 2026-10-02) |
 | Basis `jev-judge` ohne die Vereinigung | Der alte Straßen-Schritt kostete auf Ketten großgeschriebener Wörter vor einer Hausnummer 934–937 ns je Byte, über beiden Preisen des Budgets (200 und 900 ns): dort kann ein Text, der ins Budget passt, die Deadline reißen | gemessen 2026-10-02 (Paket G3, `TestMaskProfile`, Korpus `streetchain`) am Stand 4b4487b, dessen Straßen-Suche die von jev-judge 50babfc ist (dazwischen kam nur das türkische i in die Endungen); mit der Vereinigung 28 ns |
 | Schnitt neben einem Wort, das nicht maskiert war | Das zweite Maskieren in `PostState` kann ein gekapptes Feld noch wachsen lassen, wenn der Schnitt einem Wort den Kontext nimmt, an dem es scheiterte: Anfang endet auf „Max“ aus „Maximilian“ (+3 Zeichen über der Kappung), „Str 1“ aus „Str 1ä“ (+4), PLZ + Ort aus zwei Buchstaben (+1); Ende beginnt mit „Bearer a“ hinter einem ASCII-Buchstaben (+9), mit einem Namensteil (+3). Auf gemischten Korpora (`genText`, `pii`, Fließtext; 18.603 Schnitte) kein Fall | gemessen 2026-10-02 (Paket G5, Messtest nur in der Sitzung); nicht behoben, anderer Weg als der behobene Vorsatz (siehe „Maskieren und Kappen“) |

@@ -31,6 +31,11 @@ import (
 //     Everything outside the spans is copied from the original byte for
 //     byte (a decomposed word next to a name stays decomposed).
 //   - Text that is not valid UTF-8: no NFC, name by name as before.
+//
+// Since 2026-10-02 (the NFC union) the email, street and postcode steps
+// build the same copy of their own input and map their matches back the
+// same way; they replace the union with what they find on the input itself
+// (maskSpansNFC below).
 
 // maskNames is MaskDetail's names step; repl is called once per match and
 // returns the placeholder.
@@ -88,6 +93,101 @@ func replaceNames(text string, matchers []nameMatcher, repl func(string) string,
 		}
 	}
 	return text
+}
+
+// The email, street and postcode steps on text that is not NFC (the NFC
+// union; spec decided by the user 2026-10-02, the same text as
+// ts_common.py's): a decomposed umlaut or accent ("Mu" + U+0308 + "nchen")
+// holds a combining mark, which is neither a letter nor a number, so on the
+// text itself an address stopped at it or was not found at all. Each of the
+// three passes now also scans an NFC copy of its own input (newNFCView,
+// built anew per pass) and replaces the union of what it finds on the text
+// and on the copy (maskSpansNFC). Names and the other steps are unchanged.
+
+// maskSpansNFC is one pass of the NFC union. find calls emit with the spans
+// the pass finds in a text, in order and not overlapping; anchor(text) must
+// be false only if find finds nothing in text and nothing in its NFC copy
+// (a rune every match holds and NFC never makes, TestNFCKeepsAnchors; an
+// invalid byte is no such rune, as find reads it as U+FFFD); repl
+// is called once per replaced span and returns the placeholder.
+//
+//   - Text without an anchor: nothing to replace.
+//   - Text that is not valid UTF-8, or NFC (the quick check, or a copy
+//     equal to the text): the spans found on the text, as before.
+//   - Other text: the spans found on the text (O) and those found on its
+//     NFC copy, mapped back as names map theirs (start of the first byte,
+//     end of the last: one to one in identity blocks, widened to the edge
+//     of a segment that NFC changes). Both lists are in order of their
+//     starts; taken together in that order, a span that starts before the
+//     end of the one being built (strictly: adjacent spans stay apart)
+//     extends it, any other starts a new one. Each merged span is one
+//     replacement and one count; the rest is copied from the text byte for
+//     byte.
+//
+// On text that is NFC the copy path gives O: the copy is the text, its
+// spans map one to one, and O merged with itself is O.
+func maskSpansNFC(text string, find func(text string, emit func(s, e int)), anchor func(string) bool,
+	repl func(string) string) string {
+	if !anchor(text) {
+		return text
+	}
+	if !utf8.ValidString(text) || nfcQuickSpan(text, 0) == len(text) {
+		return replaceSpans(text, find, repl)
+	}
+	view := newNFCView(text)
+	if view.copy == text {
+		return replaceSpans(text, find, repl)
+	}
+	var orig, mapped [][2]int
+	find(text, func(s, e int) { orig = append(orig, [2]int{s, e}) })
+	find(view.copy, func(s, e int) { mapped = append(mapped, [2]int{view.start(s), view.end(e - 1)}) })
+	if len(orig) == 0 && len(mapped) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	done := 0
+	a, z := -1, -1 // the merged span being built
+	flush := func() {
+		b.WriteString(text[done:a])
+		b.WriteString(repl(text[a:z]))
+		done = z
+	}
+	for i, j := 0, 0; i < len(orig) || j < len(mapped); {
+		var sp [2]int
+		if j == len(mapped) || i < len(orig) && orig[i][0] <= mapped[j][0] {
+			sp, i = orig[i], i+1
+		} else {
+			sp, j = mapped[j], j+1
+		}
+		if a >= 0 && sp[0] < z {
+			z = max(z, sp[1])
+			continue
+		}
+		if a >= 0 {
+			flush()
+		}
+		a, z = sp[0], sp[1]
+	}
+	flush()
+	b.WriteString(text[done:])
+	return b.String()
+}
+
+// replaceSpans replaces the spans find emits in text.
+func replaceSpans(text string, find func(text string, emit func(s, e int)), repl func(string) string) string {
+	var b strings.Builder
+	done := 0
+	find(text, func(s, e int) {
+		b.WriteString(text[done:s])
+		b.WriteString(repl(text[s:e]))
+		done = e
+	})
+	if done == 0 {
+		return text
+	}
+	b.WriteString(text[done:])
+	return b.String()
 }
 
 // nfcView is the NFC copy of a valid UTF-8 text and the map back to it.

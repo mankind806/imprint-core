@@ -474,6 +474,26 @@ var errTooLarge = errors.New("text too large to mask within the deadline")
 //     as the text, and are scanned name by name when the copy holds a rune
 //     such as U+0130: maskNsPerByte charges the name rate times the copy's
 //     length, and the scan rate then. No constant changed.
+//   - re-measured after the NFC union (2026-10-02, same machine, before
+//     (c9ed39a, with the new corpora backported) and after in one session,
+//     two interleaved runs each, TestMaskProfile at 2 and 16 MiB, 2 names;
+//     new corpora nfdpii (NFD local parts and domains, bare "@" runs,
+//     postcodes before NFD places, NFD streets with house numbers, between
+//     prose) and nfdanchors (the same shapes in dense runs, no prose).
+//     Until then every step but names ran on the original bytes only; now
+//     the email, street and postcode steps, on text that is not NFC and
+//     holds an "@" or a digit, each build an NFC copy of their own input
+//     and scan it too (maskSpansNFC). nfdanchors at most 116 ns (before 73;
+//     email, street and postcode 58, 26 and 17 ns, before 17, 11 and 7),
+//     nfdpii at most 92 (before 66); NFC text unchanged, at most 79 ns
+//     (before 76, dense key=value; in the second session 84, before 83:
+//     the spread of its key=value step); the other NFC corpora at most 66 ns
+//     (before 73: they hold no digit and no "@", so street and postcode no
+//     longer scan them); with a long s in front nfdanchors at most 254 ns
+//     (before 218), nfdpii 238 (before 218), dense key=value 272 (before
+//     272). maskNsPerByte allows nfdanchors 208.3 ns and nfdpii 208.6, about
+//     1,010 with such a rune in front (6 name patterns). No constant
+//     changed.
 //   - per name pattern: 0.9 on the fold-canonical search (Greek names on
 //     Greek text): 1.5; 15.7 when a text is scanned name by name (it holds
 //     such a rune, or is not valid UTF-8): 20.
@@ -486,8 +506,10 @@ const (
 
 // maskNsPerByte is the worst-case masking cost per byte of text, with the
 // given number of name patterns, on the path the text will take. Since
-// 2026-10-02 names on text that is not NFC run on an NFC copy (mask_nfc.go).
-// Building it is inside the per-byte rate (see above); but the names run
+// 2026-10-02 names on text that is not NFC run on an NFC copy (mask_nfc.go),
+// and since the NFC union (2026-10-02) the email, street and postcode steps
+// scan a copy of their own input too. Building and scanning those copies is
+// inside the per-byte rate (see above); but the names run
 // over the copy, which may be longer than the text (up to twice for "a" +
 // U+0F73...), and it may hold a rune whose fold has another length that the
 // text lacks ("I" + U+0307 is U+0130 in NFC): then they are scanned name by

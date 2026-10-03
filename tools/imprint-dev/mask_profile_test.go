@@ -111,6 +111,43 @@ func maskCorpus(rng *rand.Rand, kind string, n int) string {
 			sb.WriteString(pick("Mu\u0308ller", "Gru\u0308\u00dfe", "scho\u0308n", "U\u0308bung", "Ba\u0308cker", "Jo\u0301se\u0301",
 				"Max Mustermann", "Erika Musterfrau", "Ma\u0301x Mu\u0308stermann", "E\u0301rika", "und", "die", "Stra\u00dfe") +
 				pick(" ", ", ", ". ", "\n"))
+		case "nfdpii":
+			// since 2026-10-02 (the NFC union): text that is not NFC with an
+			// "@" or a digit after a space every few bytes (NFD local parts
+			// and domains, bare "@" runs, postcodes before NFD places, NFD
+			// streets and chains with house numbers), so the email, street
+			// and postcode steps each build an NFC copy of their input and
+			// scan it too
+			sb.WriteString(pick(
+				pick("ju\u0308rgen", "mu\u0308ller", "u\u0308", "x")+"@"+
+					pick("mu\u0308nchen.example", "ko\u0308ln.example", "example.test", "o\u0308", "")+pick("", "\u0301"),
+				digits(5)+" "+pick("Mu\u0308nchen", "Ko\u0308ln", "Du\u0308sseldorf", "Berlin", "Fu\u0308rth im Wald"),
+				pick("Mu\u0308hlenweg", "Ko\u0308nigstra\u00dfe", "Am Gru\u0308nen Markt", "A\u0308aa A\u0308aa Weg", "Hauptstr.")+" "+
+					digits(1+rng.Intn(3))+pick("", "a", " - 4", "\u0301"),
+				"Gru\u0308\u00dfe an Max Mustermann, Seite "+digits(2),
+			) + pick(" ", ", ", "\n", ""))
+		case "nfdanchors":
+			// since 2026-10-02 (the NFC union): nfdpii's densest shapes
+			// without the prose between them, in runs: an "@" after every
+			// NFD letter, NFD domains with no space between the addresses,
+			// chains of NFD capitalised words before a house number,
+			// postcodes before NFD places, house numbers with a mark
+			k := 1 + rng.Intn(64)
+			switch rng.Intn(5) {
+			case 0:
+				sb.WriteString(strings.Repeat("u\u0308"+"@", k))
+			case 1:
+				sb.WriteString(strings.Repeat("x"+"@"+"mu\u0308nchen.example", k))
+			case 2:
+				sb.WriteString(strings.Repeat("A\u0308aa ", k) + "Weg 1x2")
+			case 3:
+				for ; k > 0; k-- {
+					sb.WriteString(digits(5) + " Mu\u0308nchen ")
+				}
+			default:
+				sb.WriteString(strings.Repeat("Mu\u0308hlenweg 1\u0301 ", k))
+			}
+			sb.WriteString(pick(" ", "\n", ""))
 		case "jamo":
 			// Hangul as conjoining jamo: every syllable composes, L V or L V T
 			for k := 1 + rng.Intn(4); k > 0; k-- {
@@ -162,10 +199,11 @@ var maskCorpusKinds = []string{"prose", "capsdigits", "uuidhash", "pii", "addres
 var maskAddressKinds = []string{"streetchain", "anchors", "lowerrun", "unicodeaddr"}
 
 // maskNFCKinds are the corpora added with names on an NFC copy (2026-10-02):
-// text that is not NFC, so the names step builds the copy and maps back.
-// The profile runs them after maskAddressKinds, the differential test at
-// 16 KiB.
-var maskNFCKinds = []string{"nfdgerman", "jamo", "markrun", "tibetan", "f73one"}
+// text that is not NFC, so the names step builds the copy and maps back;
+// nfdpii and nfdanchors since the NFC union (2026-10-02), where the email,
+// street and postcode steps do so too. The profile runs them after
+// maskAddressKinds, the differential test at 16 KiB.
+var maskNFCKinds = []string{"nfdgerman", "jamo", "markrun", "tibetan", "f73one", "nfdpii", "nfdanchors"}
 
 func TestMaskProfile(t *testing.T) {
 	if os.Getenv("IMPRINT_MASK_PROFILE") != "1" {

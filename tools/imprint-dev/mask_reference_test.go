@@ -24,10 +24,22 @@ package main
 //     least two code points (refLoadNames); every valid UTF-8 text, NFC or
 //     not, is matched on an NFC copy built segment by segment with nfc and
 //     replaced in the original with per-byte provenance (refNamesStep);
+//   - 2026-10-02, the NFC union (spec decided by the user): the email, street
+//     and postcode passes replace the union of what they find on their input
+//     and on its NFC copy, mapped back with the same per-byte provenance
+//     (refUnionStep, refNFCCopy);
 //   - 2026-10-03, amendment A9: the opaque step is ts_common.py's RX_OPAQUE
 //     tried position by position with both lookaheads (refOpaqueStep), so a
 //     run of token characters may take its digit from the rune after it
 //     (Unicode \d); before: a candidate regex and an ASCII digit inside.
+//
+// Independence: of the production code's NFC the reference calls only
+// nfc() and canonicalCombiningClass (through refNFCBoundary, whose quick
+// check Maybe set is a literal of its own); nfc() uses nfcQuickSpan and
+// nfcPiece inside, so those are shared through it, and TestNFCPython*
+// check nfc() against Python's unicodedata. It calls none of newNFCView,
+// nfcView.start or end, nfcQuickSpan, nfcPiece, maskSpansNFC or a
+// production scanner or merge directly.
 
 import (
 	"os"
@@ -102,18 +114,19 @@ func refLongest(p string) *regexp.Regexp {
 	return re
 }
 
-// refAddressStep is one address step as spec section 4 states it: (i, j) is
-// a candidate if text[i:j] is in the grammar's language and Python's \b
-// (refBoundary) holds at i and at j; the smallest i (not before the end of
-// the last match) that has one wins, with its largest j; the search goes on
-// at j. For a start i, the largest j is found from the longest match of the
-// grammar in text[i:k], k = len(text) first: its end e is the largest e <= k
-// with text[i:e] in the language (the grammars hold no \b, ^ or $ of their
-// own), so if \b holds at e, e is the answer; if not, no end in (e-1 rune,
-// k] is, and the search repeats with k = e minus its last rune.
-func refAddressStep(text string, re *regexp.Regexp, counts *MaskCounts) string {
-	var b strings.Builder
-	done := 0
+// refAddressSpans returns the matches of one address step as spec section 4
+// states it: (i, j) is a candidate if text[i:j] is in the grammar's language
+// and Python's \b (refBoundary) holds at i and at j; the smallest i (not
+// before the end of the last match) that has one wins, with its largest j;
+// the search goes on at j. For a start i, the largest j is found from the
+// longest match of the grammar in text[i:k], k = len(text) first: its end e
+// is the largest e <= k with text[i:e] in the language (the grammars hold no
+// \b, ^ or $ of their own), so if \b holds at e, e is the answer; if not, no
+// end in (e-1 rune, k] is, and the search repeats with k = e minus its last
+// rune. Until 2026-10-02 (the NFC union) this was refAddressStep, which
+// replaced the matches itself.
+func refAddressSpans(text string, re *regexp.Regexp) [][2]int {
+	var spans [][2]int
 	for i := 0; i < len(text); {
 		_, w := utf8.DecodeRuneInString(text[i:])
 		if !refBoundary(text, i) {
@@ -138,13 +151,96 @@ func refAddressStep(text string, re *regexp.Regexp, counts *MaskCounts) string {
 			i += w
 			continue
 		}
-		b.WriteString(text[done:i])
-		b.WriteString("<address>")
-		counts.Address++
-		done, i = j, j
+		spans = append(spans, [2]int{i, j})
+		i = j
+	}
+	return spans
+}
+
+// refEmailSpans returns the matches of the email pattern in text, those
+// ReplaceAllStringFunc replaces.
+func refEmailSpans(text string) [][2]int {
+	var spans [][2]int
+	for _, m := range refEmailRE.FindAllStringIndex(text, -1) {
+		spans = append(spans, [2]int{m[0], m[1]})
+	}
+	return spans
+}
+
+// refUnionStep is one pass of the NFC union (email, street, postcode; the
+// spec the user decided on 2026-10-02, the same text as ts_common.py's),
+// written plainly and apart from mask_nfc.go. find returns the spans the
+// pass finds in a text, in order, not overlapping.
+//
+//   - O: the spans find returns for the text.
+//   - Text that is not valid UTF-8: O. Every other text, NFC or not, takes
+//     the general path, so that the differential test also checks that the
+//     production's shortcut for NFC text (O itself) is that path: find runs
+//     on the NFC copy (refNFCCopy) too, and each span (s, e) of the copy
+//     becomes (lo[s], hi[e-1]) in the text.
+//   - All spans, sorted by start (stable; ties may come in any order), are
+//     merged left to right: one that starts before the end of the span
+//     being built (strictly: adjacent spans stay apart) extends it to the
+//     larger end, any other starts a new one.
+//   - Each merged span becomes placeholder and adds one to *n; the rest of
+//     the text is copied as it is.
+func refUnionStep(text string, find func(string) [][2]int, placeholder string, n *int) string {
+	spans := find(text)
+	if utf8.ValidString(text) {
+		cp, lo, hi := refNFCCopy(text)
+		for _, m := range find(string(cp)) {
+			spans = append(spans, [2]int{lo[m[0]], hi[m[1]-1]})
+		}
+		sort.SliceStable(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	}
+	var merged [][2]int
+	for _, sp := range spans {
+		if k := len(merged) - 1; k >= 0 && sp[0] < merged[k][1] {
+			merged[k][1] = max(merged[k][1], sp[1])
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	var b strings.Builder
+	done := 0
+	for _, sp := range merged {
+		b.WriteString(text[done:sp[0]])
+		b.WriteString(placeholder)
+		*n++
+		done = sp[1]
 	}
 	b.WriteString(text[done:])
 	return b.String()
+}
+
+// refNFCCopy is the NFC copy of a valid UTF-8 text, as refNamesStep and
+// refUnionStep use it: a new segment starts at the first rune and before
+// every rune refNFCBoundary accepts; the copy is nfc of each segment put
+// together; every copy byte carries the original bytes [lo, hi) it stands
+// for: its own byte in a segment that nfc leaves unchanged, the whole
+// segment in one that it changes. (Factored out of refNamesStep on
+// 2026-10-02, unchanged.)
+func refNFCCopy(text string) (cp []byte, lo, hi []int) {
+	var starts []int
+	for i, r := range text {
+		if i == 0 || refNFCBoundary(r) {
+			starts = append(starts, i)
+		}
+	}
+	starts = append(starts, len(text))
+	for k := 0; k+1 < len(starts); k++ {
+		o, oe := starts[k], starts[k+1]
+		n := nfc(text[o:oe])
+		for b := 0; b < len(n); b++ {
+			cp = append(cp, n[b])
+			if n == text[o:oe] {
+				lo, hi = append(lo, o+b), append(hi, o+b+1)
+			} else {
+				lo, hi = append(lo, o), append(hi, oe)
+			}
+		}
+	}
+	return cp, lo, hi
 }
 
 const refIBANPattern = `[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}`
@@ -174,7 +270,7 @@ func refLap(step string) {
 //     refNFCBoundary accepts; the copy is nfc of each segment put together;
 //   - every copy byte carries the original bytes [lo, hi) it stands for: its
 //     own byte in a segment that nfc leaves unchanged, the whole segment in
-//     one that it changes;
+//     one that it changes (refNFCCopy);
 //   - the names run on the copy as above; the bytes of each "<name>" carry
 //     the union of what the bytes it replaced carried, and an insertion id;
 //     an insertion that replaced bytes of older ones is joined with them
@@ -220,26 +316,10 @@ func refNamesStep(text string, counts *MaskCounts) string {
 	if len(names) == 0 {
 		return text
 	}
-	var starts []int
-	for i, r := range text {
-		if i == 0 || refNFCBoundary(r) {
-			starts = append(starts, i)
-		}
-	}
-	starts = append(starts, len(text))
-	var cp []byte
-	var lo, hi, grp []int
-	for k := 0; k+1 < len(starts); k++ {
-		o, oe := starts[k], starts[k+1]
-		n := nfc(text[o:oe])
-		for b := 0; b < len(n); b++ {
-			cp, grp = append(cp, n[b]), append(grp, -1)
-			if n == text[o:oe] {
-				lo, hi = append(lo, o+b), append(hi, o+b+1)
-			} else {
-				lo, hi = append(lo, o), append(hi, oe)
-			}
-		}
+	cp, lo, hi := refNFCCopy(text)
+	grp := make([]int, len(cp))
+	for k := range grp {
+		grp[k] = -1
 	}
 	var parent []int
 	find := func(x int) int {
@@ -593,11 +673,8 @@ func maskDetailReference(text string) (string, MaskCounts) {
 
 	refLap("secret_kw")
 
-	// 3. email
-	text = refEmailRE.ReplaceAllStringFunc(text, func(m string) string {
-		counts.Email++
-		return "<email>"
-	})
+	// 3. email (since 2026-10-02 the NFC union, refUnionStep)
+	text = refUnionStep(text, refEmailSpans, "<email>", &counts.Email)
 
 	refLap("email")
 
@@ -624,13 +701,15 @@ func maskDetailReference(text string) (string, MaskCounts) {
 	refLap("phone")
 
 	// 6. address: street + house number (since 2026-10-02 the union grammar,
-	// leftmost-longest, refAddressStep)
-	text = refAddressStep(text, refStreetRE, &counts)
+	// leftmost-longest, refAddressSpans; since 2026-10-02 also the NFC union,
+	// refUnionStep)
+	text = refUnionStep(text, func(s string) [][2]int { return refAddressSpans(s, refStreetRE) }, "<address>", &counts.Address)
 
 	refLap("street")
 
-	// 7. address: postcode + place, over the street step's result
-	text = refAddressStep(text, refPlzRE, &counts)
+	// 7. address: postcode + place, over the street step's result (the NFC
+	// union too, on a copy of its own input)
+	text = refUnionStep(text, func(s string) [][2]int { return refAddressSpans(s, refPlzRE) }, "<address>", &counts.Address)
 
 	refLap("plz")
 

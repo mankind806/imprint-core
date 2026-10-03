@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -160,5 +163,129 @@ func TestRefQCMaybeStarters(t *testing.T) {
 	}
 	if n != len(refQCMaybeStarters) {
 		t.Errorf("%d runes, refQCMaybeStarters has %d", n, len(refQCMaybeStarters))
+	}
+}
+
+// TestMaskNFCUnion pins the NFC union of the email, street and postcode
+// steps (spec decided by the user 2026-10-02, the same text as
+// ts_common.py's): each pass also scans an NFC copy of its own input, maps
+// what it finds there back (widened to the edge of a segment NFC changes),
+// and replaces the union with the matches on the input itself, merged where
+// they overlap; each merged span counts once. The expectations follow the
+// spec: the first three rows are its examples, the "e" + U+0301 row is one
+// of the four golden mark_after cases it changes, and the "M" + U+00FC +
+// "nchen" + U+0301 row the case where the input's own span survives. The
+// reference (refUnionStep) must agree.
+func TestMaskNFCUnion(t *testing.T) {
+	t.Setenv("TYPESAFE_NAMES_FILE", filepath.Join(t.TempDir(), "none.txt"))
+	plz := func(head, rest string) string { return head + rest } // .githooks/pre-push
+	for _, c := range []struct {
+		in, want string
+		counts   MaskCounts
+	}{
+		// the spec's three examples: an NFD umlaut in the domain, in the
+		// local part, and in the place after a postcode
+		{"x local" + at + "mu\u0308nchen.example y", "x <email> y", MaskCounts{Email: 1}},
+		{"x ju\u0308rgen" + at + "example.test y", "x <email> y", MaskCounts{Email: 1}},
+		{"Adresse: " + plz("8033", "1 Mu\u0308nchen, fertig"), "Adresse: <address>, fertig", MaskCounts{Address: 1}},
+		// a mark after the address: "e" + U+0301 composes, so the copy's
+		// address takes it along; "." + U+0301 and "t" + U+0301 do not
+		{"test.user" + at + "mail.example\u0301", "<email>", MaskCounts{Email: 1}},
+		{"<a.b" + at + "mail.example>.\u0301", "<<email>>.\u0301", MaskCounts{Email: 1}},
+		{"a" + at + "b.test\u0301", "<email>\u0301", MaskCounts{Email: 1}},
+		// the input's own span survives: a precomposed umlaut, then an acute
+		// on the last "n" (U+0144 in the copy, where no place can end)
+		{plz("8033", "1 M\u00fcnchen\u0301"), "<address>\u0301", MaskCounts{Address: 1}},
+		// the input's span ("hlenweg 3", "Markt 3", "ller@...") and the
+		// copy's (all of it) overlap: one merged span, one count
+		{"Mu\u0308hlenweg 3", "<address>", MaskCounts{Address: 1}},
+		{"Am Gru\u0308nen Markt 3", "<address>", MaskCounts{Address: 1}},
+		{"mu\u0308ller" + at + "example.test", "<email>", MaskCounts{Email: 1}},
+		// spans that only touch stay apart: on the input "x" + at + "y.z" ends at
+		// the "+", where the copy's second address ("+" + U+00FC + at + "w.v") starts
+		{"x" + at + "y.z+u\u0308" + at + "w.v", "<email><email>", MaskCounts{Email: 2}},
+		// nothing on either: a lone mark is unchanged by NFC
+		{"\u0308" + at + "x.example", "\u0308" + at + "x.example", MaskCounts{}},
+		// email and address on one line, each pass on its own input
+		{"mu\u0308ller" + at + "ko\u0308ln.example, " + plz("5066", "7 Ko\u0308ln"), "<email>, <address>",
+			MaskCounts{Email: 1, Address: 1}},
+	} {
+		got, counts := MaskDetail(c.in)
+		if got != c.want || counts != c.counts {
+			t.Errorf("%+q: got %+q %+v, want %+q %+v", c.in, got, counts, c.want, c.counts)
+		}
+		if ref, refCounts := maskDetailReference(c.in); ref != got || refCounts != counts {
+			t.Errorf("%+q: reference %+q %+v, MaskDetail %+q %+v", c.in, ref, refCounts, got, counts)
+		}
+	}
+}
+
+// TestMaskNFCUnionLinear: the email, street and postcode steps on text that
+// is not NFC, with an "@" or a digit after a space every few bytes, take
+// well under a second at 64 KiB (as TestMaskLinearOnRejectedRuns), and the
+// same shapes, small enough for the reference, give its output.
+func TestMaskNFCUnionLinear(t *testing.T) {
+	t.Setenv("TYPESAFE_NAMES_FILE", filepath.Join(t.TempDir(), "none.txt"))
+	plz := func(head, rest string) string { return head + rest }
+	for name, c := range map[string]struct{ unit, tail string }{
+		"NFD local parts": {"mu\u0308ller" + at + "ko\u0308ln.example ", ""},
+		"NFD domains":     {"x" + at + "mu\u0308nchen.example", ""},
+		"NFD at signs":    {"u\u0308" + at, ""},
+		"NFD domain run":  {"u\u0308", ""},
+		"NFD postcodes":   {plz("8033", "1 Mu\u0308nchen "), ""},
+		"NFD streets":     {"Mu\u0308hlenweg 3 ", ""},
+		"NFD chain":       {"A\u0308aa ", "Weg 1x2"},
+		"marks on digits": {"Weg 1\u0301 ", ""},
+	} {
+		head := ""
+		if name == "NFD domain run" {
+			head = "a" + at
+		}
+		text := head + strings.Repeat(c.unit, (64<<10)/len(c.unit)) + c.tail
+		start := time.Now()
+		MaskDetail(text)
+		if el := time.Since(start); el > 500*time.Millisecond {
+			t.Errorf("%s (%d bytes): %v", name, len(text), el)
+		}
+		small := head + strings.Repeat(c.unit, 2000/len(c.unit)) + c.tail
+		got, gc := MaskDetail(small)
+		want, wc := maskDetailReference(small)
+		if got != want || gc != wc {
+			t.Errorf("%s: differs from the reference on %.60q", name, small)
+		}
+	}
+}
+
+// TestNFCKeepsAnchors backs the prefilters of the NFC union: maskEmail
+// builds no copy of a text without an "@", maskStreet and maskPlzOrt none of
+// a text without a D rune (unicode.IsDigit, as digitAt), because NFC never
+// makes either. The copy's runes are runes of the full canonical
+// decompositions of the text's runes, some composed again into a rune that
+// has a canonical decomposition itself. So it is enough that no rune with a
+// canonical decomposition is an "@" or a D rune, nor decomposes to one.
+func TestNFCKeepsAnchors(t *testing.T) {
+	anchor := func(r rune) bool { return r == '@' || unicode.IsDigit(r) }
+	n := 0
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if r >= 0xd800 && r <= 0xdfff {
+			continue
+		}
+		d := nfcDecompose(nil, r, nfcProps(r))
+		if len(d) == 1 && d[0].r == r {
+			continue
+		}
+		n++
+		if anchor(r) {
+			t.Errorf("%U has a canonical decomposition and is an anchor", r)
+		}
+		for _, x := range d {
+			if anchor(x.r) {
+				t.Errorf("%U decomposes to %U, an anchor", r, x.r)
+			}
+		}
+	}
+	// 2,061 outside Hangul and 11,172 Hangul syllables in Unicode 16
+	if n < 13000 {
+		t.Errorf("only %d runes with a canonical decomposition: the tables look incomplete", n)
 	}
 }

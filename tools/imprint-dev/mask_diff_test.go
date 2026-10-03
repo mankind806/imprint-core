@@ -120,6 +120,17 @@ var diffFragments = []string{
 	"abcdefghij-_+/KLMNOPQRST", "bcdefghij-_+/KLMNOPQRST", "\u06f3", "\u0966", "\uff13", "\U0001d7cf", "\U00011de0",
 	"=\u0661", "==\u0661", "\u0661=", "abcdefghij-_+/KLMNOPQRST\u0661", "abcdefghij-_+/KLMNOPQRST\xd9",
 	"\u0661\u0662\u0663\u0664\u0665 Berlin",
+	// the NFC union (2026-10-02): email, street and postcode also on an NFC
+	// copy of their input; NFD umlauts in the local part, in the domain and
+	// after the top-level domain, a mark that composes with the letter
+	// before it ("e", "n") and one that does not ("t", "."), a lone mark
+	// before the "@", an NFD place after a postcode, NFD streets, a mark
+	// after a house number, "+" before an NFD local part (spans that touch)
+	"ju\u0308rgen" + at + "example.test", "x" + at + "mu\u0308nchen.example", "a" + at + "b.example\u0301", "a" + at + "b.test\u0301",
+	"mu\u0308" + at + "x.example", "u\u0308" + at, at + "o\u0308.example", "a" + at + "b.c\u0308", "\u0308" + at + "x.example",
+	"x" + at + "y.z+u\u0308" + at + "w.v", "a.b" + at + "c.d>.\u0301", "1" + "0115 Ko\u0308ln", "8" + "0331 M\u00fcnchen\u0301",
+	"8" + "0331 Mu\u0308nchen, fertig", "Ko\u0308nigstra\u00dfe 5", "Am Gru\u0308nen Markt 3", "Hauptstra\u00dfe 1\u0301",
+	"Weg 3\u0308", "Stra\u00dfe\u0301 4", "<email>\u0338", "<address>\u0301", "1" + "2345 Bad Ho\u0308mburg",
 	// separators, spaces, odd bytes
 	" ", "  ", "\t", "\n", "\r\n", "\f", "\v", " ", " ", ", ", "; ", ". ", "(", ")", "/", "-", "_", "<", ">",
 	"\xff", "\xc3", "\xe2\x82", "é", "ß", "ẞ", "ſ", "K", "١", "Ä", "ö",
@@ -366,7 +377,12 @@ func TestMaskSpecExamples(t *testing.T) {
 // the union of Python's and Go's grammar, Python's classes, Unicode \b,
 // leftmost-longest. Every expectation is the output of the Python lane's
 // ts_common.mask_detail (typesafe-dev branch mask-parity-unicode, 6fc6326,
-// whose address code is that of 3fa4dfe; no names file), run 2026-10-02.
+// whose address code is that of 3fa4dfe; no names file), run 2026-10-02,
+// except the two NFD rows, which the NFC union (2026-10-02) changed: theirs
+// follow the union spec (TestMaskNFCUnion). Checked 2026-10-02 against
+// ts_common.mask_detail of typesafe-dev b340863 (synced here as of 5e77bad),
+// no names file: both rows and all 14 of TestMaskNFCUnion agree, and
+// TestMaskGolden passes its full corpus, 7,063 of 7,063.
 // Postcodes are put together from parts (.githooks/pre-push).
 func TestMaskAddressExamples(t *testing.T) {
 	t.Setenv("TYPESAFE_NAMES_FILE", filepath.Join(t.TempDir(), "none.txt"))
@@ -414,11 +430,15 @@ func TestMaskAddressExamples(t *testing.T) {
 		{"Hauptweg \u0661\u0662", "<address>", 1},
 		{"\u0661\u0662\u0663\u0664\u0665 Berlin", "<address>", 1},
 		{plz("1234", "5\u00a0Berlin"), "<address>", 1},
-		// a place ending in "." before a word rune; decomposed umlauts (NFD):
-		// a combining mark is no word rune, so a boundary lies before it
+		// a place ending in "." before a word rune
 		{plz("1234", "5 Berlin.\u00e9"), "<address>\u00e9", 1},
-		{plz("8033", "1 Mu\u0308nchen"), "<address>\u0308nchen", 1},
-		{"Mu\u0308hlenweg 3", "Mu\u0308<address>", 1},
+		// decomposed umlauts (NFD): a combining mark is no word rune, so on the
+		// text itself a boundary lies before it and the address stopped there
+		// (until 2026-10-02: "<address>" + U+0308 + "nchen" and "Mu" + U+0308
+		// + "<address>"); since the NFC union the match on the NFC copy is
+		// added and merged with it
+		{plz("8033", "1 Mu\u0308nchen"), "<address>", 1},
+		{"Mu\u0308hlenweg 3", "<address>", 1},
 	} {
 		got, counts := MaskDetail(c.in)
 		if got != c.want || counts.Address != c.n || counts != (MaskCounts{Address: c.n}) {

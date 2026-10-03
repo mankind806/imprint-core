@@ -296,11 +296,25 @@ func isEmailLocalRune(r rune) bool {
 	return r == '_' || r == '.' || r == '+' || r == '-' || unicode.IsLetter(r) || unicode.IsNumber(r)
 }
 
+// maskEmail is the email step. Text that is not valid UTF-8 goes to the
+// regex as before; other text is scanned by emailSpans, on the text and, if
+// it is not NFC, also on its NFC copy (maskSpansNFC, since 2026-10-02).
+// Every address holds an "@", and NFC never makes one (TestNFCKeepsAnchors),
+// so a text without one is passed over.
 func maskEmail(text string, repl func(string) string) string {
 	if !utf8.ValidString(text) {
 		return emailRE.ReplaceAllStringFunc(text, repl)
 	}
-	return replaceFound(text, func(pos int) (int, int, bool) {
+	return maskSpansNFC(text, emailSpans, hasAt, repl)
+}
+
+func hasAt(text string) bool { return strings.IndexByte(text, '@') >= 0 }
+
+// emailSpans calls emit with each address in text (valid UTF-8), in order,
+// not overlapping: the matches of emailPattern that ReplaceAllStringFunc
+// would replace.
+func emailSpans(text string, emit func(s, e int)) {
+	next := func(pos int) (int, int, bool) {
 		for from := pos; from < len(text); {
 			k := strings.IndexByte(text[from:], '@')
 			if k < 0 {
@@ -325,7 +339,15 @@ func maskEmail(text string, repl func(string) string) string {
 			from = a + 1
 		}
 		return 0, 0, false
-	}, repl)
+	}
+	for pos := 0; pos < len(text); {
+		s, e, ok := next(pos)
+		if !ok {
+			break
+		}
+		emit(s, e)
+		pos = e
+	}
 }
 
 // --- 4., 5., 9a., 9b. bounded steps --------------------------------------------------

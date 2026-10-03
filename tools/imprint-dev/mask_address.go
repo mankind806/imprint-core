@@ -3,7 +3,6 @@ package main
 import (
 	"regexp/syntax"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"unicode"
@@ -453,19 +452,50 @@ func digitAt(text string, k int) int {
 	return 0
 }
 
-// maskStreet is the street step: the union of PyStreet and GoStreet.
+// maskStreet is the street step: the union of PyStreet and GoStreet, found
+// on the text and, if it is not NFC, also on its NFC copy (maskSpansNFC).
 func maskStreet(text string, repl func(string) string) string {
 	return addrDFAs().maskStreet(text, repl)
 }
 
-// maskPlzOrt is the postcode step: the union of PyPlz and GoPlz.
+// maskPlzOrt is the postcode step: the union of PyPlz and GoPlz, found on
+// the text and, if it is not NFC, also on its NFC copy (maskSpansNFC).
 func maskPlzOrt(text string, repl func(string) string) string {
 	return addrDFAs().maskPlzOrt(text, repl)
 }
 
+// Every street and every postcode holds a D rune, and NFC never makes one
+// (TestNFCKeepsAnchors): a text without one is passed over.
 func (dfa *addrAutomata) maskStreet(text string, repl func(string) string) string {
-	var b strings.Builder
-	done := 0   // text[:done] is written
+	return maskSpansNFC(text, dfa.streetSpans, hasDigitRune, repl)
+}
+
+func (dfa *addrAutomata) maskPlzOrt(text string, repl func(string) string) string {
+	return maskSpansNFC(text, dfa.plzSpans, hasDigitRune, repl)
+}
+
+// hasDigitRune reports whether text holds a D rune (\p{Nd}).
+func hasDigitRune(text string) bool {
+	for k := 0; k < len(text); {
+		if c := text[k]; c < utf8.RuneSelf {
+			if isASCIIDigit(c) {
+				return true
+			}
+			k++
+			continue
+		}
+		r, w := utf8.DecodeRuneInString(text[k:])
+		if unicode.IsDigit(r) {
+			return true
+		}
+		k += w
+	}
+	return false
+}
+
+// streetSpans calls emit with each street the step finds in text, in order,
+// not overlapping.
+func (dfa *addrAutomata) streetSpans(text string, emit func(s, e int)) {
 	pos := 0    // no match starts before pos (the end of the last one)
 	afterD := 0 // no match starts before the end of the last anchor's D
 	for k := 0; k < len(text); {
@@ -542,20 +572,14 @@ func (dfa *addrAutomata) maskStreet(text string, repl func(string) string) strin
 		if i < 0 {
 			continue
 		}
-		b.WriteString(text[done:i])
-		b.WriteString(repl(text[i:j]))
-		done, pos = j, j
+		emit(i, j)
+		pos = j
 	}
-	if done == 0 {
-		return text
-	}
-	b.WriteString(text[done:])
-	return b.String()
 }
 
-func (dfa *addrAutomata) maskPlzOrt(text string, repl func(string) string) string {
-	var b strings.Builder
-	done := 0
+// plzSpans calls emit with each postcode and place the step finds in text,
+// in order, not overlapping.
+func (dfa *addrAutomata) plzSpans(text string, emit func(s, e int)) {
 	for i := 0; i < len(text); {
 		w := digitAt(text, i)
 		if w == 0 {
@@ -575,19 +599,13 @@ func (dfa *addrAutomata) maskPlzOrt(text string, repl func(string) string) strin
 				}
 			})
 			if j > 0 {
-				b.WriteString(text[done:i])
-				b.WriteString(repl(text[i:j]))
-				done, i = j, j
+				emit(i, j)
+				i = j
 				continue
 			}
 		}
 		i += w
 	}
-	if done == 0 {
-		return text
-	}
-	b.WriteString(text[done:])
-	return b.String()
 }
 
 // fiveDigitsThenSpace: five D runes from i, then an S rune.
