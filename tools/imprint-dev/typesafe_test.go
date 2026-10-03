@@ -339,12 +339,12 @@ func TestAllowlist(t *testing.T) {
 		allowed bool
 	}{
 		{"https://api.typesafe.ai/v1/systemone", true},
-		{"http://api.typesafe.ai/v1/systemone", false}, // unencrypted
+		{"http://api.typesafe.ai/v1/systemone", false},  // unencrypted
 		{"https://api.typesafe.ai/v2/systemone", false}, // wrong path
 		{"https://evil.typesafe.ai/v1/systemone", false},
 		{"https://typesafe.ai/v1/systemone", false},
-		{"http://127.0.0.1:8080/v1/systemone", true},  // test loopback
-		{"http://localhost:3000/systemone", true},     // test loopback
+		{"http://127.0.0.1:8080/v1/systemone", true}, // test loopback
+		{"http://localhost:3000/systemone", true},    // test loopback
 		{"invalid-url", false},
 	}
 

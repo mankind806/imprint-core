@@ -19,7 +19,6 @@ const (
 	rulesAgentsPath   = "rules/AGENTS.md"
 )
 
-
 type hookTarget struct {
 	Event string
 	Path  string

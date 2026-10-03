@@ -790,11 +790,11 @@ func SkillSuggestionQuestion() Question {
 			"- session-handover: When closing or ending a session, handing over tasks, preparing wrap-up, context limit reached, committing final work, or saying goodbye ('that's it for today', 'Schluss für heute', 'Übergabe').\n" +
 			"- none: General coding, questions, refactoring, or tasks where none of the specialized imprint governance skills apply.",
 		Criteria: map[string]string{
-			"delegation-contract":     "Task delegation, subagents, reviews, agent arbitration, model choice",
-			"knowledge-keeping":       "Recording facts, decisions, provenance, memory notes, superseding facts",
+			"delegation-contract":      "Task delegation, subagents, reviews, agent arbitration, model choice",
+			"knowledge-keeping":        "Recording facts, decisions, provenance, memory notes, superseding facts",
 			"measure-before-asserting": "Verification before asserting, measuring properties, checking reality vs notes",
-			"session-handover":        "Closing session, handoff, committing runnable work, wrapping up",
-			"none":                    "No specific imprint skill applies",
+			"session-handover":         "Closing session, handoff, committing runnable work, wrapping up",
+			"none":                     "No specific imprint skill applies",
 		},
 	}
 }
