@@ -118,7 +118,10 @@ dieselbe Liste wie `.githooks/pre-push`), reservierte Domains (`example.com`, `*
 `*.test`, `*.invalid`, `*.localhost`), systemd-Units (`name@instanz.service`), Google-Kalender-IDs,
 Platzhalter und Fixture-Werte (`synth-…`, `fake_…`, `…-test-…`). Im Bereichsmodus (`A..B`,
 `A...B` ab der Merge-Basis, ein einzelner Commit, auch der Root-Commit) prüft der lokale Alarm
-jeden Commit einzeln; TypeSafe sieht den Netto-Diff und die letzte Nachricht.
+jeden Commit einzeln; TypeSafe sieht den Netto-Diff und die letzte Nachricht. Mit `--cached`
+oder `--msg-file` während eines Merges (`MERGE_HEAD` vorhanden) zählen nur Zeilen, die gegen
+jeden Elternteil neu sind, und nur Dateinamen, die kein Elternteil hat. Das gilt für den lokalen
+Alarm und für TypeSafe; Details in [`docs/commit-msg-hook.md`](../../docs/commit-msg-hook.md).
 `ts-pr-triage` meldet einen lokalen Treffer ohne Key als Hinweis und bleibt fail-open (exit 0).
 
 ## Konfiguration (projektspezifisch, keine harten Pfade/IDs im Code)

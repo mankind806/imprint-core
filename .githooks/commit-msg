@@ -8,7 +8,9 @@
 # needing no TypeSafe API key: a secret, API key, password, or email-shaped
 # string in the commit message, in the newly added diff lines, or in a changed
 # file name sets its leak probability to 1.0, and that alone refuses the
-# commit (exit 1). With a key configured, `ts-commit-check` also asks TypeSafe
+# commit (exit 1). For a merge (MERGE_HEAD present) the diff lines are only
+# those new against every parent, and the file names only paths no parent has;
+# docs/commit-msg-hook.md says exactly what is read. With a key configured, `ts-commit-check` also asks TypeSafe
 # System One (Jev) to judge how well the message matches the diff
 # (alignment), whether it omits significant changes, and whether it follows
 # Conventional Commits style - but in this hook's plain `--msg-file` mode

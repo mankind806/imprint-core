@@ -15,6 +15,12 @@ Validates:
     Range mode: TypeSafe judges the net diff and the last message; the local alarm
     checks every commit of the range on its own (git rev-list), so a value added in
     one commit and removed in the next still blocks.
+    Merge mode (--msg-file or --cached while MERGE_HEAD exists): the diff is only what
+    the index adds against EVERY parent (HEAD and each MERGE_HEAD entry), i.e. conflict
+    resolutions and lines an evil merge writes itself; the file names are only paths
+    no parent has. A line from either parent was checked there or is already
+    published. Both the local alarm and TypeSafe see just that. A git error here
+    exits 1 rather than check less. See docs/commit-msg-hook.md.
 
 Usage:
   ts-commit-check [COMMIT_RANGE]             # e.g. HEAD~1..HEAD (default)
@@ -25,6 +31,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -88,6 +95,15 @@ def get_diff_and_msg(args, cwd=None):
         commit_msg = None
 
     if args.msg_file or args.cached:
+        parents = merge_parents(cwd)
+        if parents is None:
+            return None, None, None, None, "Merge: MERGE_HEAD ist da, aber nicht lesbar oder nicht auflösbar"
+        if parents:
+            merged = merge_added(parents, cwd)
+            if isinstance(merged, str):
+                return None, None, None, None, merged
+            diff_text, stat_text, names = merged
+            return commit_msg, diff_text, stat_text, [(commit_msg, diff_text, names)], None
         diff_text = run_cmd(["git", "diff", "--cached"], cwd=cwd)
         stat_text = run_cmd(["git", "diff", "--cached", "--stat"], cwd=cwd)
         names = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=cwd)
@@ -110,6 +126,112 @@ def get_diff_and_msg(args, cwd=None):
     if args.msg:  # an explicit message is checked too
         units.append((commit_msg, "", ""))
     return commit_msg, diff_text, stat_text, units, None
+
+
+def merge_parents(cwd=None):
+    """The parents of the merge being committed: HEAD, then every MERGE_HEAD entry
+    (more than one for an octopus). [] without a MERGE_HEAD, i.e. a normal commit;
+    None when MERGE_HEAD is there but cannot be read or resolved."""
+    path = run_cmd(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=cwd)
+    if not path:
+        return []
+    path = os.path.join(cwd or ".", path)  # relative to cwd; per worktree in a linked one
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = f.read().split()
+    except (OSError, UnicodeDecodeError):
+        return None
+    parents = [run_cmd(["git", "rev-parse", "--verify", "--quiet", r + "^{commit}"], cwd=cwd)
+               for r in ["HEAD"] + entries]
+    if not entries or not all(parents):
+        return None
+    return parents
+
+
+def _git_text(args, cwd=None):
+    """stdout of git ARGS, None if git fails. Bytes that are not UTF-8 become U+FFFD
+    instead of failing the decode, so such a file is read, not dropped. GIT_DIFF_OPTS
+    could override -U0; a `git replace` would show something other than the commit."""
+    env = {k: v for k, v in os.environ.items() if k != "GIT_DIFF_OPTS"}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    try:
+        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, timeout=120, env=env)
+    except Exception:
+        return None
+    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+
+
+_HUNK_RE = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _added_records(diff_text):
+    """(path, line number in the new tree, content) for every line a -U0 diff adds;
+    the path as git prints it in the +++ header. None when the diff has another shape:
+    a binary file, a hunk header without a new-side start, or a line inside a hunk
+    that is not +, - or a backslash note."""
+    recs, path, ln, in_hunk = [], None, 0, False
+    lines = diff_text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    for line in lines:
+        if line.startswith("diff "):
+            path, in_hunk = None, False
+        elif line.startswith("@@"):
+            m = _HUNK_RE.match(line)
+            if not m or path is None:
+                return None
+            ln, in_hunk = int(m.group(1)), True
+        elif in_hunk:
+            if line.startswith("+"):
+                recs.append((path, ln, line[1:]))
+                ln += 1
+            elif not line.startswith(("-", "\\")):
+                return None
+        elif line.startswith("+++ "):
+            path = line[4:]
+        elif line.startswith("Binary files "):
+            return None
+    return recs
+
+
+def merge_added(parents, cwd=None):
+    """(diff, file list, new file names) of what the index adds against every one of
+    PARENTS, or an error text. A line counts only when each parent's diff adds it at
+    the same place - same path, same line number in the index, same content - the
+    rule .githooks/pre-push applies to a pushed merge. A new file name is a path no
+    parent has (renames not followed, so a renamed path counts as new)."""
+    per_parent, new_names, ordered = [], None, []
+    for i, p in enumerate(parents):
+        diff = _git_text(["diff-index", "--cached", "-p", "-M", "-U0", "--text",
+                          "--no-ext-diff", "--no-textconv", "--no-color", p], cwd)
+        recs = _added_records(diff) if diff is not None else None
+        names = _git_text(["diff-index", "--cached", "--name-only", "--no-renames",
+                           "--diff-filter=A", p], cwd)
+        if recs is None or names is None:
+            return f"Merge: Diff des Index gegen Elternteil {p} nicht lesbar"
+        per_parent.append(set(recs))
+        names = set(n for n in names.split("\n") if n)
+        new_names = names if new_names is None else new_names & names
+        if i == 0:
+            ordered = recs  # the first parent's order, for a readable diff
+    common = set.intersection(*per_parent)
+    out, files, last = [], [], None
+    for path, ln, content in ordered:
+        if (path, ln, content) not in common:
+            continue
+        shown = path[2:] if path.startswith("b/") else path
+        if last is None or last[0] != path:
+            out.append(f"diff {shown} (Zeilen, die gegen jeden Elternteil neu sind)")
+            files.append(shown)
+        if last is None or last != (path, ln - 1):
+            out.append(f"@@ +{ln} @@")
+        out.append("+" + content)
+        last = (path, ln)
+    names = "\n".join(sorted(new_names))
+    stat = "\n".join(files + [n for n in sorted(new_names) if n not in files])
+    return "\n".join(out), stat, names
 
 
 def resolve_range(rng, cwd=None):
@@ -230,13 +352,17 @@ def main():
         sys.exit(1)
 
     res = check_commit(commit_msg, diff_text, stat_text, units, allowed=tc.allowed_addresses(args.cwd))
+    if (args.msg_file or args.cached) and merge_parents(args.cwd):
+        res["merge"] = True
 
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return
 
     if res["status"] in ("error", "fail_open") or res.get("empty_diff"):
-        print("Hinweis: Diff ist leer (keine Änderungen)." if res.get("empty_diff")
+        empty = ("Hinweis: Der Merge fügt keine Zeile hinzu, die gegen jeden Elternteil neu ist."
+                 if res.get("merge") else "Hinweis: Diff ist leer (keine Änderungen).")
+        print(empty if res.get("empty_diff")
               else f"Hinweis: {res['message']}" + (" (fail-open)" if res["status"] == "error" else ""))
         if res.get("leak_prob") is not None:
             print("❌ ABBRUCH: Secret oder E-Mail-Adresse in Nachricht, neuen Diff-Zeilen oder "
