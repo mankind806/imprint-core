@@ -191,23 +191,28 @@ They count only while no other remote stores refs under that prefix: when anothe
 name starts with `<remote>/`, or one of its fetch refspecs points there (a mirror's
 `+refs/*:refs/*` included, and `remotes/<remote>/…` without the `refs/`, which git
 completes), none of them counts, and everything the remote's old tip does not reach is
-checked. Two places define remotes that `git remote` here does not show, and the hook reads
-neither: a file in the git directory's legacy `remotes/` folder, whose `Pull:` lines git
-still fetches by, and, with `extensions.worktreeConfig` on, another worktree's
-`config.worktree`, where a remote of its own or a `url.<base>.insteadOf` can make that
-worktree's fetch store another repository's commits under `refs/remotes/<remote>/`. While
-either is in use, the tracking refs are not trusted at all. A conditional include
-(`includeIf`, on `onbranch:` or `gitdir:`) can do the same between worktrees without the
-extension, and nothing here covers it. A push by name to a remote whose fetch refspec stores
-into `remotes/<x>/…` leaves a plain file in the legacy folder as well, which
-`git remote remove` does not delete; to clear such a leftover, look at what the `remotes/`
-folder under `git rev-parse --git-common-dir` holds first. `git clone --sparse` and
-`git sparse-checkout set` turn `extensions.worktreeConfig` on, and `git sparse-checkout
-disable` leaves it on, so such a clone has everything the remote's old tip does not reach
-checked: push with `IMPRINT_PUSH_ANYWAY` and a reason, or, after `git sparse-checkout
-disable`, unset `extensions.worktreeConfig` when no worktree's `config.worktree` holds
-anything but the keys `disable` set to false. *Measured with git 2.55.0, 2026-10-01.
-Re-check by 2027-01-01.* A
+checked. Two places define remotes that `git remote` here does not show: a file in the git
+directory's legacy `remotes/` folder, whose `Pull:` lines git still fetches by, and, with
+`extensions.worktreeConfig` on, another worktree's `config.worktree`, where a remote of its
+own or a `url.<base>.insteadOf` can make that worktree's fetch store another repository's
+commits under `refs/remotes/<remote>/`. The hook does not read the legacy folder: while it
+holds anything, the tracking refs are not trusted at all. A push by name to a remote whose
+fetch refspec stores into `remotes/<x>/…` leaves a plain file in the legacy folder as well,
+which `git remote remove` does not delete; to clear such a leftover, look at what the
+`remotes/` folder under `git rev-parse --git-common-dir` holds first. *Measured with git
+2.55.0, 2026-10-01. Re-check by 2027-01-01.* Of the `config.worktree` files — the git
+directory's own and each `worktrees/<id>/config.worktree` — the hook reads the key names:
+while one of them sets a `remote.*` key, a `url.<base>.insteadOf` or `pushInsteadOf`, an
+`include.path` or an `includeIf.*` key, or exists and cannot be read — or while the
+`worktrees/` folder cannot be listed or one of its worktree folders searched — the tracking
+refs are not trusted at all. Any other key leaves them trusted — a `core.hooksPath` set per worktree,
+say, or what `git clone --sparse`, `git sparse-checkout set` and `disable` write there
+(`core.sparseCheckout`, `core.sparseCheckoutCone`, `index.sparse`). Until 2026-10-03 the hook
+distrusted every clone with the extension on, and in a clone whose worktrees each carried a
+`core.hooksPath` there, that refused a new branch's push for test fixtures already on the
+remote. A conditional include (`includeIf`, on `onbranch:` or `gitdir:`) in the shared
+config can still make worktrees differ without the extension, and nothing here covers it.
+*Measured with git 2.55.0, 2026-10-03. Re-check by 2027-01-03.* A
 push to a location rather than a configured remote has no tracking refs to trust, and then
 everything the remote's old tip does not reach is checked. And tracking refs are what this
 clone last fetched, not what the remote holds now: after `git remote set-url` points a remote

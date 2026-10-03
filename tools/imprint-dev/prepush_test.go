@@ -3290,3 +3290,134 @@ func TestPrePushTagSignature(t *testing.T) {
 		})
 	}
 }
+
+// 55. With extensions.worktreeConfig on, the config.worktree files - the git
+// directory's own and each linked worktree's - are read for their key names.
+// Keys that add no remote and send no fetch or push elsewhere leave the
+// tracking refs trusted, so the seed history's shape stays unread; a key that
+// can, or a file git config cannot read, makes the whole history new again.
+func TestPrePushWorktreeConfigKeys(t *testing.T) {
+	env := ppSetup(t)
+	t.Parallel()
+	// seed returns a repository with the extension on, a linked worktree, the
+	// git directory's own config.worktree path, the linked worktree's, its id,
+	// and a clean commit on a new branch.
+	seed := func(t *testing.T) (r *ppRepo, mainCfg, linkedCfg, id, tip string) {
+		t.Helper()
+		r = ppSeed(t, env)
+		r.git("checkout", "-q", "-b", "feature", "main")
+		r.write("feature.txt", "a clean line\n")
+		tip = r.commit("feature: clean commit")
+		r.git("config", "extensions.worktreeConfig", "true")
+		wt := filepath.Join(t.TempDir(), "other")
+		r.git("worktree", "add", "-q", "--detach", wt, "main")
+		admin := strings.TrimSpace(ccRunGit(t, wt, "rev-parse", "--absolute-git-dir"))
+		common := r.git("rev-parse", "--path-format=absolute", "--git-common-dir")
+		return r, filepath.Join(common, "config.worktree"), filepath.Join(admin, "config.worktree"), filepath.Base(admin), tip
+	}
+	writeFile := func(t *testing.T, path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("keys that redirect nothing", func(t *testing.T) {
+		r, mainCfg, linkedCfg, _, tip := seed(t)
+		// What every worktree of the clone this was found in carries, and what
+		// git sparse-checkout writes.
+		writeFile(t, linkedCfg, "[core]\n\thooksPath = /nonexistent-hooks\n\tuntrackedCache = true\n")
+		writeFile(t, mainCfg, "[core]\n\tsparseCheckout = false\n\tsparseCheckoutCone = true\n[index]\n\tsparse = false\n")
+		code, out := r.hookNewBranch("feature", tip)
+		ppWantPass(t, code, out)
+		for _, w := range []string{"1 new commit(s)", "commits already on refs/remotes/origin/*"} {
+			if !strings.Contains(out, w) {
+				t.Errorf("output lacks %q; output:\n%s", w, out)
+			}
+		}
+		ppWantAbsent(t, out, ppSeedAddr)
+	})
+
+	// Each key is set alone, with no other remote and nothing fetched: the
+	// seed history's shape is found only because the key alone makes the
+	// tracking refs untrusted. None of them changes where origin fetches
+	// from in the worktree the hook runs in. Section and key names are
+	// written in mixed case where git would print them in lower case.
+	for _, c := range []struct {
+		name    string
+		inMain  bool // the git directory's own config.worktree, not the linked one's
+		content string
+		kind    string
+	}{
+		{"remote.x.url", false, "[remote \"x\"]\n\turl = /nonexistent/priv\n", "a remote.* key"},
+		{"remote.x.url, in mixed case, in the git directory's own", true, "[Remote \"X\"]\n\tURL = /nonexistent/priv\n", "a remote.* key"},
+		{"url.<base>.insteadOf, in mixed case", false, "[URL \"/nonexistent/priv\"]\n\tInsteadOf = /nonexistent/elsewhere\n", "a url.<base>.insteadOf"},
+		{"url.<base>.insteadOf in the git directory's own", true, "[url \"/nonexistent/priv\"]\n\tinsteadOf = /nonexistent/elsewhere\n", "a url.<base>.insteadOf"},
+		{"url.<base>.pushInsteadOf", false, "[url \"/nonexistent/priv\"]\n\tpushInsteadOf = /nonexistent/elsewhere\n", "a url.<base>.pushInsteadOf"},
+		{"include.path", false, "[include]\n\tpath = /nonexistent/included\n", "an include.path"},
+		{"includeIf", false, "[includeIf \"onbranch:feature\"]\n\tpath = /nonexistent/included\n", "an includeIf.* key"},
+		{"includeIf in the git directory's own", true, "[IncludeIf \"gitdir:/nonexistent/\"]\n\tPath = /nonexistent/included\n", "an includeIf.* key"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, mainCfg, linkedCfg, id, tip := seed(t)
+			where, path := "worktrees/"+id+"/config.worktree", linkedCfg
+			if c.inMain {
+				where, path = "config.worktree", mainCfg
+			}
+			writeFile(t, path, "[core]\n\thooksPath = /nonexistent-hooks\n"+c.content)
+			if got := r.git("remote"); !c.inMain && got != "origin" {
+				t.Fatalf("this worktree's remotes are %q, want origin alone", got)
+			}
+			if got := r.git("remote", "get-url", "origin"); got != r.origin {
+				t.Fatalf("this worktree's origin fetches from %q, want %q", got, r.origin)
+			}
+			code, out := r.hookNewBranch("feature", tip)
+			ppWantRefused(t, code, out, ppSeedAddr, "3 new commit(s)",
+				"extensions.worktreeConfig is on, and the git directory's "+where+" sets "+c.kind, "not trusted")
+			ppWantAbsent(t, out, "/nonexistent/priv", "/nonexistent/elsewhere")
+			ppWantChecked(t, out)
+		})
+	}
+
+	// A linked worktree's file only: git in the worktree the hook runs in
+	// reads the git directory's own config.worktree, and would fail there
+	// before the hook got to it.
+	for _, c := range []struct {
+		name   string
+		spoil  func(t *testing.T, linkedCfg string)
+		reason string // <id> stands for the linked worktree's id
+	}{
+		{"a malformed config.worktree", func(t *testing.T, linkedCfg string) {
+			writeFile(t, linkedCfg, "[core\n")
+		}, "git config could not read the git directory's worktrees/<id>/config.worktree"},
+		{"an unreadable config.worktree", func(t *testing.T, linkedCfg string) {
+			if os.Geteuid() == 0 {
+				t.Skip("running as root, so a file cannot be made unreadable here")
+			}
+			writeFile(t, linkedCfg, "[core]\n\thooksPath = /nonexistent-hooks\n")
+			if err := os.Chmod(linkedCfg, 0); err != nil {
+				t.Fatal(err)
+			}
+		}, "git config could not read the git directory's worktrees/<id>/config.worktree"},
+		{"a worktree folder that cannot be searched", func(t *testing.T, linkedCfg string) {
+			if os.Geteuid() == 0 {
+				t.Skip("running as root, so a folder cannot be made unsearchable here")
+			}
+			writeFile(t, linkedCfg, "[core]\n\thooksPath = /nonexistent-hooks\n")
+			admin := filepath.Dir(linkedCfg)
+			if err := os.Chmod(admin, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(admin, 0o755) })
+		}, "the git directory's worktrees/ folder could not be read in full"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, _, linkedCfg, id, tip := seed(t)
+			c.spoil(t, linkedCfg)
+			code, out := r.hookNewBranch("feature", tip)
+			reason := strings.ReplaceAll(c.reason, "<id>", id)
+			ppWantRefused(t, code, out, ppSeedAddr, "extensions.worktreeConfig is on, and "+reason, "not trusted")
+			ppWantChecked(t, out)
+		})
+	}
+}
