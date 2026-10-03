@@ -100,6 +100,14 @@ Nicht erkannt werden zum Beispiel Namen außerhalb der Namensdatei, Adressen ohn
 oder PLZ, ausländische Telefonnummern und kurze Geheimnisse ohne Schlüsselwort. Der API-Schlüssel
 bleibt im lokalen Schlüsselbund (`secret-tool lookup service typesafe key api`).
 
+`ts-done-check` schreibt je Lauf höchstens eine Zeile nach `~/.local/state/typesafe-dev/done-check.jsonl`
+(Dateirechte 0600, `log_version` 3): Zeitpunkt, `session_id` und `transcript_path` unmaskiert,
+dazu die Entscheidung (`claim`, `backed`, `decision`) oder bei einem Fehler Stufe und Ursache,
+und sobald der Versand an TypeSafe begonnen hat `payload_masked`, also genau das maskiert
+Gesendete: die letzte Assistenten-Nachricht (höchstens ihre letzten 4000 Zeichen) und die letzten
+15 Tool-Aufrufe (bei Bash der Befehl, höchstens 200 Zeichen). Die Datei bleibt lokal; über 20 MiB
+wird sie nach `done-check.jsonl.1` verschoben, und nur diese eine ältere Datei bleibt erhalten.
+
 ## Lokaler Leak-Block (auch ohne Key)
 
 `ts-commit-check` blockt (exit 1) auch ohne TypeSafe-Key, wenn Nachricht, neue Diff-Zeilen

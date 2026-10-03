@@ -9,6 +9,9 @@
 //	    [--pr-body-file file] [--same-repo] [--sarif file]
 //	imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
 //	imprint-dev hook-skill-suggestion [--endpoint url] [--timeout sec]
+//	imprint-dev judge --gate name [--host h] [--deadline-ms N] [--no-ui] [--source s] [--endpoint url]
+//	imprint-dev judge (--list | --version)
+//	imprint-dev version | --version
 //
 // gen writes the SessionStart and SubagentStart hook payloads, and rules/AGENTS.md,
 // from their one canonical source, hooks/kernkarte.md. check runs the invariants a
@@ -24,6 +27,10 @@
 // N96); see commitcheck.go. hook-typesafe-check runs opt-in advisory checks on
 // memory and register writes via TypeSafe System One. hook-skill-suggestion
 // suggests relevant imprint skills for user prompts via TypeSafe System One.
+// judge is the shared Jev core (docs/judge.md): it reads one event as JSON on
+// stdin and writes one verdict allow|warn|ask|block as JSON on stdout, with the
+// gate's questions, thresholds and fail mode from judge/gates.json; see judge.go.
+// version prints the build's version and VCS data.
 //
 // An overdue re-check date is a warning, which leaves the exit code alone,
 // unless --release is given: overdue dates block a release, never the ordinary
@@ -63,6 +70,10 @@ const usageText = `usage:
       [--pr-body-file file] [--same-repo] [--sarif file]
   imprint-dev hook-typesafe-check [--endpoint url] [--timeout sec]
   imprint-dev hook-skill-suggestion [--endpoint url] [--timeout sec]
+  imprint-dev judge --gate name [--host claude|codex|agy|pi] [--deadline-ms N] [--no-ui]
+      [--source hook|bench|test] [--endpoint url] [--registry file]
+  imprint-dev judge (--list | --version)
+  imprint-dev version | --version
 
 gen      writes hooks/session-start.json, hooks/subagent-start.json and rules/AGENTS.md from hooks/kernkarte.md
 check    checks the plugin tree; exit 0 all good, 1 violation, 2 the check could not run;
@@ -81,6 +92,12 @@ hook-typesafe-check  evaluates memory/register file writes via TypeSafe System O
          provenance (knowledge-keeping); exit 0 always (fail-open)
 hook-skill-suggestion  suggests relevant imprint skills for user prompts via TypeSafe System One;
          exit 0 always (fail-open)
+judge    the Jev core: one event as JSON on stdin, one verdict (allow, warn, ask, block) as JSON
+         on stdout, one line in $IMPRINT_JUDGE_LOG or ${XDG_STATE_HOME:-~/.local/state}/imprint/judge.jsonl;
+         exit 0 once the verdict is written (also when the call, its flags or its input failed:
+         the gate's fail mode decides); 1 only for an unparsable flag or --list/--version without
+         a registry; never 2
+version  prints the version and the VCS data built into the binary
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -107,6 +124,10 @@ func runWithStdin(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runHookTypesafeCheck(args[1:], stdin, stdout, stderr)
 	case "hook-skill-suggestion":
 		return runHookSkillSuggestion(args[1:], stdin, stdout, stderr)
+	case "judge":
+		return runJudge(args[1:], stdin, stdout, stderr)
+	case "version", "--version":
+		return runVersion(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usageText)
 		return exitOK

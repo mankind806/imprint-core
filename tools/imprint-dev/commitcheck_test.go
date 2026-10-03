@@ -469,6 +469,44 @@ func TestCommitCheckAssistedBy(t *testing.T) {
 	}
 }
 
+// TestCommitCheckAssistedByIgnoresCallerRepository pins that the trailer
+// verdict does not depend on the directory commit-check runs in. Measured
+// 2026-10-02: a worktree bind-mounted into a container keeps a ".git" file
+// whose gitdir path exists only on the host, and `git interpret-trailers`,
+// run there, exits 128 ("not a git repository") with git 2.47.3 and 2.55.0
+// alike; that exit used to read as "not a trailer at all". Not parallel:
+// t.Chdir changes the whole process's directory.
+func TestCommitCheckAssistedByIgnoresCallerRepository(t *testing.T) {
+	broken := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "gone", ".git", "worktrees", "wt")
+	if err := os.WriteFile(filepath.Join(broken, ".git"), []byte("gitdir: "+missing+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(broken, "tools", "imprint-dev")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+	if msg := checkAssistedByRule("Fix the check.\n\nAssisted-by: some tool\n", false); msg != "" {
+		t.Errorf("a well-formed trailer, checked from under a .git file whose gitdir is missing, got %q, want none", msg)
+	}
+	if msg := checkAssistedByRule("Fix the check.\nAssisted-by: some tool\n", false); !strings.Contains(msg, "does not read as a trailer") {
+		t.Errorf("a trailer touching the line above it, checked from the same place, got %q, want the not-a-trailer finding", msg)
+	}
+}
+
+// TestCommitCheckAssistedByReportsGitRunFailure pins that a git that cannot
+// run at all is named as such, not passed off as a malformed trailer: the
+// old wording sent the reader looking for a missing blank line that was
+// there all along. Still a finding, so the check fails closed.
+func TestCommitCheckAssistedByReportsGitRunFailure(t *testing.T) {
+	t.Setenv("PATH", "")
+	msg := checkAssistedByRule("Fix the check.\n\nAssisted-by: some tool\n", false)
+	if !strings.Contains(msg, `could not run "git interpret-trailers"`) || strings.Contains(msg, "blank line") {
+		t.Errorf("got %q, want a finding that names the failed git run and not a missing blank line", msg)
+	}
+}
+
 func TestCommitCheckPullRequestBody(t *testing.T) {
 	conf := ccTestConfParsed(t)
 

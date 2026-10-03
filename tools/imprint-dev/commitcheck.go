@@ -28,6 +28,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -565,7 +566,13 @@ func checkPullRequestBody(conf ccConf, text string, isBotPR bool) []ccFinding {
 // well-formed block (`git interpret-trailers`, the same parser
 // CONTRIBUTING.md's own `%(trailers:key=Assisted-by)` example reads with,
 // rather than a hand-rolled one, so the two never disagree about what
-// counts as a trailer). requireRobotSequence additionally demands, only for
+// counts as a trailer). git runs with GIT_DIR=os.DevNull, outside any
+// repository: it only parses the text on stdin, and a caller's directory
+// under a ".git" file whose gitdir is missing (a worktree bind-mounted into
+// a container) otherwise makes it exit 128 before reading a line, with git
+// 2.47.3 and 2.55.0 alike (measured 2026-10-02); repository-local trailer.*
+// settings therefore do not apply, global and system ones still do.
+// requireRobotSequence additionally demands, only for
 // the pull-request body: if a 🤖 line appears anywhere, the text's very
 // last three lines are that 🤖 line, one blank line, then Assisted-by —
 // CONTRIBUTING.md's own required shape for the squash-merge commit message.
@@ -590,10 +597,22 @@ func checkAssistedByRule(text string, requireRobotSequence bool) string {
 	}
 
 	cmd := exec.Command("git", "interpret-trailers", "--parse", "--only-trailers")
+	cmd.Env = append(os.Environ(), "GIT_DIR="+os.DevNull)
 	cmd.Stdin = strings.NewReader(text)
 	out, err := cmd.Output()
+	if err != nil {
+		detail := err.Error()
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if first, _, _ := strings.Cut(strings.TrimSpace(string(exitErr.Stderr)), "\n"); first != "" {
+				detail = first
+			}
+		}
+		return `could not run "git interpret-trailers" (` + detail + `), so whether its "Assisted-by:" line ` +
+			`is a trailer was not checked`
+	}
 	trimmed := strings.TrimSpace(string(out))
-	if err != nil || trimmed == "" {
+	if trimmed == "" {
 		return `has an "Assisted-by:" line that git does not read as a trailer at all ` +
 			`(a blank line has to separate it from anything above)`
 	}
