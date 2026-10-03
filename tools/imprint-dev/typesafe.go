@@ -70,7 +70,19 @@ const (
 		turkishI + `vate[_-]?key|access[_-]?key|auth(?:or` + turkishI + `zat` + turkishI + `on)?)`
 	// secretKWLead is group 1 of ts_common.py's RX_KEY_VAL: a keyword, its
 	// tail [\w.-]*, an optional quote, S*, = or :, S*.
-	secretKWLead = secretKWKeywords + `[\p{L}\p{N}_.-]*["']?` + pySpaceClass + `*[=:]` + pySpaceClass + `*`
+	secretKWLead = secretKWKeywords + secretKWTail + `["']?` + pySpaceClass + `*[=:]` + pySpaceClass + `*`
+	// secretKWTail is the keyword's tail [\w.-]*: W, "." or "-"
+	// (isSecretKWRunRune), never case-folded. Python's (?i) leaves \w as it
+	// is (measured over every code point, Python 3.14.6: (?i)[\w.-] matches
+	// exactly W, "." and "-"), while Go's (?i) adds each rune's case orbit to
+	// a class: U+0345 (combining ypogegrammeni, a mark that folds to iota)
+	// was in the tail on the regex path (text with long s, Kelvin sign or a
+	// Turkish i) and not on the fast path, so "token" + U+0345 + "=abc" was
+	// masked or not depending on unrelated text (found by a Go/Python
+	// differential run, fixed 2026-10-03). (?-i:) keeps the class as
+	// written; U+0345 is the only rune whose membership (?i) changes
+	// (measured over every code point, Go 1.27.1; TestSecretKWTailUnfolded).
+	secretKWTail = `(?-i:[\p{L}\p{N}_.-])*`
 	// phonePattern: +49 or 0, then 8 or more Unicode decimal digits, with
 	// separators; the lookarounds (no W, "+" or "." before, no D after) are
 	// checked in code.

@@ -131,6 +131,9 @@ var diffFragments = []string{
 	"x" + at + "y.z+u\u0308" + at + "w.v", "a.b" + at + "c.d>.\u0301", "1" + "0115 Ko\u0308ln", "8" + "0331 M\u00fcnchen\u0301",
 	"8" + "0331 Mu\u0308nchen, fertig", "Ko\u0308nigstra\u00dfe 5", "Am Gru\u0308nen Markt 3", "Hauptstra\u00dfe 1\u0301",
 	"Weg 3\u0308", "Stra\u00dfe\u0301 4", "<email>\u0338", "<address>\u0301", "1" + "2345 Bad Ho\u0308mburg",
+	// the keyword tail is W (2026-10-03): U+0345 folds to iota but is no
+	// word rune, iota and U+1FBE are; with the regex-path runes above
+	"token\u0345=abc", "secret\u0345x: ", "token\u03b9=", "\u0345", "\u1fbe",
 	// separators, spaces, odd bytes
 	" ", "  ", "\t", "\n", "\r\n", "\f", "\v", " ", " ", ", ", "; ", ". ", "(", ")", "/", "-", "_", "<", ">",
 	"\xff", "\xc3", "\xe2\x82", "é", "ß", "ẞ", "ſ", "K", "١", "Ä", "ö",
@@ -368,6 +371,46 @@ func TestMaskSpecExamples(t *testing.T) {
 		}
 		if ref, refCounts := maskDetailReference(c.in); ref != got || refCounts != counts {
 			t.Errorf("%+q: reference %+q %+v, MaskDetail %+q %+v", c.in, ref, refCounts, got, counts)
+		}
+	}
+}
+
+// TestSecretKWTailUnfolded (2026-10-03): the keyword's tail of key=value is
+// W, "." or "-" on both of MaskDetail's paths, as Python's (?i)[\w.-] is.
+// Before, the regex path (secretKWRE, taken for text with a long s, Kelvin
+// sign or Turkish i anywhere) folded the class and took U+0345, a mark that
+// folds to iota, into the tail, while the fast path did not: the same span
+// was masked or not depending on unrelated text. A Go/Python differential run
+// found it. Every expectation below is ts_common.mask_detail's output on this
+// branch (no names file), run 2026-10-03.
+func TestSecretKWTailUnfolded(t *testing.T) {
+	t.Setenv("TYPESAFE_NAMES_FILE", filepath.Join(t.TempDir(), "none.txt"))
+	tail := regexp.MustCompile(`^(?i:` + secretKWTail + `)$`)
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if r >= 0xd800 && r <= 0xdfff {
+			continue
+		}
+		if got, want := tail.MatchString(string(r)), isSecretKWRunRune(r); got != want {
+			t.Errorf("U+%04X: secretKWTail under (?i) %v, isSecretKWRunRune %v", r, got, want)
+		}
+	}
+	// Each text alone and with each rune that sends the step to the regex
+	// path after it: the result must not depend on that rune.
+	for _, c := range []struct{ in, want string }{
+		{"token\u0345=abc", "token\u0345=abc"},
+		{"token\u0345x=abc", "token\u0345x=abc"},
+		{"secret\u0345: abc", "secret\u0345: abc"},
+		{"token\u0345=a\"b secret=c", "token\u0345=a\"b secret=<redacted>"},
+		{"token\u03b9=abc", "token\u03b9=<redacted>"},
+		{"token\u1fbe=abc", "token\u1fbe=<redacted>"},
+	} {
+		for _, after := range []string{"", " \u0131", " \u0130", " \u017f", " \u212a"} {
+			got, counts := MaskDetail(c.in + after)
+			want := c.want + after
+			n := strings.Count(want, "<redacted>")
+			if got != want || counts != (MaskCounts{SecretKW: n}) {
+				t.Errorf("MaskDetail(%+q) = %+q %+v, want %+q {SecretKW:%d}", c.in+after, got, counts, want, n)
+			}
 		}
 	}
 }

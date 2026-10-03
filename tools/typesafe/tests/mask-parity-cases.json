@@ -617,6 +617,27 @@
       "text": "token=<redacted> secret=\"<redacted>\"",
       "masked": "token=<redacted> secret=\"<redacted>\"",
       "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_tail_mark_u0345",
+      "note": "U+0345 folds to iota but is no word character: no keyword tail, nothing masked (2026-10-03).",
+      "text": "token\u0345=abc",
+      "masked": "token\u0345=abc",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_tail_mark_u0345_dotless_i_after",
+      "note": "The same with a dotless i later in the text, which sends Go's keyword step to its regex path; Go masked here until 2026-10-03 (its (?i) folded the tail class).",
+      "text": "token\u0345=abc \u0131",
+      "masked": "token\u0345=abc \u0131",
+      "exact_counts": {"secret_kw": 0, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
+    },
+    {
+      "id": "secret_kw_tail_mark_u0345_second_key_kelvin",
+      "note": "Only the second key=value is a match; Kelvin sign after it (Go's regex path).",
+      "text": "token\u0345=a\"b secret=c \u212a",
+      "masked": "token\u0345=a\"b secret=<redacted> \u212a",
+      "exact_counts": {"secret_kw": 1, "email": 0, "address": 0, "name": 0, "opaque": 0, "iban": 0, "phone": 0}
     }
   ]
 }

@@ -12,6 +12,7 @@ import (
 	"regexp/syntax"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // pyToGo rewrites a regular expression from ts_common.py into the spelling of
@@ -19,10 +20,15 @@ import (
 // spec sections 0 and 4, 2026-10-02): \s is S (pySpaceClass), \d is D
 // (\p{Nd}), \w is W ([\p{L}\p{N}_]), and every I, i, U+0130 and U+0131 of a
 // case-insensitive part ((?i) at the start, (?i:...), or fold for the whole
-// pattern) is turkishI. What the mapping does not define is an error: an
-// escaped letter other than s, d and w (\b, \S ...), a group (?... other than
-// (?:, (?i:, (?-i: and (?P<name>, and a class in a case-insensitive part that
-// holds one of the four I runes, alone or in a range.
+// pattern) is turkishI. In a case-insensitive part, \w and a class that holds
+// it are wrapped in (?-i:...): Python's (?i) leaves \w unfolded ((?i)[\w.-]
+// matches exactly W, "." and "-", measured over every code point with Python
+// 3.14.6 on 2026-10-03), Go's (?i) would add U+0345, which folds to iota
+// (since 2026-10-03; before, \w was mapped as if (?i) folded it). What the
+// mapping does not define is an error: an escaped letter other than s, d and
+// w (\b, \S ...), a group (?... other than (?:, (?i:, (?-i: and (?P<name>, a
+// class in a case-insensitive part that holds one of the four I runes, alone
+// or in a range, and such a class that holds \w and a rune with a case.
 func pyToGo(src string, fold bool) (string, error) {
 	spaceInner := pySpaceClass[1 : len(pySpaceClass)-1]
 	isI := func(r rune) bool { return r == 'I' || r == 'i' || r == '\u0130' || r == '\u0131' }
@@ -46,6 +52,8 @@ func pyToGo(src string, fold bool) (string, error) {
 				b.WriteString(pySpaceClass)
 			case e == 'd':
 				b.WriteString(`\p{Nd}`)
+			case e == 'w' && cur:
+				b.WriteString(`(?-i:[\p{L}\p{N}_])`)
 			case e == 'w':
 				b.WriteString(`[\p{L}\p{N}_]`)
 			case strings.ContainsRune("tnfrv", e): // the same control escapes in both
@@ -58,17 +66,19 @@ func pyToGo(src string, fold bool) (string, error) {
 				b.WriteRune(e)
 			}
 		case r == '[':
-			b.WriteRune('[')
+			var cb strings.Builder // the class, written out once it is known whether it holds \w
+			hasW := false
+			cb.WriteRune('[')
 			j := k + 1
 			if j < len(rs) && rs[j] == '^' {
-				b.WriteRune('^')
+				cb.WriteRune('^')
 				j++
 			}
 			var lits []rune // the class's runes, escapes resolved, for the I check
 			for first := true; j < len(rs) && (first || rs[j] != ']'); j, first = j+1, false {
 				c := rs[j]
 				if c != '\\' {
-					b.WriteRune(c)
+					cb.WriteRune(c)
 					lits = append(lits, c)
 					continue
 				}
@@ -77,27 +87,28 @@ func pyToGo(src string, fold bool) (string, error) {
 				}
 				switch e := rs[j]; {
 				case e == 's':
-					b.WriteString(spaceInner)
+					cb.WriteString(spaceInner)
 				case e == 'd':
-					b.WriteString(`\p{Nd}`)
+					cb.WriteString(`\p{Nd}`)
 				case e == 'w':
-					b.WriteString(`\p{L}\p{N}_`)
+					cb.WriteString(`\p{L}\p{N}_`)
+					hasW = true
 				case strings.ContainsRune("tnfrv", e):
-					b.WriteRune('\\')
-					b.WriteRune(e)
+					cb.WriteRune('\\')
+					cb.WriteRune(e)
 					lits = append(lits, 0)
 				case e < 0x80 && (e >= 'a' && e <= 'z' || e >= 'A' && e <= 'Z' || e >= '0' && e <= '9'):
 					return "", fmt.Errorf(`\%c in a class has no mapping`, e)
 				default:
-					b.WriteRune('\\')
-					b.WriteRune(e)
+					cb.WriteRune('\\')
+					cb.WriteRune(e)
 					lits = append(lits, 0) // never part of a range check
 				}
 			}
 			if j >= len(rs) {
 				return "", errors.New("a class without its ]")
 			}
-			b.WriteRune(']')
+			cb.WriteRune(']')
 			k = j
 			if cur {
 				for n, c := range lits {
@@ -108,6 +119,18 @@ func pyToGo(src string, fold bool) (string, error) {
 						}
 					}
 				}
+			}
+			if cur && hasW {
+				// (?-i:) would unfold the class's other runes too: only
+				// runes without a case may stand next to \w here.
+				for _, c := range lits {
+					if c != 0 && unicode.SimpleFold(c) != c {
+						return "", fmt.Errorf("a class in a case-insensitive part holds \\w and %q: no mapping", c)
+					}
+				}
+				b.WriteString("(?-i:" + cb.String() + ")")
+			} else {
+				b.WriteString(cb.String())
 			}
 		case r == '(':
 			rest := string(rs[k:])
@@ -158,6 +181,8 @@ func TestPyToGo(t *testing.T) {
 		{`(?i:ring|zeile)|Im`, false, `(?i:r` + turkishI + `ng|ze` + turkishI + `le)|Im`},
 		{`api[_-]?key`, true, `ap` + turkishI + `[_-]?key`},
 		{`[\w.-]*[\"']?\s*`, false, `[\p{L}\p{N}_.-]*[\"']?` + pySpaceClass + `*`},
+		{`[\w.-]*[\"']?\s*`, true, `(?-i:[\p{L}\p{N}_.-])*[\"']?` + pySpaceClass + `*`},
+		{`(?i)a\w(?-i:\w)`, false, `(?i)a(?-i:[\p{L}\p{N}_])(?-i:[\p{L}\p{N}_])`},
 		{`(?i)(?-i:Im)i`, false, `(?i)(?-i:Im)` + turkishI},
 		{`[\s,]`, false, `[` + pySpaceClass[1:len(pySpaceClass)-1] + `,]`},
 	} {
@@ -166,7 +191,7 @@ func TestPyToGo(t *testing.T) {
 			t.Errorf("pyToGo(%q, %v) = %q, %v; want %q", c.src, c.fold, got, err, c.want)
 		}
 	}
-	for _, src := range []string{`\bweg`, `(?=x)`, `(?i:[a-z])`, `(?i:[ij])`, `(?i:[\S])`, `(a`, `a)`, `[ab`} {
+	for _, src := range []string{`\bweg`, `(?=x)`, `(?i:[a-z])`, `(?i:[ij])`, `(?i:[\S])`, `(?i:[\wk])`, `(a`, `a)`, `[ab`} {
 		if got, err := pyToGo(src, false); err == nil {
 			t.Errorf("pyToGo(%q) = %q, want an error", src, got)
 		}

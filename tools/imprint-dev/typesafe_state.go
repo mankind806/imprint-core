@@ -400,7 +400,7 @@ const logS = `(?:` + pySpaceClass + `|\\[tnfr]|\\u00(?:0[bB]|1[c-fC-F])|\\u202[8
 // so "tokenä=", "credentİal=", "Bearer" + U+00A0 and the like counted as
 // opaque.
 var redactedKWRE = regexp.MustCompile(`(?i)` + bearerBasicTrigger + logS + `+(?-i:<redacted>)|` + secretKWKeywords +
-	`[\p{L}\p{N}_.-]*(?:\\?["'])?` + logS + `*[=:]` + logS + `*(?:\\?["'])?(?-i:<redacted>)(` + logS + `+(?-i:<redacted>))?`)
+	secretKWTail + `(?:\\?["'])?` + logS + `*[=:]` + logS + `*(?:\\?["'])?(?-i:<redacted>)(` + logS + `+(?-i:<redacted>))?`)
 
 // countPlaceholders counts MaskDetail's placeholders in text, by kind: what
 // was masked and is actually in the text, not what a cut dropped. A
