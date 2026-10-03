@@ -102,6 +102,29 @@ func (r *cmRepo) git(args ...string) string {
 	return strings.TrimSpace(out)
 }
 
+func (r *cmRepo) gitStdin(stdin string, args ...string) string {
+	r.t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", r.dir}, args...)...)
+	cmd.Env = r.env
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		r.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitPath is the absolute path of a file in the git directory, as
+// git rev-parse --git-path names it - per worktree where git keeps it so.
+func (r *cmRepo) gitPath(name string) string {
+	r.t.Helper()
+	p := r.git("rev-parse", "--git-path", name)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(r.dir, p)
+	}
+	return p
+}
+
 func (r *cmRepo) write(path, content string) {
 	r.t.Helper()
 	if err := os.WriteFile(filepath.Join(r.dir, path), []byte(content), 0o644); err != nil {
@@ -112,7 +135,11 @@ func (r *cmRepo) write(path, content string) {
 func (r *cmRepo) head() string { r.t.Helper(); return r.git("rev-parse", "HEAD") }
 
 // commit stages everything and commits through the hook, which has to pass.
-func (r *cmRepo) commit(msg string) { r.t.Helper(); r.git("add", "-A"); r.mustPass("commit", "-q", "-m", msg) }
+func (r *cmRepo) commit(msg string) {
+	r.t.Helper()
+	r.git("add", "-A")
+	r.mustPass("commit", "-q", "-m", msg)
+}
 
 // commitNoVerify stages everything and commits past the hook: the way a line
 // already published on main arrives, through a squash merge on the server.
@@ -169,25 +196,30 @@ func (r *cmRepo) mustRefuse(args ...string) string {
 }
 
 // cmDiverged builds main and a branch feature that both moved on from one
-// base. feature edits shared.txt at the top; main appends cmShapeA to
-// shared.txt and adds a file named cmShapeName, both past the hook. HEAD is
-// left on feature, so merging main brings in only lines main already has.
+// base. feature edits the last line of shared.txt; main puts cmShapeA above
+// its first line and adds a file named cmShapeName, both past the hook. HEAD
+// is left on feature, so merging main brings in only lines main already has.
+// Below cmShapeA, a line of shared.txt has a different number in feature than
+// in main and the merge: only the number in the merge matches across parents.
 func cmDiverged(t *testing.T) *cmRepo {
 	t.Helper()
 	r := cmSetup(t)
 	r.write("shared.txt", "one\ntwo\nthree\n")
 	r.commit("base")
 	r.git("checkout", "-q", "-b", "feature")
-	r.write("shared.txt", "one, edited on feature\ntwo\nthree\n")
+	r.write("shared.txt", "one\ntwo\nthree, edited on feature\n")
 	r.write("feature.txt", "feature work\n")
 	r.commit("feature work")
 	r.git("checkout", "-q", "main")
-	r.write("shared.txt", "one\ntwo\nthree\n"+cmShapeA+"\n")
+	r.write("shared.txt", cmShapeA+"\none\ntwo\nthree\n")
 	r.write(cmShapeName, "named like a key, published on main\n")
 	r.commitNoVerify("fixtures, already on main")
 	r.git("checkout", "-q", "feature")
 	return r
 }
+
+// cmMerged is shared.txt as merging main into cmDiverged's feature leaves it.
+var cmMerged = cmShapeA + "\none\ntwo\nthree, edited on feature\n"
 
 // cmConflict builds main and feature that set the same line of conf.txt
 // differently - main to cmShapeA, past the hook - and starts merging main into
@@ -274,8 +306,21 @@ func TestCommitMsgEvilMergeRefused(t *testing.T) {
 		{"line in a file both parents have", func(r *cmRepo) {
 			r.write("feature.txt", "feature work\n"+cmShapeB+"\n")
 		}},
+		{"line below lines only one parent has", func(r *cmRepo) {
+			r.write("shared.txt", cmMerged+cmShapeB+"\n")
+		}},
 		{"file name no parent has", func(r *cmRepo) {
 			r.write("x-"+cmShapeName, "an unremarkable line\n")
+		}},
+		{"file the merge renames to a name no parent has", func(r *cmRepo) {
+			r.git("mv", "shared.txt", "y-"+cmShapeName)
+		}},
+		{"line in a file with a NUL byte", func(r *cmRepo) {
+			r.write("nul.dat", "a\x00b\n"+cmShapeB+"\n")
+		}},
+		{"line in a file marked -diff", func(r *cmRepo) {
+			r.write(".gitattributes", "*.dat -diff\n")
+			r.write("attr.dat", cmShapeB+"\n")
 		}},
 		{"line in a file that is not UTF-8", func(r *cmRepo) {
 			// A Latin-1 byte must not turn the whole diff into nothing.
@@ -303,6 +348,44 @@ func TestCommitMsgEvilMergeRefused(t *testing.T) {
 			tc.add(r)
 			r.git("add", "-A")
 			r.mustRefuse("commit", "--no-edit")
+		})
+	}
+}
+
+func TestCommitMsgMergeThatCannotBeReadRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mergeHead func(r *cmRepo) string
+	}{
+		{"MERGE_HEAD names no commit", func(r *cmRepo) string { return "not-a-commit\n" }},
+		{"a parent's tree is missing", func(r *cmRepo) string {
+			blob := r.gitStdin("an orphan parent\n", "hash-object", "-w", "--stdin")
+			tree := r.gitStdin("100644 blob "+blob+"\torphan.txt\n", "mktree")
+			commit := r.git("commit-tree", tree, "-m", "orphan")
+			if err := os.Remove(r.gitPath("objects/" + tree[:2] + "/" + tree[2:])); err != nil {
+				r.t.Fatal(err)
+			}
+			return commit + "\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := cmDiverged(t)
+			t.Parallel()
+			r.git("merge", "--no-commit", "--no-ff", "main")
+			if err := os.WriteFile(r.gitPath("MERGE_HEAD"), []byte(tc.mergeHead(r)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			head := r.head()
+			out, err := r.run("commit", "--no-edit")
+			if err == nil {
+				t.Fatalf("the commit passed, want it refused:\n%s", out)
+			}
+			if !strings.Contains(out, "Fehler: Merge") {
+				t.Fatalf("the commit failed, but not because the merge could not be read:\n%s", out)
+			}
+			if got := r.head(); got != head {
+				t.Fatalf("HEAD moved from %s to %s although the commit was refused", head, got)
+			}
 		})
 	}
 }

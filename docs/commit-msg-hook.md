@@ -7,7 +7,7 @@ commit (exit 1) when it finds a leak shape in what this table names:
 
 | The commit being made | Message | Lines | File names |
 |---|---|---|---|
-| A normal commit: no `MERGE_HEAD` (`git commit`, the commit after `git merge --squash`, the commit that concludes a conflicted `cherry-pick` or `revert`) | all of it | every line the index adds against `HEAD` (`git diff --cached`) | every path the index changes against `HEAD` |
+| A normal commit: no `MERGE_HEAD` (`git commit`, the commit after `git merge --squash`, the commit or `--continue` that concludes a conflicted `cherry-pick` or `revert`) | all of it | every line the index adds against `HEAD` (`git diff --cached`) | every path the index changes against `HEAD` |
 | A merge: `MERGE_HEAD` is there (`git merge`, `git pull`, the `git commit` that concludes a conflicted merge) | all of it | only the lines the index adds against **every** parent, `HEAD` and each `MERGE_HEAD` entry: conflict resolutions, and lines an evil merge writes itself | only the paths no parent has |
 
 A leak shape here means an e-mail address or a value that really looks like a secret. The
@@ -31,8 +31,8 @@ merge:
   `GIT_NO_REPLACE_OBJECTS=1`. A line counts only when every one of those diffs adds it at
   the same place: same path, same line number in the index, same content. A line that is new
   against every parent is therefore always read. A line is skipped as soon as one parent's
-  diff does not add it, which takes that parent having the same content in the same file;
-  content a parent has only in another file is read.
+  diff does not add it: that parent has the same content in the same file, or in a file
+  that `-M` pairs with it as renamed. Content a parent has only in some other file is read.
 - A file is read as text even when it holds a NUL byte or is marked binary. A byte that is
   not UTF-8 is read as U+FFFD rather than dropping the file. A lone CR, a form feed, U+2028
   and the other characters Python's `str.splitlines()` breaks at are read as spaces, so the
@@ -56,9 +56,10 @@ commit, and every line it brings in is checked as its own.
 `tools/imprint-dev/commitmsg_test.go` lets git run the real hook and the real
 `ts-commit-check` in throwaway repositories, without a TypeSafe key. It covers a merge that
 brings in only lines a parent has, a conflict resolved to one side, a conflict resolution and
-an evil merge that add a new secret-shaped line or file name (also in a file that is not UTF-8,
-and after a lone CR, a form feed or U+2028), an octopus merge, a merge in a linked worktree,
-and normal commits, a squash included.
+an evil merge that add a new secret-shaped line or file name (below lines only one parent has,
+in a file with a NUL byte, marked `-diff` or not UTF-8, after a lone CR, a form feed or
+U+2028, and a file the merge renames), a merge that cannot be read, an octopus merge, a merge
+in a linked worktree, and normal commits, a squash included.
 
 Not enforced:
 
@@ -67,9 +68,9 @@ Not enforced:
   checks nothing and exits 0.
 - **`git commit --no-verify` and `git merge --no-verify` skip it silently.**
 - **A clean `git cherry-pick` or `git revert` does not run it**, with or without the editor
-  (`-e`); only the `git commit` that concludes a conflicted one does (*measured with git
-  2.55.0, 2026-10-03*).
+  (`-e`); a conflicted one does, when `git commit` or `--continue` concludes it (*measured
+  with git 2.55.0, 2026-10-03*).
 - **Known gaps, normal commits only** (*measured 2026-10-03*): if a staged file holds a byte
   that is not UTF-8, the whole diff reads as empty and the commit passes, even with a leak
-  line in it; and the rest of a line after a lone CR, a form feed or U+2028 is not read.
-  Merge mode reads both.
+  line in it; the rest of a line after a lone CR, a form feed or U+2028 is not read; and a
+  file with a NUL byte or marked `-diff` is not read at all. Merge mode reads all three.
