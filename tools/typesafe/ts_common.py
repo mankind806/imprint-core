@@ -669,11 +669,14 @@ def git_text(args, cwd=None):
     """stdout of git ARGS, None if git fails. Read as bytes: a byte that is not UTF-8
     becomes U+FFFD and a lone CR stays one, where text=True would fail the whole read
     or end the line there. GIT_DIFF_OPTS could override -U0; a `git replace` would
-    show something other than the commit."""
+    show something other than the commit; diff.relative=true would narrow a diff to a
+    subdirectory CWD names. -c rather than --no-relative: a git that does not know the
+    setting ignores -c, but would fail on the flag and so refuse every commit."""
     env = {k: v for k, v in os.environ.items() if k != "GIT_DIFF_OPTS"}
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
-        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, timeout=120, env=env)
+        r = subprocess.run(["git", "-c", "diff.relative=false"] + args, cwd=cwd, capture_output=True,
+                           timeout=120, env=env)
     except Exception:
         return None
     return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
@@ -685,9 +688,8 @@ def _git(args, cwd=None):
 
 
 # How every diff the local alarm reads is read: as text even with a NUL byte or a -diff
-# attribute, without an external diff, textconv or colour (color.ui=always hides every '+'),
-# and for the whole tree (diff.relative=true and a subdirectory as cwd would hide the rest).
-DIFF_AS_TEXT = ["--text", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative"]
+# attribute, without an external diff, textconv or colour (color.ui=always hides every '+').
+DIFF_AS_TEXT = ["--text", "--no-ext-diff", "--no-textconv", "--no-color"]
 
 
 def commit_units(rng, cwd=None):
@@ -705,8 +707,7 @@ def commit_units(rng, cwd=None):
         unit = (git_text(["log", "-1", "--format=%B", sha], cwd),
                 git_text(["show", "--format=", "--root", *DIFF_AS_TEXT, "--diff-merges=first-parent", "-p", sha],
                          cwd),
-                git_text(["show", "--format=", "--root", "--name-only", "--no-relative",
-                          "--diff-merges=first-parent", sha], cwd))
+                git_text(["show", "--format=", "--root", "--name-only", "--diff-merges=first-parent", sha], cwd))
         if None in unit:
             return None
         units.append(unit)

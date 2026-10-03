@@ -436,11 +436,14 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
     def test_cached_reads_binary_and_non_utf8_files(self):
         key = REAL_KEY_LINE.encode()
         with open(os.path.join(self.repo, ".gitattributes"), "w") as f:
-            f.write("*.bin -diff\n")
+            f.write("*.bin -diff\n*.conv diff=hide\n*.ext diff=ext\n")
+        self.git_config(("diff.hide.textconv", "sh -c 'echo hidden' --"), ("diff.ext.command", "true"))
         for name, path, content in (
                 ("not UTF-8", "latin1.txt", b"caf\xe9\n" + key + b"\n"),
                 ("NUL byte", "nul.dat", b"a\x00b\n" + key + b"\n"),
                 ("marked -diff", "attr.bin", key + b"\n"),
+                ("textconv", "t.conv", key + b"\n"),
+                ("driver command", "c.ext", key + b"\n"),
                 ("lone CR", "cr.txt", b"x\r" + key + b"\n"),
                 ("lone CR, then diff", "crdiff.txt", b"x\rdiff y\n" + key + b"\n")):
             with self.subTest(case=name):
@@ -480,9 +483,10 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         self.assertTrue(any(line.startswith("+") and not line.startswith("+++") for line in diff.split("\n")),
                         diff[:300])
 
-    def net_diffs_toward_typesafe(self, rng="HEAD~1..HEAD", tools=("ts-commit-check", "ts-pr-triage")):
-        """The diff range mode and ts-pr-triage would send for RNG, from a Recorder in
-        place of tc.post; no names file is read."""
+    def net_diffs_toward_typesafe(self, rng="HEAD~1..HEAD", tools=("ts-commit-check", "ts-pr-triage"), cwd=None):
+        """The diff range mode and ts-pr-triage would send for RNG, run in CWD (default:
+        the repository), from a Recorder in place of tc.post; no names file is read."""
+        cwd = cwd or self.repo
         diffs = []
         names = os.path.join(self.tmp.name, "no-names.txt")
         for tool in tools:
@@ -490,11 +494,11 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
             with mock.patch.object(tc, "post", rec), mock.patch.dict(os.environ, TYPESAFE_NAMES_FILE=names):
                 if tool == "ts-commit-check":
                     args = mod.argparse.Namespace(msg_file=None, msg=None, cached=False, range=rng)
-                    msg, diff, stat, units, err = mod.get_diff_and_msg(args, cwd=self.repo)
+                    msg, diff, stat, units, err = mod.get_diff_and_msg(args, cwd=cwd)
                     self.assertIsNone(err)
                     mod.check_commit(msg, diff, stat, units)
                 else:
-                    mod.evaluate_diff(rng, cwd=self.repo)
+                    mod.evaluate_diff(rng, cwd=cwd)
             self.assertEqual(len(rec.calls), 1, tool)
             diffs.append(json.loads(rec.calls[0])["state"]["diff"])
         return diffs
@@ -582,6 +586,13 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
                     self.assert_adds_a_line(diff)
         r = self.run_tool("ts-pr-triage", "main..neu", "--json")
         self.assertEqual((r.returncode, json.loads(r.stdout)["leak_prob"]), (0, 1.0), r.stdout + r.stderr)
+        # A root commit whose only leak is a file name.
+        subprocess.run(["git", "-C", self.repo, "switch", "-q", "--orphan", "name"], check=True)
+        self.commit_file(f"max.mustermann{AT}gmx.de.txt", b"hallo\n", "feat: name")
+        for rng in ("HEAD~1..HEAD", "main..name"):
+            with self.subTest(name_only=rng):
+                r = self.run_tool("ts-commit-check", rng)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_a_subdirectory_with_diff_relative_reads_the_whole_tree(self):
         # Before: diff.relative=true and --cwd in a subdirectory hid every other file.
@@ -596,9 +607,19 @@ class TestCommitCheckLocalLeak(unittest.TestCase):
         self.assertNotIn("Diff ist leer", r.stdout)
         r = self.run_tool("ts-pr-triage", "HEAD~1..HEAD", "--json", cwd=sub)
         self.assertEqual(json.loads(r.stdout)["leak_prob"], 1.0, r.stdout + r.stderr)
+        for diff in self.net_diffs_toward_typesafe(cwd=sub):
+            self.assertIn("src/config.py", diff)
+            self.assert_adds_a_line(diff)
         self.commit_file(f"src/max.mustermann{AT}gmx.de.txt", b"hallo\n")  # only the name leaks
         r = self.run_tool("ts-commit-check", "HEAD~1..HEAD", cwd=sub)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        name = f"src/erika{AT}gmx.de.txt"
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write("hallo\n")
+        subprocess.run(["git", "-C", self.repo, "add", name], check=True)
+        r = self.run_tool("ts-commit-check", "--cached", "--msg", "feat: name", cwd=sub)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        subprocess.run(["git", "-C", self.repo, "rm", "-q", "--cached", name], check=True)
         with open(os.path.join(self.repo, "src", "more.py"), "w") as f:
             f.write(REAL_KEY_LINE + "\n")
         subprocess.run(["git", "-C", self.repo, "add", "src/more.py"], check=True)
