@@ -43,17 +43,140 @@ const (
 
 // --- Masking (analog typesafe-dev ts_common.py) ------------------------------
 
+// The masking steps follow ts_common.py, which runs Python's re on str; the
+// spec for their parity (2026-10-02, lead session) fixes these classes:
+//   - S, Python's \s: unicode.IsSpace plus U+001C..U+001F (isPySpace,
+//     pySpaceClass; TestMaskClasses compares both on every rune);
+//   - W, Python's \w: [\p{L}\p{N}_] (isNameWordRune); D, Python's \d: \p{Nd};
+//   - A, Go's \s: [\t\n\f\r ] (isRESpace; no \v);
+//   - (?i): Python puts I, i, U+0130 and U+0131 into one class, Go's (?i) only
+//     I and i; every i of a case-insensitive literal is written as turkishI,
+//     which (?i) widens to all four.
 const (
-	bearerBasicPattern     = `(?i)(\b(?:bearer|basic)\s+)([^\s"',;]+)`
-	secretKWPattern        = `(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential|private[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*["']?\s*[=:]\s*)("[^"\n]+"|'[^'\n]+'|["']?[^\s"',;]+)`
-	phonePattern           = `(?:\+49|0)(?:[ \t./()-]*\d){8,}`
+	pySpaceClass = `[\t\n\v\f\r \x{1C}-\x{1F}\x{85}\x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]`
+	turkishI     = `[i\x{130}\x{131}]`
+)
+
+const (
+	// bearerBasicPattern: the trigger after no ASCII word character (Go's
+	// ASCII \b; "äBearer x" triggers), S+, then everything up to the next A
+	// character, quotes and commas included; replaced as a whole, a
+	// "<redacted>" too (since 2026-10-02; before: [^\s"',;]+ and no S).
+	bearerBasicPattern = `(?i)(\b` + bearerBasicTrigger + pySpaceClass + `+)([^\t\n\f\r ]+)`
+	// bearerBasicTrigger is the trigger list of ts_common.py's RX_BEARER.
+	bearerBasicTrigger = `(?:bearer|bas` + turkishI + `c)`
+	// secretKWKeywords is ts_common.py's _MASK_KW.
+	secretKWKeywords = `(?:ap` + turkishI + `[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credent` + turkishI + `al|pr` +
+		turkishI + `vate[_-]?key|access[_-]?key|auth(?:or` + turkishI + `zat` + turkishI + `on)?)`
+	// secretKWLead is group 1 of ts_common.py's RX_KEY_VAL: a keyword, its
+	// tail [\w.-]*, an optional quote, S*, = or :, S*.
+	secretKWLead = secretKWKeywords + `[\p{L}\p{N}_.-]*["']?` + pySpaceClass + `*[=:]` + pySpaceClass + `*`
+	// phonePattern: +49 or 0, then 8 or more Unicode decimal digits, with
+	// separators; the lookarounds (no W, "+" or "." before, no D after) are
+	// checked in code.
+	phonePattern           = `(?:\+49|0)(?:[ \t./()-]*\p{Nd}){8,}`
 	awsKeyIDPattern        = `(?:AKIA|ASIA)[0-9A-Z]{16}`
 	knownTokenPattern      = `(?:ghp_|gho_|ghs_|github_pat_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|xox[abprs]-|AKIA|ASIA|AIza|GOCSPX-|ya29\.|1//|eyJ|glpat-|npm_)[A-Za-z0-9_\-./+=]{8,}`
 	emailPattern           = `[\p{L}\p{N}_.+-]+@[\p{L}\p{N}_-]+\.[\p{L}\p{N}_.-]+`
 	opaqueCandidatePattern = `[A-Za-z0-9_\-+/]{24,}={0,2}`
-	streetPattern          = `\b(?:(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+(?:\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+\s+)*(?:Straße|Strasse|Str\.|Str\b|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:straße|strasse|str\.|str\b|weg|gasse|platz|allee|ring|ufer|damm|chaussee|zeile|pfad|steig|gäßchen|gaesschen)))\s+\d+[a-zA-Z]?(?:\s*[-/]\s*\d{1,4}[a-zA-Z]?)?\b`
-	plzOrtPattern          = `\b\d{5}\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+(?:\s+(?:(?:am|an der)\s+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+|im Breisgau|ob der Tauber))?\b`
 )
+
+// The address grammars of the mask parity spec, section 4 (2026-10-02; the
+// user's decision: the union of ts_common.py's grammar, Py, and Go's, each
+// copied from its source without \b), with S as pySpaceClass and D as
+// \p{Nd} everywhere, the other classes literal as written, and every i of a
+// (?i) part as turkishI. A street is PREFIX S+ NUMBER of one grammar
+// (mask_address.go relies on that shape); maskStreet and maskPlzOrt say how
+// the matches are chosen. What changed for Go: Python's grammar joined it,
+// with its suffixes stieg, gässchen and markt, its lowercase branch ("string
+// 3" at the start of a word), a space before the letter of a house number
+// ("Hauptstraße 12 b"), and after a postcode a second word ("Bad Homburg"),
+// a slash ("Halle/Saale") or "im" with any word ("Berlin im Brief"); S, D
+// and the word boundaries are Python's (Unicode), so no match starts or ends
+// inside a word of another script any more ("München1" after a postcode
+// stays unmasked). Go's preposition branch stays, so prose like "Im Jahr
+// 2024" is masked (amendment A5).
+const (
+	addrS = pySpaceClass
+	addrD = `\p{Nd}`
+	// streetSuffixPy is Python's _SUF_PY (stra[ßs]e, then "strasse", added
+	// by the spec for "Musterstrasse 12a"), streetSuffixGo Go's own list.
+	streetSuffixPy = `stra[ßs]e|strasse|str\.?|weg|gasse|platz|allee|r` + turkishI + `ng|damm|ufer|chaussee|ze` + turkishI +
+		`le|st` + turkishI + `eg|gässchen|pfad|markt`
+	streetSuffixGo = `straße|strasse|str\.|str|weg|gasse|platz|allee|r` + turkishI + `ng|ufer|damm|chaussee|ze` + turkishI +
+		`le|pfad|ste` + turkishI + `g|gäßchen|gaesschen`
+	streetPrefixPy = `(?:[A-ZÄÖÜ][a-zäöüß]+(?:` + addrS + `+|-))*(?:[A-ZÄÖÜ][a-zäöüß]+)?(?i:` + streetSuffixPy + `)` +
+		`|[a-zäöüß]+(?i:` + streetSuffixPy + `)`
+	streetNumberPy = addrD + `+(?:` + addrS + `*[a-zA-Z])?(?:` + addrS + `*[-/]` + addrS + `*` + addrD + `{1,4}(?:` + addrS +
+		`*[a-zA-Z])?)?`
+	// The literal spaces of "An der", "Auf dem" ... stay single U+0020.
+	streetPrefixGo = `(?:Am|An der|Auf dem|Auf der|Im|In der|Vor dem|Hinter dem|Zum|Zur)` + addrS + `+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+` +
+		`(?:` + addrS + `+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+)*` +
+		`|(?:[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+` + addrS + `+)*(?:Straße|Strasse|Str\.|Str|[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]*(?i:` +
+		streetSuffixGo + `))`
+	// The house number range ends after at most 4 digits, so a following
+	// 5-digit postcode is never read as a range end (the postcode step then
+	// matches it on its own).
+	streetNumberGo = addrD + `+[a-zA-Z]?(?:` + addrS + `*[-/]` + addrS + `*` + addrD + `{1,4}[a-zA-Z]?)?`
+	plzPy          = addrD + `{5}` + addrS + `+[A-ZÄÖÜ][a-zäöüß]+(?:[-/][A-ZÄÖÜ][a-zäöüß]+)*` +
+		`(?:` + addrS + `+(?:(?:am|an` + addrS + `+der|im)` + addrS + `+)?[A-ZÄÖÜ][a-zäöüß]+)?`
+	plzGo = addrD + `{5}` + addrS + `+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+` +
+		`(?:` + addrS + `+(?:(?:am|an der)` + addrS + `+[A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ.-]+|im Breisgau|ob der Tauber))?`
+)
+
+// secretKWPattern is ts_common.py's RX_KEY_VAL: keyword, [\w.-]*, an
+// optional quote, S*, = or :, S* (group 1), then a value: "..." (group 2) or
+// '...' (group 3), masked as a whole, whitespace included, or an unquoted one
+// after an optional quote, up to the next A character, quote, comma or
+// semicolon (group 4). Python's (?!<redacted>...) lookaheads are part of the
+// value patterns (notRedacted): a value that is already "<redacted>" fails
+// there and the search goes on (the S* before it giving back, later starts,
+// later keywords), as in Python, instead of matching and being skipped. The
+// lookaheads compare case-sensitively (amendment A3, 2026-10-02; Python wraps
+// them in (?-i:...)): only the exact placeholder is skipped,
+// "token=<REDACTED>" is masked. An unquoted value takes the character that ends it along
+// (group 5, empty at the end of the text), which makes it the whole run, as
+// Python's greedy [^...]+ after its lookahead is; no match can start with
+// that character. Since 2026-10-02; before: ASCII \w and \s, a skip in code,
+// and "Bearer"/"Basic" values left alone; until amendment A3 the lookaheads
+// compared case-insensitively, as under Python's (?i) then.
+var secretKWPattern = `(?i)(` + secretKWLead + `)` +
+	`(?:("` + notRedacted(`"\n`, true) + `")|('` + notRedacted(`'\n`, true) + `')|["']?(` +
+	notRedacted(`\t\n\f\r "',;`, false) + `)([\t\n\f\r "',;]|$))`
+
+// notRedacted returns a pattern for one or more characters of the class
+// [^ex] that are not "<redacted>" (exact) or do not start with it (!exact),
+// compared case-sensitively (amendment A3; the pattern is wrapped in (?-i:)
+// so that the (?i) around it does not fold it). RE2 has no lookahead; this
+// is the same set as a regular expression: a string leaves "<redacted>"
+// where it first differs (any rest may follow) or ends early; one that
+// starts with all of it is in the set only when exact and longer. What
+// follows must pin the end: the closing quote, which [^ex] excludes, or the
+// end of the run, for a string that ends early must not be a prefix of a
+// longer "<redacted>...". Where several branches could match, at most one
+// fits the text, and [^ex]* is greedy, so the match is the longest, as
+// [^ex]+ is. Until A3 each letter of the placeholder was compared in both
+// cases.
+func notRedacted(ex string, exact bool) string {
+	const p = "<redacted>"
+	run := `[^` + ex + `]`
+	rest, ok := "", exact // the pattern after all of p, and whether there is one
+	if exact {
+		rest = run + `+`
+	}
+	for k := len(p) - 1; k >= 0; k-- {
+		c := string(p[k])
+		alt := `[^` + ex + c + `]` + run + `*`
+		if ok {
+			alt += `|` + c + rest
+		}
+		rest, ok = `(?:`+alt+`)`, true
+		if k > 0 {
+			rest += `?`
+		}
+	}
+	return `(?-i:` + rest + `)`
+}
 
 var (
 	bearerBasicRE = regexp.MustCompile(bearerBasicPattern)
@@ -76,18 +199,6 @@ var (
 
 	// opaqueCandidateRE matches candidates for long opaque strings (24+ base64/hex characters).
 	opaqueCandidateRE = regexp.MustCompile(opaqueCandidatePattern)
-
-	// streetRE matches German street names + house number (e.g. "Musterstraße 12", "Hauptstr. 4b", "Am Markt 1").
-	// The range end is capped at 4 digits so a following 5-digit postcode is never read as a
-	// range end (its PLZ+Ort then gets its own match via plzOrtRE).
-	streetRE = regexp.MustCompile(streetPattern)
-
-	// plzOrtRE matches German postal code + city (e.g. "10115 Berlin", "80331 München").
-	// The "am"/"an der" suffix is generic (any capitalized word, matching
-	// ts_common.py's parity behavior, e.g. "12345 Musterstadt am Fluss"); "im"/"ob
-	// der" stay a fixed list so "10115 Berlin im Brief." still leaves "im Brief"
-	// unmasked (typesafe_test.go TestMaskAddresses).
-	plzOrtRE = regexp.MustCompile(plzOrtPattern)
 )
 
 const ibanPattern = `[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}`
@@ -138,6 +249,11 @@ func expandHome(path string) string {
 // If the file is missing or unreadable, returns nil cleanly (0 hits).
 // Lines with comments '#' are ignored. Names are split into first and last name components,
 // and sorted by length descending (with alphabetical secondary sort for determinism).
+// Each line is put into Unicode NFC first, as ts_common.load_names does; a
+// term is kept if it has at least two code points in NFC (mask parity spec,
+// amendment A2, 2026-10-02: a single letter identifies nobody and would mask
+// every lone "Ö"; before, Go counted bytes, so "Ö" or "é" alone was a name,
+// and a name stored decomposed matched only decomposed text).
 func loadNames(filePath string) []string {
 	names, _ := loadNamesDetail(filePath)
 	return names
@@ -175,7 +291,7 @@ func loadNamesDetail(filePath string) (names []string, latin1Lines int) {
 			line = latin1(line)
 			latin1Lines++
 		}
-		line = strings.TrimSpace(line)
+		line = nfc(strings.TrimSpace(line))
 		if line == "" || strings.IndexFunc(line, func(r rune) bool { return !unicode.IsControl(r) }) < 0 {
 			continue
 		}
@@ -191,8 +307,7 @@ func loadNamesDetail(filePath string) (names []string, latin1Lines int) {
 		}
 
 		for _, f := range fields {
-			f = strings.TrimSpace(f)
-			if len(f) >= 2 {
+			if utf8.RuneCountInString(f) >= 2 {
 				nameSet[f] = true
 			}
 		}
@@ -277,47 +392,40 @@ func maskLap(step string) {
 // MaskDetail redacts sensitive patterns in text before transmission, in the same
 // order as ts_common.py MASK_RES: secret_kw (bearer/basic, keywords), email, iban,
 // phone, address (street, PLZ+Ort), name, opaque (AWS key IDs, known token
-// prefixes, 24+ character strings with digits and letters).
+// prefixes, 24+ character strings with letters and a digit in or right after them).
 func MaskDetail(text string) (string, MaskCounts) {
 	var counts MaskCounts
 
-	// 1. Bearer / Basic
+	// 1. Bearer / Basic: the value is replaced, the trigger and the spaces
+	// after it are kept. A value that is "<redacted>" counts too, as in
+	// ts_common.py (since 2026-10-02).
 	text = maskBearer(text, func(m string) string {
-		sub := bearerBasicRE.FindStringSubmatch(m)
-		if len(sub) >= 3 {
-			if sub[2] == "<redacted>" {
-				return m
-			}
-			counts.SecretKW++
+		counts.SecretKW++
+		if sub := bearerBasicRE.FindStringSubmatch(m); len(sub) >= 3 {
 			return sub[1] + "<redacted>"
 		}
-		counts.SecretKW++
 		return "<redacted>"
 	})
 	maskLap("bearer")
 
-	// 2. Secret keywords with = or :; a quoted value is masked as a whole.
+	// 2. Secret keywords with = or :; a quoted value is masked as a whole,
+	// quotes kept; an unquoted one, with a quote before it, without it. A
+	// "Bearer" or "Basic" value is masked like any other (since 2026-10-02):
+	// "authorization: Bearer x" becomes "authorization: <redacted> <redacted>".
+	// Only the exact placeholder "<redacted>" is passed over as a value
+	// (amendment A3, 2026-10-02): "token=<REDACTED>" is masked.
 	text = maskSecretKW(text, func(m string) string {
-		sub := secretKWRE.FindStringSubmatch(m)
-		if len(sub) < 3 {
-			counts.SecretKW++
-			return "<redacted>"
-		}
-		val := sub[2]
-		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
-			q := val[:1]
-			if val[1:len(val)-1] == "<redacted>" {
-				return m
-			}
-			counts.SecretKW++
-			return sub[1] + q + "<redacted>" + q
-		}
-		bare := strings.TrimLeft(val, `"'`)
-		if bare == "<redacted>" || strings.HasPrefix(bare, "<redacted>") || strings.EqualFold(bare, "bearer") || strings.EqualFold(bare, "basic") {
-			return m
-		}
 		counts.SecretKW++
-		return sub[1] + "<redacted>"
+		sub := secretKWRE.FindStringSubmatch(m)
+		switch {
+		case len(sub) < 6:
+			return "<redacted>"
+		case sub[2] != "":
+			return sub[1] + `"<redacted>"`
+		case sub[3] != "":
+			return sub[1] + `'<redacted>'`
+		}
+		return sub[1] + "<redacted>" + sub[5]
 	})
 	maskLap("secret_kw")
 
@@ -337,10 +445,12 @@ func MaskDetail(text string) (string, MaskCounts) {
 	})
 	maskLap("iban")
 
-	// 5. German phone numbers: +49 or a leading 0, then 8+ digits (no word
-	// character, "+" or "." directly before).
+	// 5. German phone numbers: +49 or a leading 0, then 8+ digits of any
+	// script (no W, "+" or "." directly before, no D after). Since
+	// 2026-10-02 a number of any script blocks before it ("²", "Ⅻ"), and
+	// the digits after the 0 may be of any script.
 	phonePrevOK := func(prev rune) bool {
-		return !(unicode.IsLetter(prev) || unicode.IsDigit(prev) || prev == '_' || prev == '+' || prev == '.')
+		return !(isNameWordRune(prev) || prev == '+' || prev == '.')
 	}
 	text = replaceBoundedFast(text, phoneAt, 0, nil, phoneCand(text), phonePrevOK, func(prev, next rune) bool {
 		return phonePrevOK(prev) && !unicode.IsDigit(next)
@@ -374,40 +484,16 @@ func MaskDetail(text string) (string, MaskCounts) {
 	// Word boundaries are Unicode ones, as in ts_common.py (Python's \b): a
 	// letter, a number or "_" on both sides of a name's edge means no
 	// boundary. Since 2026-10-02; before, Go's ASCII \b let "Herr Özil" or
-	// "Frau Strauß" out unmasked.
-	names := loadNameSet()
-	if utf8.ValidString(text) {
-		// One fold-canonical copy serves every name and is kept in step
-		// with each name's replacements; names are replaced one after
-		// another, as before. A text with a rune whose canonical form has
-		// another length is scanned name by name instead.
-		folded, ok := "", false
-		if len(names.matchers) > 0 {
-			folded, ok = foldCanon(text)
-		}
-		for _, nm := range names.matchers {
-			if ok && nm.foldedOK {
-				text, folded, ok = nm.replaceFolded(text, folded, nameRepl)
-				continue
-			}
-			if next := nm.replace(text, nameRepl); next != text {
-				text = next
-				if ok {
-					folded, ok = foldCanon(text)
-				}
-			}
-		}
-	} else {
-		// Text that is not valid UTF-8: name by name, an invalid byte read
-		// as U+FFFD (no word character), as the regexp package reads it.
-		for _, nm := range names.matchers {
-			text = nm.replace(text, nameRepl)
-		}
-	}
+	// "Frau Strauß" out unmasked. Text that is not in NFC is matched on an
+	// NFC copy and replaced in the original (maskNames, mask_nfc.go; since
+	// 2026-10-02, mask parity spec section 5 with amendments A1, A2, A8).
+	text = maskNames(text, loadNameSet().matchers, nameRepl)
 	maskLap("names")
 
 	// 9. opaque: AWS key IDs and known token prefixes (not inside a word), then
-	// 24+ chars with at least one digit and one letter.
+	// 24+ token chars with an ASCII letter and an ASCII digit, or with a
+	// decimal digit of any script right after them (maskOpaque; since
+	// 2026-10-03, mask parity spec amendment A9, as ts_common.py's RX_OPAQUE).
 	opaque := func(string) string {
 		counts.Opaque++
 		return "<redacted>"
@@ -419,22 +505,7 @@ func MaskDetail(text string) (string, MaskCounts) {
 	text = replaceBoundedFast(text, knownTokenAt, 0, nil, knownTokenCand(text), notASCIIAlnum,
 		func(prev, _ rune) bool { return !isASCIIAlnum(prev) }, false, opaque)
 	maskLap("known")
-	text = maskOpaque(text, func(m string) string {
-		hasDigit := false
-		hasLetter := false
-		for _, r := range m {
-			if r >= '0' && r <= '9' {
-				hasDigit = true
-			} else if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				hasLetter = true
-			}
-		}
-		if hasDigit && hasLetter {
-			counts.Opaque++
-			return "<redacted>"
-		}
-		return m
-	})
+	text = maskOpaque(text, opaque)
 	maskLap("opaque")
 
 	return text, counts

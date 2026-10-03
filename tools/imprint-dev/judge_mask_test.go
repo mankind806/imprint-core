@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -133,11 +135,27 @@ func splits(spans [][2]int, at int) bool {
 	return false
 }
 
+// The lead of a secret, from the reference patterns (mask_reference_test.go),
+// not from cutMasked's own: a key=value lead up to [=:], S and an optional
+// opening quote (refKVLead), or Bearer/Basic with its S run (refBearerLead).
+// refLeadAtEndRE finds one at the end of a head, the trigger after no ASCII
+// word character; refLeadsAtStartRE one or more at the start of what a head
+// cut dropped.
+var (
+	refKVLead         = strings.TrimPrefix(refSecretKWHeadRE.String(), "^") + refS + `*["']?`
+	refBearerLead     = `(?i:` + refFoldTurkish(`bearer|basic`) + `)` + refS + `+`
+	refLeadAtEndRE    = regexp.MustCompile(`(?:` + refKVLead + `|(?:^|[^A-Za-z0-9_])` + refBearerLead + `)$`)
+	refLeadsAtStartRE = regexp.MustCompile(`^(?:` + refKVLead + `|` + refBearerLead + `)+`)
+)
+
 // checkCut asserts the oracle for one cut of masked text m: the output is
 // valid UTF-8, within the cap, the whole text when it fits, else a prefix, a
 // suffix or prefix + separator + suffix of m; no cut runs through a
 // placeholder; and each kept side is at most 9 runes (a placeholder less one)
-// short of its share of the cap.
+// short of its share of the cap. Since 2026-10-02 (packet G5): a head never
+// ends in the lead of a secret whose value it drops ("token=", "Bearer "),
+// and may be shorter than that by such leads (refLeadsAtStartRE on what it
+// dropped), as cutMasked moves back before them.
 func checkCut(m string, capChars int, keep, out string) string {
 	if !utf8.ValidString(out) {
 		return "output is not valid UTF-8"
@@ -162,8 +180,15 @@ func checkCut(m string, capChars int, keep, out string) string {
 		if splits(spans, len(p)) {
 			return "head cut splits a placeholder"
 		}
-		if utf8.RuneCountInString(p) < share-9 {
-			return "head shorter than its share less a placeholder"
+		if refLeadAtEndRE.MatchString(p) {
+			return "head ends in the lead of a secret whose value it drops"
+		}
+		short := 0 // runes of dropped leads right after the head
+		if loc := refLeadsAtStartRE.FindStringIndex(m[len(p):]); loc != nil {
+			short = utf8.RuneCountInString(m[len(p) : len(p)+loc[1]])
+		}
+		if utf8.RuneCountInString(p)+short < share-9 {
+			return "head shorter than its share less a placeholder and the leads it dropped"
 		}
 		return ""
 	}
@@ -217,6 +242,76 @@ func TestCutMaskedPlaceholderBoundary(t *testing.T) {
 	// A "<" that starts no placeholder is never a reason to trim.
 	if got := cutMasked("a < b and <redac and more", 9, "head"); got != "a < b and" {
 		t.Errorf("stray <: %q", got)
+	}
+}
+
+// TestCutMaskedDanglingSecretLead (packet G5 of mask parity, 2026-10-02): a
+// head cut that would end in the lead of a secret whose value it drops moves
+// back before that lead, in head and head_tail. Before, PostState's second
+// masking took the separator's "[…]" as the value and wrote <redacted>, 7
+// runes over the cap: TestJudgeDeadlineCoversBuild failed when its
+// budget-sized text was cut right after "token=" or "auth: ". Every cut from
+// the end of the lead to the last rune inside the placeholder is checked;
+// the masked text is a fixed point of MaskDetail, and so must the cut be,
+// within the cap.
+func TestCutMaskedDanglingSecretLead(t *testing.T) {
+	setupJudge(t, "")
+	before := "Vorher steht hier etwas. "
+	after := " und danach" + strings.Repeat(" folgt noch Text.", 20)
+	cases := []struct {
+		name, kept, lead, value string
+		moves                   bool
+	}{
+		{"key=value", "", "token=", "<redacted>", true},
+		{"key: value", "", "auth: ", "<redacted>", true},
+		{"double-quoted", "", `api_key="`, `<redacted>"`, true},
+		{"single-quoted, spaces", "", "pass" + "word = '", "<redacted>'", true}, // built from parts for the commit-msg leak check
+		{"long tail", "", "auth_token_for_the_build_service.v2-old=", "<redacted>", true},
+		{"Turkish dotted I", "", "credent\u0130al=", "<redacted>", true},
+		{"S runs", "", "secret\u2003:\t", "<redacted>", true},
+		{"newline after =", "", "pwd=\n", "<redacted>", true},
+		{"Bearer", "", "Bearer ", "<redacted>", true},
+		{"basic, no-break space", "", "basic\u00a0", "<redacted>", true},
+		{"Bearer after a non-ASCII letter", "\u00e4", "Bearer ", "<redacted>", true},
+		{"Bearer after an ASCII letter: no trigger", "xBearer ", "", "<redacted>", false},
+	}
+	sep := utf8.RuneCountInString(headTailSeparator)
+	for _, c := range cases {
+		m := before + c.kept + c.lead + c.value + after
+		if got, _ := MaskDetail(m); got != m {
+			t.Fatalf("%s: not a masked text: MaskDetail gives %q", c.name, got)
+		}
+		at := utf8.RuneCountInString(before + c.kept + c.lead)
+		for n := at; n <= at+len("<redacted>")-1; n++ {
+			for _, keep := range []string{"head", "head_tail"} {
+				capChars := n
+				if keep == "head_tail" {
+					capChars = 2*n + sep
+				}
+				out := cutMasked(m, capChars, keep)
+				head := strings.SplitN(out, headTailSeparator, 2)[0]
+				want := before + c.kept + c.lead
+				if c.moves {
+					want = before + c.kept
+				}
+				if head != want {
+					t.Errorf("%s, %s, cap %d: head ends %q, want it to end %q", c.name, keep, capChars,
+						tailRunes(head, 12), tailRunes(want, 12))
+				}
+				if msg := checkCut(m, capChars, keep, out); msg != "" {
+					t.Errorf("%s, %s, cap %d: %s", c.name, keep, capChars, msg)
+				}
+				re, _ := MaskDetail(out)
+				if n := utf8.RuneCountInString(re); re != out || n > capChars {
+					t.Errorf("%s, %s, cap %d: the second masking gives %d runes: %q", c.name, keep, capChars, n, tailRunes(re, 40))
+				}
+			}
+		}
+	}
+	// Leads in a row are dropped one after the other.
+	m := before + "token=password=<redacted>" + after
+	if got := cutMasked(m, utf8.RuneCountInString(before+"token=password=<red"), "head"); got != before {
+		t.Errorf("leads in a row: %q", got)
 	}
 }
 
@@ -373,19 +468,46 @@ func TestJudgeMaskBudget(t *testing.T) {
 	}
 }
 
+// slowMaskDetail puts a MaskDetail that waits d first in maskDetailFn until
+// the test ends, and returns started, which waits for one call of it to
+// begin. maskWithin reads maskDetailFn in the goroutine it starts and stops
+// waiting for it at the deadline, which is what the tests using this check;
+// so nothing ordered that read before Cleanup's restore, and go test -race
+// reported it in both tests (2026-10-02, packet G5; present at fa6fa18). A
+// test calls started once for each masking call it expects: each read then
+// happens before the restore. Test code only; maskWithin is unchanged.
+func slowMaskDetail(t *testing.T, d time.Duration) (started func()) {
+	t.Helper()
+	orig := maskDetailFn
+	starts := make(chan struct{}, 16)
+	maskDetailFn = func(s string) (string, MaskCounts) {
+		starts <- struct{}{}
+		time.Sleep(d)
+		return orig(s)
+	}
+	t.Cleanup(func() { maskDetailFn = orig })
+	return func() {
+		t.Helper()
+		select {
+		case <-starts:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the slow MaskDetail was not called")
+		}
+	}
+}
+
 // TestJudgeMaskingStopsAtTheDeadline: when masking itself overruns (a slower
 // machine than the budget was measured on), judge stops waiting at the
 // deadline and answers timeout; it is never killed silently.
 func TestJudgeMaskingStopsAtTheDeadline(t *testing.T) {
 	setupJudge(t, "test-key")
 	ts := newFakeTS(t, answers(map[string]float64{"instruction_to_agent": 0.1, "exfil_request": 0.1}))
-	orig := maskDetailFn
-	maskDetailFn = func(s string) (string, MaskCounts) { time.Sleep(3 * time.Second); return MaskDetail(s) }
-	t.Cleanup(func() { maskDetailFn = orig })
+	started := slowMaskDetail(t, 3*time.Second)
 	p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": strings.Repeat("Lorem ipsum. ", 10000)})
 	start := time.Now()
 	code, stdout, stderr := runJudgeCLI(t, string(p), "--gate", "foreign_return", "--endpoint", ts.srv.URL, "--deadline-ms", "300")
 	el := time.Since(start)
+	started()
 	v := decodeObject(t, stdout)
 	if code != exitOK || v["error_class"] != "timeout" || v["verdict"] != "allow" || el > time.Second {
 		t.Errorf("exit %d %v after %v; %s", code, v, el, stderr)
@@ -462,22 +584,26 @@ func TestDoneCapsToolNames(t *testing.T) {
 	}
 }
 
-// TestJudgeBudgetCoversFallbackRunes: one long s, Kelvin sign or capital
-// sharp s sends some steps back to the old, slower regex. Such a text is
-// charged at the slower rate: at the plain budget it is refused (too_large),
-// at the scaled budget it is judged inside the deadline; it never times out.
+// TestJudgeBudgetCoversFallbackRunes: one long s, Kelvin sign, capital
+// sharp s, or (since 2026-10-02) Turkish dotted or dotless i sends some steps
+// back to the old, slower regex. Such a text is charged at the slower rate: at
+// the plain budget it is refused (too_large), at the scaled budget it is
+// judged inside the deadline; it never times out.
 func TestJudgeBudgetCoversFallbackRunes(t *testing.T) {
 	setupJudge(t, "test-key")
 	ts := newFakeTS(t, answers(map[string]float64{"instruction_to_agent": 0.1, "exfil_request": 0.1}))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	budget := maskBudgetBytes(ctx)
 	cancel()
-	for _, trig := range []string{"ſ", "K", "ẞ"} {
+	for _, trig := range []string{"ſ", "K", "ẞ", "\u0130", "\u0131"} {
 		patterns := len(loadNameSet().matchers)
 		slow := maskNsPerByte(trig, patterns)
 		fast := maskWorstNsPerByte + nameFoldNsPerByte*float64(patterns)
 		for _, size := range []int{budget * 9 / 10, int(float64(budget) * fast / slow * 0.9)} {
-			text := trig + " " + maskCorpus(rand.New(rand.NewSource(3)), "addresses", size)
+			// the slowest corpus after such a rune (dense key=value
+			// secrets since the address union of 2026-10-02; before it
+			// dense street addresses)
+			text := trig + " " + maskCorpus(rand.New(rand.NewSource(3)), "keyvalues", size)
 			p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": text})
 			start := time.Now()
 			_, stdout, stderr := runJudgeCLI(t, string(p), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
@@ -585,6 +711,71 @@ func TestJudgeBudgetCoversNamesWithoutASCII(t *testing.T) {
 	}
 }
 
+// TestJudgeBudgetCoversNFCNames (mask parity, 2026-10-02): names on text
+// that is not NFC run on an NFC copy (mask_nfc.go), and the copy can hold a
+// rune the text lacks: "I" + U+0307 is U+0130 in NFC, whose fold has another
+// length, so the names are scanned name by name there. maskNsPerByte charges
+// such a text the scan rate over the copy (it builds the copy to see that);
+// at the plain budget for 3 s it is refused (too_large), at the budget
+// scaled by its rate it is judged inside the deadline; never a timeout.
+// Measured 2026-10-02 with 72 patterns: 0.9 MB judged in 0.13 s, 4.4 MB
+// refused at once (charged at the fold rate, as the text alone suggests, it
+// would have been masked: the scan rate is a worst case, not this text's).
+// A decomposed text without such a rune is charged the fold rate times the
+// copy's length and judged.
+func TestJudgeBudgetCoversNFCNames(t *testing.T) {
+	setupJudge(t, "test-key")
+	var names []string
+	firsts := []string{"Anna", "Bernd", "Clara", "Dieter", "Eva", "Frank", "Gabi", "Hans", "Ines", "Karl", "Lena", "Max"}
+	lasts := []string{"M\u00fcller", "Schmidt", "Schneider", "Fischer", "Weber", "Meyer", "Wagner", "Becker", "Schulz", "Hoffmann"}
+	for i := 0; i < 50; i++ {
+		names = append(names, firsts[i%len(firsts)]+" "+lasts[(i*7)%len(lasts)])
+	}
+	nf := filepath.Join(t.TempDir(), "names.txt")
+	if err := os.WriteFile(nf, []byte(strings.Join(names, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TYPESAFE_NAMES_FILE", nf)
+	patterns := len(loadNameSet().matchers)
+	ts := newFakeTS(t, answers(map[string]float64{"instruction_to_agent": 0.1, "exfil_request": 0.1}))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	budget := maskBudgetBytes(ctx)
+	cancel()
+	fast := maskWorstNsPerByte + nameFoldNsPerByte*float64(patterns)
+	for _, prefix := range []string{"I\u0307lker ", "Jo\u0301se\u0301 "} {
+		text := prefix + maskCorpus(rand.New(rand.NewSource(4)), "nfdgerman", budget)
+		slow := maskNsPerByte(text, patterns)
+		scan := strings.HasPrefix(prefix, "I")
+		// the scan rate over the copy (here shorter than the text: NFD)
+		grow := float64(len(nfc(text))) / float64(len(text))
+		if want := maskWorstNsPerByte + nameScanNsPerByte*float64(patterns)*grow; scan && slow < want-1e-6 {
+			t.Errorf("%q: %v ns per byte, want at least the scan rate %v", prefix, slow, want)
+		}
+		for k, size := range []int{budget * 9 / 10, int(float64(budget) * fast / slow * 0.9)} {
+			plain := k == 0 // the plain budget; else scaled by the text's rate
+			for !utf8.RuneStart(text[size]) {
+				size-- // a whole rune: invalid UTF-8 would take another path
+			}
+			p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": text[:size]})
+			start := time.Now()
+			_, stdout, stderr := runJudgeCLI(t, string(p), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
+			el := time.Since(start)
+			v := decodeObject(t, stdout)
+			if v["error_class"] == "timeout" || el >= 3*time.Second {
+				t.Errorf("%q, %d bytes: %v after %v; %s", prefix, size, v["error_class"], el, stderr)
+			}
+			if scan && plain && v["error_class"] != "too_large" {
+				t.Errorf("%q, %d bytes (plain budget %d): %v, want too_large", prefix, size, budget, v["error_class"])
+			}
+			if !plain && v["failed"] != false {
+				t.Errorf("%q, %d bytes: %v, want judged", prefix, size, v)
+			}
+			t.Logf("%q %d bytes (%.0f ns per byte, %d patterns): %v in %v", prefix, size, slow, patterns,
+				map[bool]string{true: "failed " + fmt.Sprint(v["error_class"]), false: "judged"}[v["failed"] == true], el.Round(time.Millisecond))
+		}
+	}
+}
+
 // TestNamesFileLatin1 (review rounds 6 and 7): a names file whose lines are
 // not valid UTF-8 (saved in Latin-1) is read as Latin-1 for those lines, so
 // its names still mask; the count of such lines is logged, the names never.
@@ -625,12 +816,11 @@ func TestNamesFileLatin1(t *testing.T) {
 func TestMaskingStopsAtTheDeadlineOnSmallFields(t *testing.T) {
 	setupJudge(t, "test-key")
 	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9}))
-	orig := maskDetailFn
-	maskDetailFn = func(s string) (string, MaskCounts) { time.Sleep(2 * time.Second); return orig(s) }
-	t.Cleanup(func() { maskDetailFn = orig })
+	started := slowMaskDetail(t, 2*time.Second)
 	start := time.Now()
 	_, stdout, stderr := runJudgeCLI(t, stopPayload(t, "Fertig.", ""), "--gate", "done", "--endpoint", ts.srv.URL, "--deadline-ms", "300")
 	el := time.Since(start)
+	started()
 	if v := decodeObject(t, stdout); v["error_class"] != "timeout" || el > time.Second || ts.calls() != 0 {
 		t.Errorf("small field: %v after %v, requests %d; %s", v, el, ts.calls(), stderr)
 	}
@@ -640,8 +830,10 @@ func TestMaskingStopsAtTheDeadlineOnSmallFields(t *testing.T) {
 	client.Endpoint = ts.srv.URL
 	start = time.Now()
 	_, _, err := client.PostState(ctx, map[string]string{"x": "short"}, QuestionSet{})
-	if errorClass(err) != errClassTimeout || time.Since(start) > time.Second || ts.calls() != 0 {
-		t.Errorf("PostState: %v after %v", err, time.Since(start))
+	elapsed := time.Since(start)
+	started()
+	if errorClass(err) != errClassTimeout || elapsed > time.Second || ts.calls() != 0 {
+		t.Errorf("PostState: %v after %v", err, elapsed)
 	}
 }
 
@@ -676,5 +868,44 @@ func TestHostCannotAskOverridesRegistry(t *testing.T) {
 		"--gate", "foreign_return", "--registry", reg, "--endpoint", ts.srv.URL)
 	if v := decodeObject(t, stdout); v["verdict"] != "warn" {
 		t.Errorf("rule ask at SubagentStop: %v", v)
+	}
+}
+
+// TestCountPlaceholdersClasses (mask parity, 2026-10-02): the log's
+// mask_counts take a <redacted> after a keyword or Bearer/Basic as
+// secret_kw with MaskDetail's own classes: S around the separator, also as
+// encoding/json escapes it, Unicode \\w in the keyword's tail, the Turkish
+// i, and the second <redacted> that "authorization: Bearer x" leaves. Each
+// text goes through maskJSONLeaves as a request body does; the counts of the
+// placeholders must equal MaskDetail's. Before, the texts marked * logged
+// their secret_kw as opaque.
+func TestCountPlaceholdersClasses(t *testing.T) {
+	setupJudge(t, "")
+	opaque := strings.Repeat("Ab1", 9)
+	for _, text := range []string{
+		"token=abc", "token = abc", "token\u00a0=\u00a0abc", "token\u3000:\u3000abc", "token\u2009=\u2009abc", // * (U+00A0 ...)
+		"token\u000b=\u000babc", "token\u001c=\u001fabc", "token\u2028=\u2029abc", "token\t=\nabc", "token\r:\fabc", // *
+		"token\u00e4=abc", "token.\u00e4-\u00df_x=1", "token\u216b=1", "token\u0661=1", // *
+		"credent\u0130al=abc", "ap\u0131_key=x", "pr\u0130vate-key: x", "AUTHOR\u0130ZAT\u0131ON=x", "auth\u212a=x", // *
+		"Bearer abc", "Bearer\u00a0abc", "Bearer\u001cabc", "Bearer\u000babc", "Bearer\u2028abc", "bas\u0131c x", "BAS\u0130C x", // *
+		"authorization: Bearer abc", `"Authorization": "Bearer abc"`, "Authorization: Basic\tabc", // *
+		"pass" + `word="correct horse"`, "secret='x y'", `token="abc`, "token=<REDACTED>", `token="<Redacted>"`,
+		"x " + opaque, "Bearer abc " + opaque, "Tel " + "0" + "30 " + "1234" + "5678",
+	} {
+		body, _ := json.Marshal(map[string]string{"s": text})
+		masked, counts, err := maskJSONLeaves(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := countPlaceholders(string(masked)); got != counts {
+			t.Errorf("%+q: masked %s, log counts %+v, MaskDetail %+v", text, masked, got, counts)
+		}
+	}
+	// Known limit (log only): an opaque token after a keyword's value and a
+	// space looks like what "authorization: Bearer x" leaves.
+	body, _ := json.Marshal(map[string]string{"s": "token=abc " + opaque})
+	masked, counts, _ := maskJSONLeaves(body)
+	if got := countPlaceholders(string(masked)); counts != (MaskCounts{SecretKW: 1, Opaque: 1}) || got != (MaskCounts{SecretKW: 2}) {
+		t.Errorf("known limit changed: masked %s, log %+v, MaskDetail %+v", masked, got, counts)
 	}
 }

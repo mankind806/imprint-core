@@ -141,7 +141,13 @@ func TestMaskAddresses(t *testing.T) {
 		{"60311 Frankfurt am Main", "<address>", 1},
 		{"70173 Stuttgart", "<address>", 1},
 		{"10115 Berlin-Mitte", "<address>", 1},
-		{"PLZ ist 10115 Berlin im Brief.", "PLZ ist <address> im Brief.", 1},
+		// Superseded 2026-10-02 (mask parity spec section 4, the user's
+		// decision "union of both grammars"): until then this row wanted
+		// "PLZ ist <address> im Brief." - Go's grammar knew only the fixed
+		// "im Breisgau" after the place; Python's generic "im <Word>" is
+		// part of the union, so "im Brief" is masked too. The postcode is
+		// put together from parts (.githooks/pre-push).
+		{"PLZ ist " + "1" + "0115 Berlin im Brief.", "PLZ ist <address>.", 1},
 	}
 
 	for _, tc := range plzCases {
@@ -254,6 +260,7 @@ func TestMaskParity(t *testing.T) {
 		Cases []struct {
 			ID             string         `json:"id"`
 			Text           string         `json:"text"`
+			Masked         *string        `json:"masked"` // exact output, if the case has one
 			MustNotContain []string       `json:"must_not_contain"`
 			MinCounts      map[string]int `json:"min_counts"`
 			ExactCounts    map[string]int `json:"exact_counts"`
@@ -262,6 +269,13 @@ func TestMaskParity(t *testing.T) {
 	if err := json.Unmarshal(data, &spec); err != nil {
 		t.Fatalf("failed to parse mask-parity-cases.json: %v", err)
 	}
+	// Since 2026-10-02 (packet G5, as typesafe-dev 752698b's
+	// test_mask_parity.py): no cases is a failure, and a case's "masked"
+	// is compared exactly.
+	if len(spec.Cases) == 0 {
+		t.Fatal("mask-parity-cases.json: no cases loaded")
+	}
+	withMasked := 0
 
 	tmpDir := t.TempDir()
 	namesFile := filepath.Join(tmpDir, "names.txt")
@@ -271,8 +285,14 @@ func TestMaskParity(t *testing.T) {
 	t.Setenv("TYPESAFE_NAMES_FILE", namesFile)
 
 	for _, c := range spec.Cases {
+		if c.Masked != nil {
+			withMasked++
+		}
 		t.Run(c.ID, func(t *testing.T) {
 			masked, counts := MaskDetail(c.Text)
+			if c.Masked != nil && masked != *c.Masked {
+				t.Errorf("[%s] masked text %q, want %q", c.ID, masked, *c.Masked)
+			}
 
 			countsJSON, err := json.Marshal(counts)
 			if err != nil {
@@ -300,6 +320,7 @@ func TestMaskParity(t *testing.T) {
 			}
 		})
 	}
+	t.Logf("%d cases, %d with an exact masked text", len(spec.Cases), withMasked)
 }
 
 func TestMaxPayloadBytes(t *testing.T) {

@@ -379,14 +379,33 @@ func (q QuestionSet) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// logS is S (MaskDetail's separator class, Python's \s) as it stands in a
+// request body: the rune itself, or the escape that encoding/json writes for
+// it (\t \n \f \r, \u000b, \u001c to \u001f, \u2028, \u2029; measured
+// with go1.27.1 on 2026-10-02, every other S rune is written as it is).
+const logS = `(?:` + pySpaceClass + `|\\[tnfr]|\\u00(?:0[bB]|1[c-fC-F])|\\u202[89])`
+
 // redactedKWRE finds a <redacted> that MaskDetail's keyword or bearer rule
 // wrote (the keyword and separator stay in front of it), also inside a JSON
-// string where quotes are escaped.
-var redactedKWRE = regexp.MustCompile(`(?i)(?:(?:bearer|basic)\s+|(?:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential|private[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*(?:\\?["'])?\s*[=:]\s*(?:\\?["'])?)<redacted>`)
+// string where quotes and separators are escaped. Its classes are
+// MaskDetail's (since 2026-10-02, mask parity): S around the separator and
+// after Bearer/Basic (logS), Unicode \w in the keyword's tail, the keyword
+// list of secretKWPattern with I, i, U+0130 and U+0131 in one class. Group 1
+// is a second <redacted> right after a keyword's, separated by S: what
+// "authorization: Bearer x" becomes ("authorization: <redacted> <redacted>";
+// the keyword rule replaced "Bearer" after the bearer rule replaced "x").
+// Known limit, log only: an opaque token after a keyword's value and a
+// space ("token=abc <24 token characters>") is counted as secret_kw too.
+// Before 2026-10-02: ASCII \w and \s, no Turkish i, no second <redacted>,
+// so "tokenä=", "credentİal=", "Bearer" + U+00A0 and the like counted as
+// opaque.
+var redactedKWRE = regexp.MustCompile(`(?i)` + bearerBasicTrigger + logS + `+(?-i:<redacted>)|` + secretKWKeywords +
+	`[\p{L}\p{N}_.-]*(?:\\?["'])?` + logS + `*[=:]` + logS + `*(?:\\?["'])?(?-i:<redacted>)(` + logS + `+(?-i:<redacted>))?`)
 
 // countPlaceholders counts MaskDetail's placeholders in text, by kind: what
 // was masked and is actually in the text, not what a cut dropped. A
-// <redacted> after a keyword or bearer counts as secret_kw, any other as opaque.
+// <redacted> after a keyword or bearer counts as secret_kw (see
+// redactedKWRE), any other as opaque.
 func countPlaceholders(text string) MaskCounts {
 	c := MaskCounts{
 		Email:   strings.Count(text, "<email>"),
@@ -396,7 +415,12 @@ func countPlaceholders(text string) MaskCounts {
 		Name:    strings.Count(text, "<name>"),
 	}
 	red := strings.Count(text, "<redacted>")
-	c.SecretKW = len(redactedKWRE.FindAllStringIndex(text, -1))
+	for _, m := range redactedKWRE.FindAllStringSubmatchIndex(text, -1) {
+		c.SecretKW++
+		if m[2] >= 0 {
+			c.SecretKW++
+		}
+	}
 	if red > c.SecretKW {
 		c.Opaque = red - c.SecretKW
 	}
@@ -421,8 +445,35 @@ var errTooLarge = errors.New("text too large to mask within the deadline")
 //   - all steps on the fast path: 127 ns (dense street addresses), up to 232
 //     under load: 200;
 //   - a text with a rune whose case fold has another length (Kelvin sign, long
-//     s, capital sharp s, ...) or invalid UTF-8 sends some steps back to the
-//     old regex: up to 705 ns: 900;
+//     s, capital sharp s, and since the mask parity change the Turkish dotted
+//     and dotless i, U+0130 and U+0131, ...) or invalid UTF-8 sends some steps
+//     back to the old regex: up to 705 ns: 900;
+//   - re-measured after the mask parity change (2026-10-02, same machine,
+//     TestMaskProfile at 2 and 16 MiB, before and after in one session): fast
+//     path at most 125 ns (before 127); with a long s or a dotless i in front
+//     at most 459 ns (before 450; dense key=value 287, before 194); names
+//     scanned on Turkish text 6.1 ns per pattern. No constant changed.
+//   - re-measured after the address union (2026-10-02, same machine, before
+//     and after in one session, TestMaskProfile at 2 and 16 MiB with the
+//     address corpora maskAddressKinds): fast path at most 77 ns (before 130;
+//     the old street step took 937 ns on chains of capitalised words before
+//     a house number, over both rates), with a long s or a dotless i in front
+//     at most 266 ns (before 467). The address automata are built once per
+//     process, up to 5.6 ms, outside the per-byte rate. No constant changed.
+//   - re-measured after names on an NFC copy (2026-10-02, packet G4, same
+//     machine, before (fa6fa18) and after in one session, two sessions,
+//     TestMaskProfile at 2 and 16 MiB and the NFC corpora maskNFCKinds at
+//     64 KiB to 16 MiB, 2 names): NFC text unchanged, at most 77 ns (before
+//     76); the corpora with "I" + U+0307 in front (all text not NFC) at most
+//     79 ns (before 77); the NFC corpora at most 69 ns (before 50), of which
+//     the names step 46 ns (before 18: building the copy and mapping back), the
+//     same per byte from 256 KiB to 16 MiB (linear; "a" + U+0F73 x 87,000 to
+//     5.6 million in one segment 34 to 43 ns); with a dotless i in front at
+//     most 221 ns (before 199), once 424 under load (the same text 105 in
+//     the other session). The names run over the copy, up to twice as long
+//     as the text, and are scanned name by name when the copy holds a rune
+//     such as U+0130: maskNsPerByte charges the name rate times the copy's
+//     length, and the scan rate then. No constant changed.
 //   - per name pattern: 0.9 on the fold-canonical search (Greek names on
 //     Greek text): 1.5; 15.7 when a text is scanned name by name (it holds
 //     such a rune, or is not valid UTF-8): 20.
@@ -434,15 +485,35 @@ const (
 )
 
 // maskNsPerByte is the worst-case masking cost per byte of text, with the
-// given number of name patterns, on the path the text will take.
+// given number of name patterns, on the path the text will take. Since
+// 2026-10-02 names on text that is not NFC run on an NFC copy (mask_nfc.go).
+// Building it is inside the per-byte rate (see above); but the names run
+// over the copy, which may be longer than the text (up to twice for "a" +
+// U+0F73...), and it may hold a rune whose fold has another length that the
+// text lacks ("I" + U+0307 is U+0130 in NFC): then they are scanned name by
+// name. The copy is built here to know both: up to 32 ns per byte (15 MiB
+// of "a" + U+0F73 or of mark runs in 0.5 s, 2026-10-02); maskCapped refuses
+// a text that is over budget at the lowest rate before calling this.
 func maskNsPerByte(text string, patterns int) float64 {
 	p := float64(patterns)
-	switch {
-	case !utf8.ValidString(text) || hasFoldLengthRune(text):
+	if !utf8.ValidString(text) {
 		return maskFallbackNsPerByte + nameScanNsPerByte*p
-	default:
-		return maskWorstNsPerByte + nameFoldNsPerByte*p
 	}
+	base, nameRate := maskWorstNsPerByte, nameFoldNsPerByte
+	if hasFoldLengthRune(text) {
+		base, nameRate = maskFallbackNsPerByte, nameScanNsPerByte
+	}
+	if patterns == 0 || len(text) == 0 {
+		return base + nameRate*p
+	}
+	c := nfc(text) // text itself, without allocating, when the quick check accepts it
+	if c == text {
+		return base + nameRate*p
+	}
+	if hasFoldLengthRune(c) {
+		nameRate = nameScanNsPerByte
+	}
+	return base + nameRate*p*float64(len(c))/float64(len(text))
 }
 
 // maskBudgetBytes is how many bytes of plain text (the fast path) one call
@@ -501,6 +572,12 @@ func maskWithin(ctx context.Context, text string) (string, error) {
 func (b *maskBudget) maskCapped(ctx context.Context, text string, capChars int, keep string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
+	}
+	// No path costs less than maskWorstNsPerByte: a text over the budget at
+	// that rate is refused before maskNsPerByte builds an NFC copy of it
+	// (up to 32 ns per byte, 0.5 s for 15 MiB; measured 2026-10-02).
+	if float64(len(text))*maskWorstNsPerByte > b.leftNs {
+		return "", errTooLarge
 	}
 	cost := float64(len(text)) * maskNsPerByte(text, len(loadNameSet().matchers))
 	if cost > b.leftNs {
@@ -566,10 +643,55 @@ func placeholderAcross(m string, at int) (start, end int, ok bool) {
 	return 0, 0, false
 }
 
+// danglingSecretRE matches, at the end of a head, the lead of a secret whose
+// value the cut dropped: a key=value lead (secretKWLead) with the opening
+// quote of a quoted value, or a Bearer/Basic trigger after no ASCII word
+// character (bearerBasicPattern's \b) with its S run. It runs on the stretch
+// danglingWindow returns, not on the whole head.
+var danglingSecretRE = regexp.MustCompile(`(?i)(?:` + secretKWLead + `["']?|\b` + bearerBasicTrigger + pySpaceClass + `+)$`)
+
+// danglingWindow returns where the only stretch at the end of h starts in
+// which a lead of danglingSecretRE can lie. Going back: an optional quote,
+// S, an optional = or :, S, an optional quote, then the run of runes in
+// [\p{L}\p{N}_.-] that holds keyword and tail, or the trigger. No two
+// neighbouring pieces share a rune, so the stretch is the lead's own; the
+// rune before it is no ASCII word rune, so \b sees the same at its start as
+// in h.
+func danglingWindow(h string) int {
+	k := len(h)
+	back := func(take func(rune) bool, most int) {
+		for n := 0; k > 0 && n != most; n++ {
+			r, w := utf8.DecodeLastRuneInString(h[:k])
+			if !take(r) {
+				return
+			}
+			k -= w
+		}
+	}
+	quote := func(r rune) bool { return r == '"' || r == '\'' }
+	back(quote, 1)
+	back(isPySpace, -1)
+	back(func(r rune) bool { return r == '=' || r == ':' }, 1)
+	back(isPySpace, -1)
+	back(quote, 1)
+	back(func(r rune) bool { return isNameWordRune(r) || r == '.' || r == '-' }, -1)
+	return k
+}
+
 // cutMasked keeps at most capChars runes of the masked text m: its head, its
 // tail, or both (head_tail, joined by headTailSeparator, which counts toward
 // the cap). A cut that would split a placeholder moves to its edge, so the
 // result is always a prefix, a suffix, or prefix + separator + suffix of m.
+// A head cut that would end in the lead of a secret whose value it drops
+// ("token=", "api_key: \"", "Bearer ") moves back before that lead (since
+// 2026-10-02, packet G5 of mask parity): PostState masks every string again,
+// and there the lead took the "[…]" of headTailSeparator as its value and
+// wrote <redacted>, up to 7 runes more, over the cap (TestJudgeDeadlineCoversBuild
+// failed 6 of 10 runs on 97d9fc3, packet G4, and 5 of 10 on c3e051c without
+// the move, 0 of 10 with it, 2026-10-02). The head is then shorter than its share
+// by that lead, which is sent no more. A tail cut has no such case: no match
+// starts inside the separator, and the values that could take its "[…]"
+// (key=value, Bearer/Basic) stop at the newline that ends it.
 // capChars <= 0 keeps everything.
 func cutMasked(m string, capChars int, keep string) string {
 	if capChars <= 0 || len(headRunes(m, capChars)) == len(m) {
@@ -579,6 +701,14 @@ func cutMasked(m string, capChars int, keep string) string {
 		end := len(headRunes(m, n))
 		if s, _, ok := placeholderAcross(m, end); ok {
 			end = s
+		}
+		for end > 0 {
+			k := danglingWindow(m[:end])
+			loc := danglingSecretRE.FindStringIndex(m[k:end])
+			if loc == nil {
+				break
+			}
+			end = k + loc[0]
 		}
 		return end
 	}

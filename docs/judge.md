@@ -9,9 +9,9 @@
 | Gates | `done`, `foreign_return`, beide Hinweis (`warn`), `fail_mode: open` | gebaut; **in keinem Hook verdrahtet** |
 | Fragen, Schwellen, Fail-Modus | eine Datei, `tools/imprint-dev/judge/gates.json`, ins Binary eingebettet | gebaut; `TestEmbeddedRegistry` |
 | Modell | gepinnt `jev-1.13.0`, nie `jev-latest` | gebaut; `TestRegistryPinningAndVersion`; live 2026-10-02: API nennt `model: jev-1.13.0` |
-| Maskierung | jedes Textfeld ganz maskieren, dann kappen (nie mitten in einem Platzhalter); höchstens so viel Text je Aufruf, wie im ungünstigsten Fall in der halben Deadline maskiert ist (3 s: 7,2 MB, 6 s: 14,4 MB), sonst `too_large` und nichts gesendet; `PostState` maskiert jedes String-Blatt noch einmal | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestCutMaskedProperty` (50 × 200 Läufe), `TestMaskCappedIsCutOfWholeMask`, `TestJudgeMaskBudget` |
-| Maskier-Geschwindigkeit | dieselben Treffer wie vorher, aus Kandidaten statt NFA über jedes Byte; linear auch auf abgelehnten Treffern | gebaut; `TestMaskDifferential` (alt gegen neu, Byte für Byte), `TestMaskLinearOnRejectedRuns` |
-| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage; Maskieren hört am Ende der Deadline auf zu warten | gebaut; `TestJudgeDeadlineCoversBuild` (dichteste Adressen in Budgetgröße, 15 MiB, 10.000 Aufrufe), `TestJudgeMaskingStopsAtTheDeadline` |
+| Maskierung | jedes Textfeld ganz maskieren, dann kappen (nie mitten in einem Platzhalter; *seit 2026-10-02 auch nie direkt hinter dem Vorsatz eines Geheimnisses, dessen Wert der Schnitt abschneidet, siehe „Maskieren und Kappen“*); höchstens so viel Text je Aufruf, wie im ungünstigsten Fall in der halben Deadline maskiert ist (3 s: 7,2 MB, 6 s: 14,4 MB), sonst `too_large` und nichts gesendet; `PostState` maskiert jedes String-Blatt noch einmal; Regeln gleich mit `ts_common.py` (siehe „Parität mit ts_common.py“) | gebaut; `TestJudgeMasksEverythingSent`, `TestPostStateMasksWhatTheBuilderLeft`, `TestCutMaskedProperty` (50 × 200 Läufe), `TestCutMaskedDanglingSecretLead`, `TestMaskCappedIsCutOfWholeMask`, `TestJudgeMaskBudget`, `TestMaskGolden` |
+| Maskier-Geschwindigkeit | dieselben Treffer wie vorher, aus Kandidaten statt NFA über jedes Byte; linear auch auf abgelehnten Treffern (*Adressen seit 2026-10-02 absichtlich anders: Vereinigung beider Grammatiken über Automaten, siehe „Adressen“; Opaque seit 2026-10-03 absichtlich anders: Pythons Regel, siehe „Opaque: Pythons Regel“*) | gebaut; `TestMaskDifferential` (alt gegen neu, Byte für Byte), `TestMaskLinearOnRejectedRuns`, `TestAddressAutomata` |
+| Deadline | zählt ab Start von `judge`: stdin, Transkript, Maskierung, Schlüssel, Anfrage; Maskieren hört am Ende der Deadline auf zu warten | gebaut; `TestJudgeDeadlineCoversBuild` (dichteste Adressen in Budgetgröße, 15 MiB, 10.000 Aufrufe; *überholt am 2026-10-02: seit der Adress-Vereinigung ist dichtes `schluessel=wert` der langsamste Text, der Test nimmt es: 6,5 MB in 0,52–0,54 s geurteilt, mit Adressen waren es 0,28 s*; *bis 2026-10-02 wackelig: der gekappte Text war manchmal 1–7 Zeichen über 8000, behoben durch die Vorsatz-Regel beim Kappen, seither 10 von 10 Läufen grün*), `TestJudgeMaskingStopsAtTheDeadline` |
 | Log | eine JSONL-Zeile je Aufruf, ohne Texte und ohne unbekannte Namen | gebaut; `TestJudgeLogOneLinePerCall`, `TestJudgeNeverEchoesUnknownNames` |
 | Durchsetzung | keine: kein Hook ruft `judge` | **nichts setzt hier etwas durch** |
 
@@ -168,7 +168,7 @@ heutigen Wrapper (`hooks/*.sh`) beenden sich dann mit 0, also offen.
 
 | Gate | Ereignis | Fragen (ein Batch) | Regel | Herkunft |
 |---|---|---|---|---|
-| `done` | Stop | `claim`, `backed` | `claim>=0.7 && (!local_evidence \|\| backed<=0.5)` → `warn` | 1:1 aus `ts-done-check` (typesafe-dev 8b80f48): Fragen, Schwellen, `CLAIM_RE`, `local_evidence`, letzte 15 Aufrufe, Bash-Befehl ≤ 200 Zeichen, Nachricht: letzte 4000 Zeichen, jeweils erst ganz maskiert, dann gekappt wie in Python. Unterschiede: `warn` statt `block`; ein Schnitt mitten in einem Platzhalter rückt an dessen Rand |
+| `done` | Stop | `claim`, `backed` | `claim>=0.7 && (!local_evidence \|\| backed<=0.5)` → `warn` | 1:1 aus `ts-done-check` (typesafe-dev 8b80f48): Fragen, Schwellen, `CLAIM_RE`, `local_evidence`, letzte 15 Aufrufe, Bash-Befehl ≤ 200 Zeichen, Nachricht: letzte 4000 Zeichen, jeweils erst ganz maskiert, dann gekappt wie in Python. Unterschiede: `warn` statt `block`; ein Schnitt mitten in einem Platzhalter rückt an dessen Rand (*ergänzt am 2026-10-02, Paket G5: dritter Unterschied, ein Anfang endet nie auf dem Vorsatz eines Geheimnisses, dessen Wert der Schnitt abschneidet, siehe „Maskieren und Kappen“; in `done` betrifft das Befehl und Werkzeugname, die ihren Anfang behalten, nicht die Nachricht, die ihr Ende behält (`gates.json`)*) |
 | `foreign_return` | PostToolUse (`tool_response`), SubagentStop (`last_assistant_message`) | `instruction_to_agent`, `exfil_request` | je ≥ 0.35 → `warn` | Fragen aus Konzept B §4.2; Schwelle 0.35 laut Konzept B aus dem llm_guardrails-Cookbook, hier nicht nachgelesen; Text ≥ 15 Zeichen; über 8000 Zeichen gehen Anfang und Ende (je knapp 4000, getrennt durch `[…]`) |
 
 **Grenze von `foreign_return` in Stufe 1:** Die String-Blätter eines Objekts werden nach Schlüssel
@@ -179,11 +179,26 @@ sortiert verbunden. Was nur in der Mitte eines Textes über 8000 Zeichen steht, 
 Kappung geschnitten: Anfang, Ende oder beides. Was hinausgeht, ist damit immer ein Anfang, ein Ende
 oder Anfang + `[…]` + Ende des ganz maskierten Textes; ein Geheimnis wird nie zerschnitten, bevor es
 maskiert ist, gleich wie lang es ist. Fiele ein Schnitt mitten in einen Platzhalter (`<redacted>`,
-`<email>` …), rückt er an dessen Rand; andere `<` bleiben unberührt. Geprüft:
+`<email>` …), rückt er an dessen Rand; andere `<` bleiben unberührt. Seit 2026-10-02 (Paket G5 der
+Maskier-Parität, Entscheid der Lead-Sitzung, Option a): endete der Anfang danach auf dem Vorsatz eines
+Geheimnisses, dessen Wert der Schnitt abschneidet (`token=`, `auth: `, `api_key="`, `Bearer `), rückt
+der Schnitt vor diesen Vorsatz; es geht weniger hinaus, nie mehr. Grund: `PostState` maskiert jedes
+Blatt noch einmal und nahm dabei das `[…]` des Trenners als Wert; `<redacted>` machte das Feld bis zu
+7 Zeichen länger als die Kappung (`TestJudgeDeadlineCoversBuild` scheiterte in Paket G4 in 6 von 10
+Läufen, in G5 ohne die Regel in 5 von 10, mit ihr in keinem von 10). Für das Ende gibt es den Fall
+nicht: im Trenner beginnt kein Treffer, und die Werte, die `[…]` nehmen könnten, enden an seinem
+Zeilenumbruch. Ein anderer Weg, auf dem das zweite Maskieren ein Feld wachsen lässt, ist nicht behoben
+(siehe „Parität mit ts_common.py“, Bekannte Grenzen). Geprüft:
 `TestCutMaskedProperty` (50 Seeds × 200 Texte aus JWT-, base64-, UUID-, Lockfile-, Mehrbyte- und
 Prosa-Stücken mit Geheimnissen dazwischen; Orakel: Präfix/Suffix des ganz maskierten Textes, gültiges
 UTF-8, kein geteilter Platzhalter, eigene Suche nach Platzhaltern, jede Seite höchstens 9 Zeichen unter
-ihrem Anteil an der Kappung; fängt die Mutationen „Rückblick 8“, „leer“ und „Byte-Schnitt“),
+ihrem Anteil an der Kappung (*überholt am 2026-10-02 durch die Vorsatz-Regel: der Anfang darf zusätzlich
+um die Vorsätze kürzer sein, die er abschneidet, und endet nie auf einem; das Orakel baut sie aus den
+Referenzmustern, nicht aus denen von `cutMasked`*); fängt die Mutationen „Rückblick 8“, „leer“ und
+„Byte-Schnitt“, seit 2026-10-02 auch „Vorsatz-Regel aus“), `TestCutMaskedDanglingSecretLead` (12
+Vorsätze, darunter beide Anführungszeichen, ein langer Schlüssel-Rest, U+0130, Bearer und Basic, und
+„xBearer “, das stehen bleiben muss; jeder Schnitt vom Ende des Vorsatzes bis ins Innere des
+Platzhalters; das zweite Maskieren lässt den Schnitt unverändert und in der Kappung),
 `TestMaskCappedIsCutOfWholeMask`, die Regressionen `TestForeignReturnKeepsInjectionBesideBlob`,
 `TestDoneKeepsMessageBesideBlob`, `TestMaskCappedLongMatch`. `done` maskiert nur die Befehle der letzten
 15 Aufrufe; Werkzeugnamen sind Blätter wie andere: maskiert, auf 100 Zeichen gekappt, im Budget
@@ -193,7 +208,8 @@ ihrem Anteil an der Kappung; fängt die Mutationen „Rückblick 8“, „leer�
 **Maskier-Geschwindigkeit.** Gos `regexp` hat keinen DFA: eine Suche ohne Anker läuft mit dem NFA über
 jedes Byte. Die Muster sind deshalb unverändert, gesucht wird aber anders (`tools/imprint-dev/mask_fast.go`):
 ein Treffer kann nur an bestimmten Stellen anfangen (Anfangsbuchstaben eines Schlüsselworts, ein `@`,
-zwei Großbuchstaben und zwei Ziffern, Straßen-Endungen vor `\s\d` …); dort wird das Muster mit Anker
+zwei Großbuchstaben und zwei Ziffern, Straßen-Endungen vor `\s\d` … (*überholt am 2026-10-02 für Straßen und
+Postleitzahlen: Automaten statt Muster, siehe „Adressen“*)); dort wird das Muster mit Anker
 versucht, mit dem Zeichen davor als Kontext für `\b`, auf kleinen Fenstern, damit Gos Backtracker statt
 des NFA läuft. Kandidaten, deren Zeichen davor ein Lookbehind ablehnt, werden übersprungen statt gefunden,
 verworfen und ein Zeichen weiter neu gesucht: das war quadratisch. Namen werden weiter einzeln nacheinander
@@ -205,7 +221,12 @@ Fundort wird exakt nachgeprüft (Faltung und `\b`). Wo das nicht exakt ginge, l�
 ungültiges UTF-8; für die Schritte ohne Groß-/Kleinschreibung Text mit K (U+212A), ſ (U+017F) oder ẞ
 (U+1E9E), den einzigen Zeichen, die Go auf ASCII-Buchstaben bzw. ß faltet; für die Namen außerdem Text mit
 einem Zeichen, dessen kanonisches Zeichen eine andere Byte-Länge hat (dieselben drei, das Ohm- und das
-Angström-Zeichen …): dann wird Name für Name gesucht.
+Angström-Zeichen …): dann wird Name für Name gesucht. Seit 2026-10-02 (Maskier-Parität, unten) gehören
+İ (U+0130) und ı (U+0131) in beide Listen: Python faltet sie mit i, Go nicht von selbst; Bearer/Basic,
+Schlüsselwörter und Straßen laufen mit ihnen den alten Weg (mit den Mustern von jetzt), Namen Name für
+Name. Türkischer Text verliert damit den schnellen Weg (gemessen unten). (*Überholt am 2026-10-02 für
+Straßen und Postleitzahlen: der Adress-Schritt hat keinen alten Weg mehr, seine Automaten laufen auf jedem
+Text, mit diesen Zeichen und mit ungültigem UTF-8; siehe „Adressen“.*)
 
 Gemessen 2026-10-02, go1.27.1, `GOMAXPROCS=2`, dieser Rechner, Namensdatei mit 2 Namen,
 `TestMaskProfile` (Laufanleitung im Test), alt = Stand 301db1c:
@@ -222,7 +243,10 @@ Gemessen 2026-10-02, go1.27.1, `GOMAXPROCS=2`, dieser Rechner, Namensdatei mit 2
 | 64 KiB `aeyJ` / `XAKIA` | 18,7 s / 13,6 s | 2,7 ms / 2,3 ms | – |
 
 Alt mit Namensdatei auf 16 MB Personendaten: nicht gemessen (Lauf abgebrochen). Der ungünstigste Fall neu
-sind dichte Straßenadressen: 2,1 s für 16 MB, rund 127 ns je Byte. Jedes Muster der Namensdatei kostet
+sind dichte Straßenadressen: 2,1 s für 16 MB, rund 127 ns je Byte (*überholt am 2026-10-02: ein Korpus aus
+Ketten großgeschriebener Wörter vor einer Hausnummer, an dem Tag erst gemessen, brauchte mit diesem Stand
+15,7 s für 16 MB, rund 935 ns je Byte, über beiden Preisen des Budgets; seit der Adress-Vereinigung
+0,49 s, siehe „Adressen“*). Jedes Muster der Namensdatei kostet
 dazu, je Byte: auf der kanonischen Kopie bis 0,9 ns (50 griechische und kyrillische Namen auf Text ihrer
 Schrift; vorher 15 ns mit der Suche Zeichen für Zeichen), Name für Name (Text mit einem solchen Zeichen
 oder ungültigem UTF-8) bis 15,7 ns.
@@ -238,18 +262,290 @@ und gilt für alle, die `MaskDetail` nutzen, also auch `hook-typesafe-check` und
 Geprüft gegen Python selbst: `TestNamePythonParity` lässt `ts_common.mask_detail` (python3) und
 `MaskDetail` auf 57 Texte mit deutschen Umlauten und ß, Griechisch (auch Schluss-Sigma), Kyrillisch,
 Namen am Anfang und Ende, neben Satzzeichen und in längeren Wörtern los: Ausgabe und Namenszahl gleich.
-Bekannte Unterschiede zu Python, nicht im Korpus: Python setzt das türkische İ/ı mit i gleich, Go nicht;
+Bekannte Unterschiede zu Python, nicht im Korpus: Python setzt das türkische İ/ı mit i gleich, Go nicht
+(*überholt am 2026-10-02 durch die Maskier-Parität, unten: Go setzt I, i, İ und ı jetzt wie Python
+gleich*);
 Python ersetzt alle Namen in einer Alternation, Go Name für Name, längster zuerst (gleich, solange sich
 Namen nicht überlappen); Python verwirft bei einem Dekodierfehler die ganze Namensdatei, Go liest die Zeile
-als Latin-1 (siehe Namensdatei).
+als Latin-1 (siehe Namensdatei). (*Der ganze Absatz „Bekannte Unterschiede zu Python“ ist überholt am
+2026-10-02 durch „Parität mit ts_common.py“ unten: die Regeln sind abgeglichen und werden bei jedem Lauf
+gegen den Goldkorpus geprüft; die Unterschiede, die bleiben (überlappende Namen, die Namensdatei laut
+Nachtrag A7), werden dort unter „Bekannte Grenzen“ geführt.*)
+
+**Maskier-Parität mit Python (seit 2026-10-02, absichtlich anders als vorher).** Nach der Parity-Spezifikation
+der Lead-Sitzung vom 2026-10-02 (Abschnitte 0, 1a, 1b, 3; Kriterium des Nutzers: das sicherere Verhalten
+maskiert mehr, ohne Wörter zu zerteilen) gelten die Zeichenklassen von Pythons `re` auf `str`: Leerraum S ist `unicode.IsSpace` plus
+U+001C–U+001F, ein Wortzeichen ein Buchstabe, eine Zahl oder `_`, eine Ziffer Unicode Nd; jedes `(?i)`
+(Schlüsselwörter, Bearer/Basic, Straßen-Endungen, Namen) setzt I, i, İ und ı gleich.
+
+| Schritt | jetzt | vorher |
+|---|---|---|
+| Bearer/Basic | Auslöser nach keinem ASCII-Wortzeichen („äBearer x“ löst aus), S+, Wert bis zum nächsten Tab, LF, FF, CR oder Leerzeichen, Anführungszeichen und Kommas eingeschlossen; ein Wert `<redacted>` zählt mit | Wert endete an `"`, `'`, `,`, `;`; `"Authorization": "Bearer abc"` ließ `"abc"` stehen |
+| Schlüssel=Wert | Schlüssel-Rest mit Unicode-`\w` („tokenä=abc“), S um `=`/`:`; „authorization: Bearer abc“ → „authorization: <redacted> <redacted>“; ein Wert, der schon `<redacted>` ist (Groß-/Kleinschreibung egal), wird wie in Pythons Lookahead übergangen und die Suche geht weiter (*überholt am 2026-10-02 durch Nachtrag A3: nur der genaue Platzhalter `<redacted>` wird übergangen, in beiden Sprachen; „token=<REDACTED>“ und `token="<Redacted>"` werden maskiert*) | ASCII; Werte „Bearer“/„Basic“ blieben stehen; `<redacted>` als Treffer übersprungen: „token=<redacted>password=x“ ließ `x` stehen, „token=<REDACTED>“ wurde ersetzt |
+| Telefon | Ziffern jeder Schrift nach der 0; eine Zahl jeder Schrift davor („²“, „Ⅻ“) verhindert den Treffer | ASCII-Ziffern; „²“ und „Ⅻ“ davor maskierten mitten im Wort |
+
+Geprüft: `TestMaskSpecExamples` (47 Fälle; die Erwartung ist die Ausgabe von `ts_common.mask_detail` des
+Python-Zweigs `mask-parity-unicode`, typesafe-dev 3fa4dfe, ohne Namensdatei), `TestMaskClasses` (S auf jedem
+Zeichen), `TestNamesTurkishI`, `TestNamePythonParity` (jetzt 71 Texte, mit türkischen Namen). Dazu einmal am
+2026-10-02 gegen denselben Python-Zweig: 8.926 Texte aus Fragmenten des Differentialtests, Zählungen von
+`secret_kw`, E-Mail, IBAN und Telefon (alle vor dem Adress-Schritt) in allen gleich; volle Ausgabe auf 4.934
+Texten ohne Adresse auf beiden Seiten gleich bis auf 6. **Unterschied, nicht behoben (Abschnitt 7 der
+Spezifikation sagt „unverändert, gemessen gleich“):** alle 6 liegen im Opaque-Schritt; Pythons `RX_OPAQUE`
+sucht die Ziffer mit Unicode-`\d` im Lookahead, ein Lauf von 24 oder mehr Token-Zeichen direkt vor einer
+Ziffer einer anderen Schrift („…abcd١“) wird dort maskiert, in Go nicht (*überholt am 2026-10-03 durch
+Nachtrag A9: Go übernimmt Pythons Regel, der Unterschied ist behoben; siehe „Opaque: Pythons Regel“*).
+Adressen (Vereinigung beider
+Grammatiken) und Namen mit NFC folgen in eigenen Schritten; hier ist an ihnen nur die türkische Faltung neu.
+(*Überholt am 2026-10-02 für Adressen: sie folgen im nächsten Absatz; für Namen: „Namen in NFC“ weiter
+unten.*)
+
+**Opaque: Pythons Regel (seit 2026-10-03, absichtlich anders als vorher).** Nachtrag A9 der
+Parity-Spezifikation (Lead-Sitzung, 2026-10-03; ersetzt Nachtrag A4, dessen Prämisse widerlegt ist: auch
+typesafe-dev master ersetzt `RX_OPAQUE` durch einen linearen Matcher, der dieselbe Regel nachbildet). Nach
+dem Kriterium der Person (maskiert mehr) gilt Pythons Regel: Ein längster Lauf R aus `[A-Za-z0-9_+/-]`
+(danach bis zu zwei `=` als Polster) wird `<redacted>`, wenn R mindestens 24 Zeichen hat, einen
+ASCII-Buchstaben enthält und entweder eine ASCII-Ziffer enthält oder direkt hinter R, vor jedem `=`, eine
+Dezimalziffer irgendeiner Schrift (Unicode Nd) steht. So liest `RX_OPAQUE` mit Unicode-`\d` im Lookahead
+(typesafe-dev 752698b als Regex, master 9a30e8d als `_LinearOpaqueMatcher`; beide gleich); Go verlangte bis
+dahin eine ASCII-Ziffer im Lauf (`maskOpaque`, `opaqueRunQualifies`).
+
+| Text (R: 24 Token-Zeichen mit Buchstaben, ohne Ziffer) | jetzt | vorher |
+|---|---|---|
+| R + „١“ (ebenso U+06F3, U+0966, U+FF13, U+1D7CF) | `<redacted>١` | unverändert |
+| R + „١=“ | `<redacted>١=` | unverändert |
+| R + „=١“, R + „==١“, R + „ ١“, „١“ + R, 23 Zeichen + „١“, R + „²“ oder „Ⅻ“ | unverändert | unverändert |
+| R + ungültiges UTF-8 (etwa das erste Byte von „١“ allein) | unverändert: keine Ziffer, Python sieht dort U+FFFD oder ein Surrogat | unverändert |
+| R + „-“ + Postleitzahl in arabisch-indischen Ziffern + „ Berlin“ | R + `-<address>`: der Adress-Schritt nimmt die Ziffer vorher weg | ebenso |
+
+Geprüft: `TestMaskOpaqueExamples` (36 Fälle; die Erwartung von 33 ist die Ausgabe von
+`ts_common.mask_detail` beider Python-Fassungen ohne Namensdatei, 2026-10-03; 3 nur in Go: ungültiges UTF-8
+und U+11DE0), `TestMaskDifferential` gegen `refOpaqueStep`, `RX_OPAQUE` Stelle für Stelle mit beiden
+Lookaheads ausgeschrieben, mit A9-Fragmenten im Korpus. Fünf Mutanten (Ziffer hinter dem Lauf übergangen,
+Ziffer erst hinter dem Polster gesucht, Referenz nur mit ASCII-Ziffern, drei `=` Polster, eine Ziffer vor
+dem Lauf zählt) lassen beide Tests rot werden. `MaskDetail` gegen beide Python-Fassungen, Ausgabe und alle 7
+Zähler, gemessen 2026-10-03 (die Korpora liegen nur in der Sitzung):
+
+| Korpus | Texte | verschieden vorher | jetzt |
+|---|---|---|---|
+| gezielt: Lauflängen 23, 24, 25, 40, mit und ohne ASCII-Ziffer, 0 bis 3 `=`, davor und dahinter ASCII-Ziffer, U+0661, U+06F3, U+0966, U+FF13 (dahinter auch U+1D7CF), Buchstaben, Leerzeichen; Ränder an Platzhaltern früherer Schritte; 16 Namen | 19.712 | 764, alle `opaque` | 0 |
+| Mischkorpus der Prüfung vom 2026-10-02, 13 Namen | 24.295 | 0 | 0 |
+| Texte des Goldkorpus, seine 16 Namen | 6.686 | 0 | 0 |
+
+Der Goldkorpus schließt die Form noch aus (Ausschluss A4 im Generator von typesafe-dev), bis er neu erzeugt
+ist; die A4-Zeile in `tools/typesafe/README.md` bleibt bis zum nächsten Abgleich mit typesafe-dev stehen
+(hier nicht geändert). (*überholt am 2026-10-03: mit typesafe-dev b64a949 abgeglichen, A9 ersetzt A4 im
+Generator, der Goldkorpus hat jetzt 7.269 Fälle (sha256 7b52aae2…); die A4-Zeile in
+`tools/typesafe/README.md` ist weg aus „Bekannte Folgen und Grenzen“, der alte Text steht jetzt mit Grund in
+„Überholte Regeltexte“, eine neue Zeile „Token (opaque)“ trägt A9; siehe auch die A4-Zeile (jetzt mit dem
+A9-Hinweis) weiter unten in „Bekannte Grenzen“ und „Goldkorpus neu erzeugen“.*) Grenze: Ziffern, die erst
+Unicode 17 vergibt, siehe „Bekannte Grenzen“.
+
+**Kosten** (`TestMaskProfile`, `GOMAXPROCS=2`, Namensdatei mit 2 Namen, vorher = c9ed39a, je zwei Läufe
+abwechselnd in einer Sitzung am 2026-10-03, Last 8,5 bis 4,3):
+
+| 16 MiB | gesamt vorher → jetzt | Opaque-Schritt vorher → jetzt |
+|---|---|---|
+| UUIDs, Hashes (`uuidhash`) | 865–868 → 794–802 ms | 163–169 → 92–93 ms |
+| Großbuchstaben + Ziffern (`capsdigits`) | 889–894 → 876–890 ms | 135–138 → 94–96 ms |
+| Ziffernläufe (`digitrun`) | 401–407 → 396–398 ms | 25 → 21 ms |
+| Personendaten dicht (`pii`) | 1.134–1.145 → 1.126–1.131 ms | 29–30 → 31–32 ms |
+| `schluessel=wert` dicht | 1.260–1.262 → 1.243–1.247 ms | 45–46 → 48–49 ms |
+| Token-Läufe ohne Ziffer, oft vor einer Ziffer anderer Schrift (Korpus nur in der Sitzung) | 867–875 → 823–830 ms | 144 → 92–99 ms |
+
+Der Opaque-Schritt ist schneller: ein Lauf, der nicht zählt, geht nicht mehr als Treffer durch die
+Ersetzung (die alte las jede Rune und gab ihn unverändert zurück), und die Suche nach Buchstabe und Ziffer
+endet, sobald beide gefunden sind. Ungünstigster Fall des schnellen Wegs bleibt dichtes `schluessel=wert`,
+74 ns je Byte (vorher 75); keine Konstante geändert.
+
+**Adressen: Vereinigung beider Grammatiken (seit 2026-10-02, absichtlich anders als vorher).** Entscheid
+der Person vom 2026-10-02 (Parity-Spezifikation Abschnitt 4, zweimal als Auswahlfrage bestätigt; Nachtrag
+A5): eine Straße mit Hausnummer oder eine Postleitzahl mit Ort ist, was Pythons Grammatik
+(`ts_common.py`) oder Gos bisherige erkennt. Leerraum S, Ziffer D und die Wortgrenze sind die von Python
+(Unicode); die übrigen Klassen bleiben wörtlich, jedes `(?i)` setzt I, i, İ und ı gleich. Ein Treffer
+braucht eine Wortgrenze an beiden Enden; es gewinnt der früheste Anfang, dort das längste Ende. Erst laufen
+die Straßen über den ganzen Text, dann die Postleitzahlen über das Ergebnis. Alt gegen neu, gemessen am
+2026-10-02 mit `MaskDetail` beider Stände (4b4487b und dieser), ohne Namensdatei:
+
+| Text (PLZ: fünf Ziffern) | jetzt | vorher |
+|---|---|---|
+| PLZ + „Bad Homburg“, PLZ + „Halle/Saale“ | `<address>` | `<address> Homburg`, `<address>/Saale` |
+| „PLZ ist“ + PLZ + „Berlin im Brief.“ | `PLZ ist <address>.` | `PLZ ist <address> im Brief.` (*überholt: so stand es in `TestMaskAddresses`*) |
+| „Hauptstraße 12 b“, „Weg 3 / 4 c“ | `<address>` | `<address> b`, nicht maskiert |
+| „string 3“, „during 2“ (Pythons Zweig in Kleinbuchstaben) | `<address>` | nicht maskiert |
+| „Kirchstieg 3“, „Gässchen 4“, „Alter Markt 5“ (Endungen nur in Python) | `<address>` | nicht maskiert |
+| „Musterstraße“ + U+00A0 + „12“, „Hauptweg ١٢“, PLZ in arabisch-indischen Ziffern + „Berlin“ | `<address>` | nicht maskiert |
+| „Ku'damm 3“ | `Ku'<address>` | nicht maskiert |
+| PLZ + „München1“, „äMusterstraße 12“, „Musterstraße 12ä“ | nicht maskiert: jede Grenze teilte ein Wort | `<address>nchen1`, `ä<address>`, `<address>ä` |
+| „Im Jahr 2024 wurde“, „Am Montag 12 Uhr“, „Im PR 41 gefixt“ | `<address> wurde`, `<address> Uhr`, `<address> gefixt` | ebenso |
+
+**Bekannte Folgen.** Gos Präpositions-Zweig bleibt (Nachtrag A5, Entscheid der Person, obwohl er Fließtext
+maskiert): „Im Jahr 2024 wurde“ wird `<address> wurde`; in Go war das schon so, in Python ist es neu.
+Pythons Zweig in Kleinbuchstaben maskiert Wörter, die auf eine Endung ausgehen, vor einer Zahl („string 3“,
+„during 2“). In NFD (zerlegte Umlaute) ist ein Kombinationszeichen kein Wortzeichen, davor liegt also eine
+Wortgrenze: aus PLZ + „Mu“ + U+0308 + „nchen“ wird `<address>` + U+0308 + „nchen“, der Ortsname bleibt halb
+stehen, in Python ebenso (Grenze, nicht behoben; Abschnitt 4 definiert die Grenze über W). „Gäßchen 4“
+allein bleibt unmaskiert: Gos Endung „gäßchen“ verlangt einen Großbuchstaben davor, Pythons heißt
+„gässchen“ (wörtlich nach Spezifikation, in beiden Sprachen gleich, vorher in Go ebenso).
+
+**Suche** (`tools/imprint-dev/mask_address.go`, nach der Idee des Python-Zweigs, typesafe-dev 3fa4dfe): jede
+Straßen-Grammatik ist Vorsatz, S+, Hausnummer; kein Vorsatz enthält S vor D oder endet auf S, jede
+Hausnummer beginnt mit D. Die Hausnummer eines Treffers beginnt also am ersten S-Lauf vor einem D nach
+seinem Anfang (Anker). Je Anker läuft ein Automat der umgekehrten Vorsätze zurück bis zum D des Ankers
+davor, einer der Hausnummern vorwärts; Postleitzahlen beginnen mit fünf D und S nach einem
+Nicht-Wortzeichen. Die Automaten sind deterministisch, werden aus den mit `regexp/syntax` übersetzten
+Grammatiken (dieselben Zeichenklassen wie Gos `regexp`) erst bei Bedarf gebaut und von allen Aufrufen eines
+Prozesses geteilt; ganz gebaut haben sie 237, 20 und 80 Zustände. Der Aufwand ist linear; einen alten Weg
+mit `regexp` gibt es für Adressen nicht mehr, auch nicht bei ſ, K, ẞ, İ, ı oder ungültigem UTF-8.
+`judge` ist ein Prozess je Aufruf, die Automaten fangen also jedes Mal leer an: der erste `MaskDetail`-Aufruf
+eines Prozesses kostet 0,44–0,65 ms mehr (Grundgerüst 0,35–0,52 ms), alle Zustände zu bauen 4,0–5,6 ms
+(gemessen 2026-10-02, `GOMAXPROCS=2`, 5 Läufe). Dieser feste Betrag steht außerhalb des Preises je Byte im
+Budget; er ist kleiner als 0,2 % der kürzesten Deadline (3 s).
+
+**Geprüft:** `TestMaskAddressExamples` (36 Fälle; die Erwartung ist die Ausgabe von `ts_common.mask_detail`
+des Python-Zweigs, typesafe-dev 6fc6326, dessen Adress-Code der von 3fa4dfe ist, ohne Namensdatei);
+`TestMaskAddresses` (die Zeile „im Brief“ als überholt markiert, die alte Erwartung im Kommentar);
+`TestMaskDifferential` gegen `refAddressStep`, die Regel der Spezifikation wörtlich (jeder Anfang mit
+Wortgrenze von links, dort das größte Ende mit Wortgrenze, gefunden über die längsten Treffer von `regexp`
+auf immer kürzeren Texten), mit den Beispielen als Fragmenten und vier Adress-Korpora zu 16 KiB;
+`TestAddressAutomata` (alle Zustände gebaut, Schranke 400/40/160, sonst rot; die Zeichenklassen gegen
+`MatchRune` auf jedem Zeichen); `TestAddressAutomataConcurrent` (geteilte Automaten ab leerem Zustand, viele
+Goroutinen, jedes Ergebnis wie allein; der Test fing einen Fehler in der ersten Fassung, den der
+Race-Detector und der Differentialtest nicht fingen: ein Übergang zu einem Zustand, den die eigene Sicht
+noch nicht kannte). Einmal am 2026-10-02 gegen Python (typesafe-dev 6fc6326, `python3 -B`, Namensdatei
+nicht vorhanden): 13.070 adressreiche Texte (alle Beispiele mit Kontext, Fließtext mit Präpositionen,
+Straßen und Postleitzahlen lateinisch, mit Umlaut, in NFD, groß und klein, Ziffern und Leerraum anderer
+Schriften, Ketten bis 300 Wörter, Suppe), 8.467 Adress-Treffer auf beiden Seiten, 0 Unterschiede im
+Adress-Schritt allein und 0 in der ganzen Maskierung samt Zählung; die Grammatik-Konstanten in `typesafe.go`
+stimmen zurückübersetzt (`pySpaceClass` → `\s`, `\p{Nd}` → `\d`, `turkishI` → `i`) Zeichen für Zeichen mit
+`ts_common.py` überein (seit 2026-10-02 bei jedem Lauf mit python3 geprüft: `TestGrammarSyncWithTsCommon`,
+siehe „Parität mit ts_common.py“).
+
+**Kosten** (`TestMaskProfile`, `GOMAXPROCS=2`, 2 und 16 MiB, vorher = Stand 4b4487b mit denselben Korpora,
+in einer Sitzung am 2026-10-02 gemessen; neue Korpora `streetchain`, `anchors`, `lowerrun`,
+`unicodeaddr`, `maskAddressKinds`):
+
+| 16 MiB, ohne Namen | vorher | jetzt | davon Adress-Schritte jetzt |
+|---|---|---|---|
+| Straßenadressen dicht | 2,08 s (124 ns je Byte) | 0,62 s (37 ns) | 0,25 s |
+| Wortketten vor Hausnummer (`streetchain`) | 15,7 s (934 ns) | 0,47 s (28 ns) | 0,20 s |
+| Zahl alle paar Bytes (`anchors`) | 1,19 s (71 ns) | 0,72 s (43 ns) | 0,27 s |
+| lange Kleinbuchstaben-Läufe (`lowerrun`) | 0,67 s (40 ns) | 0,55 s (33 ns) | 0,27 s |
+| S und D anderer Schriften (`unicodeaddr`) | 0,59 s (35 ns) | 0,64 s (38 ns) | 0,34 s |
+| Personendaten dicht | 1,14 s (68 ns) | 1,03 s (61 ns) | 0,10 s |
+| `schluessel=wert` dicht | 1,24 s (74 ns) | 1,22 s (73 ns) | 0,05 s |
+
+Ungünstigster Fall des schnellen Wegs jetzt dichte `schluessel=wert` mit 77 ns je Byte (mit Namensdatei;
+vorher dichte Straßenadressen mit 130 ns, und die erst jetzt gemessenen Wortketten mit 937 ns). Mit ſ oder ı
+davor höchstens 266 ns je Byte (`schluessel=wert`; vorher 467 ns, dichte Straßenadressen). Keine Konstante
+geändert: 200 ns und 900 ns je Byte decken beide Wege mit Abstand.
+
+**Namen in NFC (seit 2026-10-02, absichtlich anders als vorher).** Parity-Spezifikation Abschnitt 5 mit
+den Nachträgen A1, A2 und A8 der Lead-Sitzung vom 2026-10-02: Namen und Text werden in Unicode-NFC
+verglichen, wie `ts_common._mask_names` es tut. Gemessen am 2026-10-02 mit `MaskDetail` beider Stände
+(fa6fa18 und dieser), die Namensdatei jeweils nur mit dem genannten Namen:
+
+| Namensdatei | Text | jetzt | vorher |
+|---|---|---|---|
+| „José“ | „Jose“ + U+0301 + „ kommt“ (zerlegt, NFD) | `<name> kommt` | nicht maskiert |
+| „Jose“ + U+0301 (zerlegt gespeichert) | „José kommt“ | `<name> kommt` | nicht maskiert |
+| „İlker“ | „I“ + U+0307 + „lker kommt“ | `<name> kommt` | nicht maskiert |
+| „Ö“ allein | „Ö und O“ + U+0308 | nicht maskiert (A2: kein Name) | `<name> und O` + U+0308 |
+| „Oz“ | „Oz“ + U+0F74 U+0F73 + „ kommt“ | `<name> kommt`: das Segment, das NFC ändert, geht ganz mit | `<name>` + U+0F74 U+0F73 + ` kommt` |
+| „Oz“ | „Oz“ + U+0B3E + „ und Oz“ | `<name>` + U+0B3E + ` und <name>`: NFC lässt das Segment, wie es ist, nichts wird verbreitert (A8) | ebenso |
+| „Klaus“ | „Hallo “ + Kelvin-Zeichen (U+212A) + „laus!“ | `Hallo<name>!` | `Hallo <name>!` |
+| „Max Mustermann“ | „Herr Mu“ + U+0308 + „ller und Max Mustermann“ | `Herr Mu` + U+0308 + `ller und <name>`, der Rest Byte für Byte | ebenso |
+
+- Namensdatei: jede Zeile wird in NFC gebracht, dann bleibt ein Begriff mit mindestens zwei Codepunkten
+  (A2; vorher zählte Go Bytes, ein einzelnes „Ö“ war ein Name). Benannte Ausnahme vom Kriterium „maskiert
+  mehr“: ein einzelner Buchstabe identifiziert niemanden und maskierte jedes einzelne „Ö“.
+- Text in NFC (aller ASCII-Text und fast jeder andere): der bisherige Weg, unverändert.
+- Anderer Text (`tools/imprint-dev/mask_nfc.go`): ein Segment beginnt vor jedem Zeichen mit kanonischer
+  Kombinationsklasse 0 und NFC_Quick_Check Yes (A1, ICUs „boundary before“; über so ein Zeichen hinweg
+  wird nichts umgeordnet oder zusammengesetzt); das Finden ist linear. Die Kopie ist die NFC jedes
+  Segments; auf ihr laufen die Namen wie bisher (Name für Name, längster zuerst, faltungs-kanonisch,
+  Wortgrenzen auf der Kopie). Zurück ins Original: in einem Segment, das NFC nicht ändert, Byte für Byte;
+  eine Trefferkante in einem Segment, das NFC ändert, rückt an dessen Rand (A8, nur dort; so hängt das
+  Ergebnis einer Stelle nicht davon ab, ob anderswo im Text etwas nicht NFC ist). Überlappende Spannen
+  werden ein `<name>`, jeder Treffer zählt. Außerhalb der Spannen bleibt das Original Byte für Byte.
+- Ungültiges UTF-8: keine NFC, wie bisher.
+
+**Bekannte Folgen.** Ein Zeichen, das NFC durch ein anderes ersetzt (Kelvin-, Angström-, Ohm-Zeichen), ist
+keine Segmentgrenze; das Zeichen davor gehört zu seinem Segment und geht mit: „Hallo “ + Kelvin-Zeichen +
+„laus“ wird `Hallo<name>` (maskiert mehr, zerteilt kein Wort; A8 lässt das bewusst stehen). Ein Name, der
+in einem früheren Platzhalter trifft (`name` in `<name>`), verhält sich wie auf NFC-Text (`<<name>>`).
+Adressen werden nicht normalisiert (Abschnitt 4; siehe „Adressen“, NFD).
+
+**Geprüft:** `TestNamesNFC` (26 Texte; die Erwartung ist die Ausgabe von `ts_common.mask_detail` des
+Python-Zweigs, typesafe-dev 752698b, mit derselben Namensdatei; die Referenz stimmt überein, und die
+aufgezeichneten Ersetzungen ergeben die Namenszahl), `TestNamesNFCLoad`, `TestNamesNFCKeepsOriginal`
+(zerlegter Text und ungültiges UTF-8 außerhalb der Spannen Byte für Byte), `TestRefQCMaybeStarters` (die
+Liste der Referenz, aus `ts_common.py` kopiert, ist auf jedem Codepunkt die der Tabellen; die Segmentregel
+der Referenz ist `nfcBoundary`). `TestMaskDifferential` gegen `refNamesStep`, eine schlichte eigene Fassung
+(Segmente Zeichen für Zeichen, `nfc` je Segment, Herkunft je Byte), die den allgemeinen Weg auf jeden
+gültigen Text anwendet, NFC-Text eingeschlossen: damit ist auch geprüft, dass der schnelle Weg dort genau
+der allgemeine ist (A8); dazu eine sechste Namensdatei (zerlegt gespeicherte Namen, „Ö“ und „O“ + U+0308
+allein, `name`, „Mustermann-“, Hangul als Jamo), Fragmente (NFD, Quick-Check-Maybe, Jamo, Kelvin-,
+Angström-, Ohm-Zeichen, „I“ + U+0307, Marken außer Ordnung, „a“ + U+0F73, `>` + U+0338 hinter einem
+Platzhalter) und fünf Korpora zu 16 KiB (`maskNFCKinds`). Einmal am 2026-10-02 gegen Python (typesafe-dev
+752698b, `python3 -B`): der Goldkorpus `tests/mask-golden.json` (6.686 Fälle mit seiner Namensliste,
+sha256 2c7d83da…) und `tests/mask-parity-cases.json` (96 Fälle) durch `MaskDetail`: 0 Unterschiede in
+Ausgabe und Zählung (vorher 571 und 8: 72 Fälle mit anderer `secret_kw`-Zahl aus A3, 378 mit anderer
+Namenszahl, 121 nur in der Ausgabe; seit 2026-10-02 läuft der Goldkorpus bei jedem `go test` mit:
+`TestMaskGolden`, siehe „Parität mit ts_common.py“). (*überholt am 2026-10-03: Goldkorpus seither bei
+typesafe-dev b64a949, 7.269 Fälle, sha256 7b52aae2…; diese Messung bleibt bei ihrem Stand 752698b/6.686.*)
+Mutationsprüfung: 12 Mutanten (immer verbreitern; schon bei
+Berührung zusammenlegen; Bytes statt Codepunkte; `<redacted>` ohne Groß-/Kleinschreibung; Segmentgrenze
+ohne Quick-Check; Budget nur aus dem Text; Log mit ASCII-`\s`; Log ohne zweites `<redacted>`; ein
+angeschnittener Platzhalter nicht gekürzt; Suche Name für Name ohne Aufzeichnung; Kopie statt Original
+außerhalb der Spannen; Namen ohne NFC beim Laden), alle gefangen; umgekehrt besteht der allgemeine Weg
+auf jedem gültigen Text, ohne den schnellen, alle Namens- und Differentialtests.
+
+**Kosten** (`TestMaskProfile`, `GOMAXPROCS=2`, Namensdatei mit 2 Namen, vorher = fa6fa18 mit denselben
+Korpora, zwei Sitzungen am 2026-10-02 mit je vorher und nachher; Zahlen der ruhigeren zweiten):
+
+| 16 MiB, nicht NFC | vorher | jetzt | Namens-Schritt vorher → jetzt |
+|---|---|---|---|
+| Deutsch zerlegt (`nfdgerman`) | 0,80 s (48 ns je Byte) | 1,03 s (61 ns) | 0,23 → 0,47 s |
+| Hangul als Jamo (`jamo`) | 0,60 s (36 ns) | 0,73 s (43 ns) | 0,20 → 0,33 s |
+| lange Markenläufe außer Ordnung (`markrun`) | 0,64 s (38 ns) | 1,12 s (67 ns) | 0,24 → 0,73 s |
+| „a“ + U+0F73 × bis 4000 (`tibetan`) | 0,44 s (27 ns) | 1,02 s (61 ns) | 0,11 → 0,69 s |
+| ein einziges Segment „a“ + U+0F73 × 5,6 Mio. (`f73one`) | 0,44 s (26 ns) | 1,03 s (61 ns) | 0,10 → 0,68 s |
+
+Linear: der Namens-Schritt auf `f73one` kostet je Byte bei 256 KiB, 1, 4 und 16 MiB 34, 43, 42 und 41 ns
+(ein Segment mit 87.000 bis 5,6 Millionen U+0F73; Pythons alte Segmentregel brauchte nach P1 35 s für
+16.000). Mit „I“ + U+0307 vor jedem Korpus (der ganze Text nicht NFC) höchstens 79 ns je Byte (vorher 77,
+dichte `schluessel=wert`). Text in NFC: unverändert, höchstens 77 ns je Byte (vorher 76), der
+Namens-Schritt kostet die
+Schnellprüfung, unter 1 ns je Byte. Mit ı davor (alter Weg der anderen Schritte) höchstens 221 ns (vorher
+199); in der ersten, belasteten Sitzung (Last bis 8,9) einmal 424 ns, derselbe Text in der zweiten 105 ns.
+Keine Konstante geändert; neu ist im Budget, dass die Namen über die Kopie laufen (siehe „Maskier-Budget“).
 
 Gleichheit: `TestMaskDifferential` lässt die alte Fassung (`mask_reference_test.go`, nur in Tests) und
 die neue auf dieselben Texte los, mit 5 Namensdateien (keine, 2 Namen, 9 Namen mit Überlappungen und
 Platzhalter-Namen wie `name`, 50 Namen, griechische und kyrillische Namen mit Angström); Ausgabe und
 Zählung müssen Byte für Byte gleich sein. Der Namens-Schritt der alten Fassung ist seit der Wortgrenzen-
 Korrektur eine eigene, schlichte Fassung der neuen Regel (`refNamesStep`); alle anderen Schritte sind
-die alten. Im normalen Lauf 3.247 Texte, 3,0 MB, 16.235 Vergleiche;
-einmal mit `IMPRINT_MASK_DIFF_SEEDS=400`: 41.122 Texte, 39 MB, 205.610 Vergleiche, alle gleich. Die Python-Parität (`mask-test.py`, 13/13) läuft
+die alten (*überholt am 2026-10-02: seit der Maskier-Parität sind auch Bearer/Basic (`refBearerStep`),
+Schlüssel=Wert (`refSecretKWStep`, ein Matcher, der Pythons Rückverfolgung samt Lookahead Schritt für
+Schritt nachgeht; das Produktionsmuster drückt den Lookahead als reguläre Menge aus), Telefon und die
+türkische Faltung eigene, schlichte Fassungen*). Im normalen Lauf 3.247 Texte, 3,0 MB, 16.235 Vergleiche;
+einmal mit `IMPRINT_MASK_DIFF_SEEDS=400`: 41.122 Texte, 39 MB, 205.610 Vergleiche, alle gleich (*überholt am
+2026-10-02: bis dahin las der Test das Feld `input` statt `text` aus `mask-parity-cases.json`, die 40
+Paritätsfälle gingen als leere Texte ein; jetzt scheitert er, wenn keiner geladen wird. Mit ihnen und den
+Fragmenten der Maskier-Parität im normalen Lauf 3.517 Texte, 3,0 MB, 17.585 Vergleiche; mit
+`IMPRINT_MASK_DIFF_SEEDS=400` 41.392 Texte, 39 MB, 206.960 Vergleiche, alle gleich*) (*überholt am
+2026-10-02 durch die Adress-Vereinigung: der Adress-Schritt der alten Fassung ist jetzt `refAddressStep`,
+die Regel der Spezifikation wörtlich; mit den Adress-Fragmenten und vier Adress-Korpora zu 16 KiB im
+normalen Lauf 3.659 Texte, 3,1 MB, 18.295 Vergleiche; mit `IMPRINT_MASK_DIFF_SEEDS=400` 41.534 Texte,
+39 MB, 207.670 Vergleiche, alle gleich*) (*überholt am 2026-10-02 durch die Namen in NFC und Nachtrag A3:
+`refNamesStep` wendet den allgemeinen NFC-Weg auf jeden gültigen Text an, `refLoadNames` lädt die Namen
+selbst, die Lookaheads von `refSecretKWStep` vergleichen genau; mit 6 Namensdateien, den NFC-Fragmenten
+und fünf NFC-Korpora im normalen Lauf 3.793 Texte, 3,2 MB, 22.758 Vergleiche; mit
+`IMPRINT_MASK_DIFF_SEEDS=400` 41.668 Texte, 39 MB, 250.008 Vergleiche, alle gleich*) (*überholt am 2026-10-03 durch Nachtrag A9: der Opaque-Schritt der alten
+Fassung ist `refOpaqueStep`, `RX_OPAQUE` Stelle für Stelle; mit den A9-Fragmenten im normalen Lauf 3.888
+Texte, 3,2 MB, 23.328 Vergleiche; mit `IMPRINT_MASK_DIFF_SEEDS=400` 41.763 Texte, 39 MB, 250.578 Vergleiche,
+alle gleich, 38,5 s, vorher 44,2 s*). Die Python-Parität
+(`mask-test.py`, 13/13) läuft
 unverändert.
 
 **Maskier-Budget.** Ein Aufruf darf für das Maskieren im ungünstigsten Fall höchstens die Hälfte der
@@ -258,16 +554,40 @@ dem Weg, den es nimmt (`maskNsPerByte`):
 
 | Feld | Preis je Byte | gemessen höchstens |
 |---|---|---|
-| gültiges UTF-8 ohne Sonderzeichen (schneller Weg) | 200 ns + 1,5 ns je Namensmuster | 127 ns (bei Last 156, einmal 232) + 0,9 ns |
-| mit K, ſ, ẞ, Ohm-, Angström-Zeichen … | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns |
+| gültiges UTF-8 ohne Sonderzeichen (schneller Weg) | 200 ns + 1,5 ns je Namensmuster | 127 ns (bei Last 156, einmal 232) + 0,9 ns (*überholt am 2026-10-02: Wortketten vor einer Hausnummer kosteten 937 ns, siehe „Adressen“; seit der Adress-Vereinigung höchstens 77 ns*) |
+| mit K, ſ, ẞ, İ, ı, Ohm-, Angström-Zeichen … | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns (*seit der Adress-Vereinigung, 2026-10-02, mit ſ oder ı davor höchstens 266 ns*) |
 | ungültiges UTF-8 | 900 ns + 20 ns je Namensmuster | 705 ns + 15,7 ns |
+| gültiges UTF-8, nicht in NFC, mit Namen (seit 2026-10-02) | wie oben, nur der Preis je Namensmuster mal Länge der NFC-Kopie durch Länge des Textes; 20 ns statt 1,5, wenn die Kopie ein Zeichen wie İ enthält, das der Text nicht hat („I“ + U+0307) | 79 ns (dichte `schluessel=wert` hinter „I“ + U+0307; die fünf NFC-Korpora 69 ns; Kopie bauen und zurückbilden eingeschlossen) |
 
-Für reinen Text heißt das mit 2 Namen: 3 s (PostToolUse, SubagentStop) → 7,2 MB, ungünstigster Fall
+Für Text, der nicht in NFC ist, baut `maskNsPerByte` die Kopie selbst (einmal mehr `nfc`, außerhalb des
+Budgets: gemessen 2026-10-02 höchstens 32 ns je Byte, 0,5 s für 15 MiB „a“ + U+0F73 oder Markenläufe;
+`maskCapped` lehnt deshalb vorher ab, was schon zum niedrigsten Preis, 200 ns, über dem Budget liegt: 15 MiB
+solchen Texts bei 3 s in 56–116 ms `too_large` statt in 0,24–0,62 s, 6 MiB in 0,43–0,68 s geurteilt; im
+Namens-Schritt kostet derselbe Aufbau mit dem Zurückbilden höchstens 46 ns je Byte): Kopien sind bis
+doppelt so lang („a“ + U+0F73), und auf einer Kopie mit İ
+werden die Namen einzeln gesucht (`TestJudgeBudgetCoversNFCNames`: zerlegtes Türkisch mit 72
+Namensmustern bei 3 s mit 4,4 MB sofort `too_large`, mit 0,9 MB in 0,13 s geurteilt). Für reinen Text
+heißt das mit 2 Namen: 3 s (PostToolUse, SubagentStop) → 7,2 MB, ungünstigster Fall
 gemessen 0,90–0,95 s (31 %); 6 s (Stop) → 14,4 MB, 1,79 s (30 %) (`maskBudgetBytes`). Mit 127 ns statt
 200 ns wäre das Budget für 3 s etwa 11 MB; 200 ns lassen Spielraum für Last. Mit einem ſ davor gemessen:
 1,3 MB in 0,46–0,92 s geurteilt, 6,5 MB sofort `too_large` (`TestJudgeBudgetCoversFallbackRunes`); 50
 griechische Namen auf griechischem Text: 5,9 MB in 0,3 s, mit Ohm-Zeichen 3,6 MB sofort `too_large`
-(`TestJudgeBudgetCoversNamesWithoutASCII`); nie `timeout`. Mehr endet mit `error_class: too_large`, ohne
+(`TestJudgeBudgetCoversNamesWithoutASCII`); nie `timeout`. Nachgemessen am 2026-10-02 nach der
+Maskier-Parität (`TestMaskProfile` mit `IMPRINT_MASK_PROFILE_PREFIX` und `_KINDS`, 2 und 16 MiB, vorher und
+nachher in einer Sitzung): schneller Weg höchstens 125 ns je Byte (vorher 127), mit ſ oder ı davor höchstens
+459 ns (vorher 450; dichte `schluessel=wert` 287 ns, vorher 194), Namen auf türkischem Text Name für Name
+6,1 ns je Muster; keine Konstante geändert. Türkischer Text mit İ oder ı wird damit zum Preis des alten
+Wegs gerechnet: bei 3 s rechnerisch etwa 1,6 MB statt 7,2 MB, `TestJudgeBudgetCoversFallbackRunes` prüft İ und ı
+mit (6,5 MB sofort `too_large`, 1,3 MB in 0,6 s geurteilt). Nachgemessen am 2026-10-02 nach der
+Adress-Vereinigung (Tabelle unter „Adressen“): schneller Weg höchstens 77 ns je Byte, mit ſ oder ı davor
+höchstens 266 ns; keine Konstante geändert, die Preise bleiben 200 und 900 ns. Dazu kommt je Prozess einmal
+der Bau der Adress-Automaten, höchstens 5,6 ms gemessen, außerhalb des Preises je Byte. Seitdem nehmen
+`TestJudgeDeadlineCoversBuild` und `TestJudgeBudgetCoversFallbackRunes` dichtes `schluessel=wert` statt
+dichter Straßenadressen als langsamsten Text (gemessen 2026-10-02, je 3 Läufe: 6,5 MB in 0,52–0,54 s
+geurteilt, vorher mit Adressen 0,28 s; nach ſ, K, İ oder ı 1,3 MB in 0,35–0,39 s, vorher 0,24–0,28 s;
+6,5 MB nach einem solchen Zeichen sofort `too_large`). Nachgemessen am 2026-10-03 nach Nachtrag A9
+(Tabelle unter „Opaque: Pythons Regel“): schneller Weg höchstens 74 ns je Byte (vorher 75); keine Konstante
+geändert. Mehr endet mit `error_class: too_large`, ohne
 Anfrage, und der Fail-Modus entscheidet; bei einem Hinweis-Gate heißt das `allow`. **Grenze, nicht
 behoben:** Wer einen fremden Text über das Budget aufbläht, entgeht `foreign_return`. Rohen Text vor dem
 Maskieren zu kürzen, kommt nicht in Frage (ein Schnitt kann Passphrasen, IBANs und Adressen teilen).
@@ -275,12 +595,18 @@ Maskieren zu kürzen, kommt nicht in Frage (ein Schnitt kann Passphrasen, IBANs 
 Jedes Maskieren (auch kurze Felder und das zweite Maskieren in `PostState`) wartet höchstens bis zum Ende
 der Deadline; läuft es länger (langsamerer Rechner), antwortet `judge` mit `timeout`, und die
 Maskier-Goroutine läuft im Hintergrund aus, bis der Prozess endet (ein Prozess je Aufruf;
-`TestJudgeMaskingStopsAtTheDeadline`, `TestMaskingStopsAtTheDeadlineOnSmallFields`).
+`TestJudgeMaskingStopsAtTheDeadline`, `TestMaskingStopsAtTheDeadlineOnSmallFields`). Beide Tests setzen
+eine langsame `MaskDetail` ein und stellten sie am Testende zurück, während die Hintergrund-Goroutine sie
+schon gelesen hatte, ohne Ordnung dazwischen: `go test -race` meldete das in beiden (gemessen
+2026-10-02, schon in fa6fa18). Seitdem wartet jeder Test auf den Start jedes Maskier-Aufrufs, den er
+erwartet (`slowMaskDetail`), bevor er zurückstellt; nur Testcode, `maskWithin` ist unverändert.
 
 **Namensdatei.** Eine Zeile, die kein gültiges UTF-8 ist (eine Datei in Latin-1 gespeichert), wird als
 Latin-1 gelesen, was immer gelingt; ihre Namen maskieren also weiter. Vorher ließ ein solcher Name jedes
 Maskieren abbrechen. Die Logzeile zählt diese Zeilen in `names_latin1`, die Namen selbst stehen nie im
-Log. Übersprungen werden nur leere Zeilen und Zeilen nur aus Steuerzeichen (`TestNamesFileLatin1`).
+Log. Übersprungen werden nur leere Zeilen und Zeilen nur aus Steuerzeichen (`TestNamesFileLatin1`). Seit
+2026-10-02 (Nachtrag A2) wird jede Zeile in NFC gebracht und ein Begriff erst ab zwei Codepunkten
+behalten; vorher zählte Go Bytes (`TestNamesNFCLoad`; siehe „Namen in NFC“).
 Groß-/Kleinschreibung: zwei Zeichen gelten als gleich, wenn sie in derselben Klasse von
 `unicode.SimpleFold` liegen; die kanonische Kopie nimmt das Minimum der ganzen Klasse, für jedes Zeichen
 geprüft (`TestFoldCanonExhaustive`, mit „Laΐs“/„LaΐS“ und „Steﬅn“/„Steﬆn“).
@@ -288,6 +614,57 @@ geprüft (`TestFoldCanonExhaustive`, mit „Laΐs“/„LaΐS“ und „Steﬅn�
 Kalibrierung, wie in `gates.json` vermerkt: `done` auf 8 synthetischen Fällen am 2026-09-29 mit dem
 Alias `jev-latest` (welche Version er damals war: nicht festgehalten), nicht neu für `jev-1.13.0`.
 `foreign_return`: nicht kalibriert.
+
+## Parität mit ts_common.py (2026-10-02)
+
+| Entscheid der Person | Was er festlegt | Wann, wie |
+|---|---|---|
+| Adressen: Vereinigung beider Grammatiken | Straße mit Hausnummer oder PLZ + Ort ist, was Pythons oder Gos bisherige Grammatik erkennt | 2026-10-02, Auswahlfrage in der Lead-Sitzung („Union of both“) |
+| Vereinigung bleibt, obwohl sie Prosa maskiert | Gos Präpositions-Zweig bleibt: „Im Jahr 2024 wurde“, „Am Montag 12 Uhr“, „Im PR 41 gefixt“ werden `<address>` (in Go schon vorher, in Python neu; Paket P1 maß auf Pythons Mischkorpus 2.670 → 3.187 Adress-Treffer, 403 der +519 aus diesem Zweig) | 2026-10-02, zweite Auswahlfrage (Nachtrag A5) |
+| NFC in Go aus Pythons Tabellen | `tools/imprint-dev/gen_nfc_tables.py` erzeugt `nfc_tables.go` aus `unicodedata` 16.0.0; `go.mod` bleibt ohne Abhängigkeit | 2026-10-02, Auswahlfrage („Tables from Python“) |
+| alles Übrige | das sicherere Verhalten maskiert mehr, ohne Wörter zu zerteilen | 2026-10-02, Kriterium der Person |
+
+`MaskDetail` (Go) und `ts_common.mask_detail` (Python, Kopie in `tools/typesafe/`) folgen denselben Regeln; diese stehen nur in der Tabelle „Datenschutz & Maskierung“ von [`tools/typesafe/README.md`](../tools/typesafe/README.md).
+
+| Geprüft durch (Go) | Was | ohne python3 |
+|---|---|---|
+| `TestMaskGolden` | Goldkorpus `tools/typesafe/tests/mask-golden.json` (Kopie aus typesafe-dev 752698b, 6.686 Fälle, 16 synthetische Namen; *überholt am 2026-10-03: mit typesafe-dev b64a949 abgeglichen, jetzt 7.269 Fälle, sha256 7b52aae2…*): je Fall genau die Ausgabe und alle 7 Zähler. Rot bei 0 Fällen, bei einer anderen Fallzahl als im Kopf, bei fehlenden Zählern und wenn `unidata_version` des Kopfs nicht `nfcUnicodeVersion` ist (beide 16.0.0; Gos Tabellen stammen aus derselben `unicodedata`, also müssen sie gleich sein); beide Versionen stehen im Log | läuft |
+| `TestMaskParity` | `tools/typesafe/tests/mask-parity-cases.json` (96 benannte Fälle); seit 2026-10-02 `masked` genau, wo der Fall es hat (56), und rot bei 0 Fällen | läuft |
+| `TestGrammarSyncWithTsCommon` | Straßen- und PLZ-Grammatiken (Vorsatz und Hausnummer, beide Endungslisten), Schlüsselwortliste, Schlüssel=Wert-Vorsatz und Bearer/Basic in `typesafe.go` gegen ihre Quelle in `ts_common.py`, nach der Abbildung `\s` → S, `\d` → D, `\w` → W, jedes I und i eines `(?i)`-Teils → `turkishI` (`pyToGo`; was die Abbildung nicht festlegt, ist ein Fehler); beide Seiten müssen zum selben Ausdruck parsen | SKIP mit Meldung |
+
+Gemessen 2026-10-02: `TestMaskGolden` 6.686 von 6.686 Fällen gleich (0,07 s); `TestGrammarSyncWithTsCommon`
+11 Paare, alle derselbe Ausdruck, 10 auch derselbe Text (Pythons Schlüssel=Wert-Vorsatz schreibt die Klasse
+der Anführungszeichen `[\"']`, Go `["']`). (*überholt am 2026-10-03, nach dem Abgleich mit typesafe-dev
+b64a949: `TestMaskGolden` 7.269 von 7.269 Fällen gleich (0,08 s), Header `tests/gen_mask_golden.py,
+2026-10-03, Python 3.14.6, unidata_version 16.0.0`; `TestGrammarSyncWithTsCommon` unverändert 11 Paare.*)
+Mutanten gefangen: `turkishI` nur `[i]` (197 Goldfälle anders,
+`TestMaskParity` rot); „markt“ aus `streetSuffixPy`, „pwd“ aus der Schlüsselwortliste, `\f` aus der
+Bearer-Wertklasse, in Pythons `_SUF_GO` „steig“ geändert (jeweils `TestGrammarSyncWithTsCommon` rot).
+
+**Goldkorpus neu erzeugen.** (1) In typesafe-dev mit einer Python, deren `unicodedata` die Version von
+`nfcUnicodeVersion` hat: `python3 tests/gen_mask_golden.py` (fester Seed; schreibt
+`tests/mask-golden.json`; dieselbe Python schreibt dieselben Bytes; die Pre-Push-Formen meidet der
+Generator selbst, siehe seinen Kopfkommentar), dann `python3 -m unittest tests.test_mask_golden` und
+committen. (2) Hier den Änderungssatz übernehmen, wie Paket G5 es tat (c3e051c):
+`git -C <typesafe-dev> diff --binary <alt> <neu> | git apply --directory=tools/typesafe`; so bleiben die
+Zeilen von `tools/typesafe/README.md`, die es nur hier gibt, stehen. (3) In `tools/imprint-dev`:
+`go test -run 'TestMaskGolden|TestMaskParity|TestGrammarSyncWithTsCommon|TestMaskDifferential'`, vor
+dem Push die vier Pre-Push-Formen über die neuen Zeilen. Eine Python mit neuerer `unicodedata` verlangt
+beides neu: `nfc_tables.go` (`go generate` mit `gen_nfc_tables.py`) und den Goldkorpus; sonst wird
+`TestMaskGolden` rot.
+
+**Bekannte Grenzen**
+
+| Grenze | Folge | Stand |
+|---|---|---|
+| Unicode 17 in Go, 16 in Python | Go 1.27.1 kennt Unicode 17.0.0, Python 3.14.6 `unicodedata` 16.0.0: Codepunkte, die erst 17 vergibt, sind in Go Buchstaben (W), in Python nicht vergeben (Cn); Wortgrenzen an ihnen fallen verschieden aus. NFC ist in beiden 16.0.0 (*ergänzt am 2026-10-03, Nachtrag A9: auch Ziffern. U+11DE0–U+11DE9 sind in Go Nd, in Python nicht vergeben; ein Token-Lauf direkt davor wird in Go maskiert, in Python nicht, Go maskiert also mehr. Sonst ist Nd gleich: über alle Codepunkte 770 in Go, 760 in Python, der Unterschied sind genau diese 10*) | bekannt, nicht behoben; der Goldkorpus schließt Cn aus |
+| Nachtrag A4: Token vor einer Ziffer anderer Schrift | 24 oder mehr Token-Zeichen ohne ASCII-Ziffer direkt vor z. B. „١“: Python maskiert (`RX_OPAQUE` sucht die Ziffer mit Unicode-`\d`), Go nicht; Ziel ist Gos Verhalten (ein Treffer dort teilte ein Wort) | bis der typesafe-dev-Branch `done-check-timeout` gemergt ist, der `RX_OPAQUE` ersetzt; nicht im Goldkorpus (*überholt am 2026-10-03 durch Nachtrag A9: die Prämisse ist widerlegt, auch der lineare Matcher von typesafe-dev master liest die Ziffer mit Unicode-`\d`; Ziel ist Pythons Regel, Go maskiert seitdem ebenso, siehe „Opaque: Pythons Regel“; der Goldkorpus schloss die Form aus, bis er neu erzeugt war, und ist inzwischen, noch am 2026-10-03, mit typesafe-dev b64a949 neu erzeugt (7.269 Fälle, sha256 7b52aae2…), die A9-Fälle sind jetzt enthalten*) |
+| Nachtrag A6: türkisches i kostet | Text mit U+0130 oder U+0131 nimmt in Go für Bearer/Basic, Schlüsselwörter und Namen den alten Weg; das Budget rechnet ihn mit 900 + 20 ns je Namensmuster und Byte statt 200 + 1,5 (bei 3 s etwa 1,6 MB statt 7,2 MB); Ergebnis gleich | bekannte Kosten, nicht geändert; ein schneller Weg, der diese Faltung kennt, wäre ein Folgeschritt |
+| Nachtrag A7: Namensdatei | Python und Go lesen verschieden: Zeilen mit zwei Leerzeichen hintereinander, U+001C–U+001F als Trenner, eine Datei, die nicht UTF-8 ist (Python verwirft sie ganz, Go liest die Zeile als Latin-1). Dazu ersetzt Python alle Namen in einer Alternation, Go Name für Name: gleich, solange sich Namen nicht überlappen | bekannt; die Namensliste des Goldkorpus meidet alle vier |
+| NFD bei Adressen und E-Mail | Nur Namen laufen über eine NFC-Kopie. In NFD ist ein Kombinationszeichen kein Wortzeichen: PLZ + „Mu“ + U+0308 + „nchen“ wird `<address>` + U+0308 + „nchen“, der Ort bleibt halb stehen; bei einer Mail-Adresse mit zerlegtem Umlaut vor dem @ bleibt alles bis zum letzten Kombinationszeichen stehen, mit zerlegtem Umlaut im Domain-Teil wird gar nichts maskiert. In beiden Sprachen gleich (gemessen 2026-10-02) | nicht behoben; Kandidat für einen Folgeschritt (Adressen und E-Mail auf derselben NFC-Kopie wie Namen) |
+| „Gäßchen 4“ allein | bleibt in beiden Grammatiken unmaskiert: Gos Endung „gäßchen“ braucht einen Großbuchstaben davor, Pythons heißt „gässchen“; „Am Gäßchen 4“ wird maskiert | wörtlich nach Spezifikation, in beiden Sprachen gleich (gemessen 2026-10-02) |
+| Basis `jev-judge` ohne die Vereinigung | Der alte Straßen-Schritt kostete auf Ketten großgeschriebener Wörter vor einer Hausnummer 934–937 ns je Byte, über beiden Preisen des Budgets (200 und 900 ns): dort kann ein Text, der ins Budget passt, die Deadline reißen | gemessen 2026-10-02 (Paket G3, `TestMaskProfile`, Korpus `streetchain`) am Stand 4b4487b, dessen Straßen-Suche die von jev-judge 50babfc ist (dazwischen kam nur das türkische i in die Endungen); mit der Vereinigung 28 ns |
+| Schnitt neben einem Wort, das nicht maskiert war | Das zweite Maskieren in `PostState` kann ein gekapptes Feld noch wachsen lassen, wenn der Schnitt einem Wort den Kontext nimmt, an dem es scheiterte: Anfang endet auf „Max“ aus „Maximilian“ (+3 Zeichen über der Kappung), „Str 1“ aus „Str 1ä“ (+4), PLZ + Ort aus zwei Buchstaben (+1); Ende beginnt mit „Bearer a“ hinter einem ASCII-Buchstaben (+9), mit einem Namensteil (+3). Auf gemischten Korpora (`genText`, `pii`, Fließtext; 18.603 Schnitte) kein Fall | gemessen 2026-10-02 (Paket G5, Messtest nur in der Sitzung); nicht behoben, anderer Weg als der behobene Vorsatz (siehe „Maskieren und Kappen“) |
 
 ## Registry
 
@@ -317,7 +694,13 @@ in Log und Verdikt nur, wenn die Registry bzw. `judge` sie kennt; ein unbekannte
 geschrieben und `unknown_gate`/`unknown_event`/`unknown_host` gesetzt (der Name selbst könnte alles
 sein, auch personenbezogen). `mask_counts` zählt die Platzhalter im gesendeten Request (`<email>`,
 `<redacted>` …), nicht was eine Kappung verworfen hat; ohne Request ist es 0. Steht ein Platzhalter
-schon wörtlich in der Eingabe, zählt er mit (nicht behoben). Auch Aufruf- und Eingabefehler schreiben
+schon wörtlich in der Eingabe, zählt er mit (nicht behoben). Ein `<redacted>` hinter einem Schlüsselwort
+oder Bearer/Basic zählt als `secret_kw`, sonst als `opaque`; seit 2026-10-02 mit den Klassen von
+`MaskDetail` (S um das Trennzeichen, auch als JSON-Escape wie `\u001c`, Unicode-`\w` im Schlüssel,
+türkisches i) und mit dem zweiten `<redacted>` aus „authorization: Bearer x“; vorher zählten „tokenä=x“,
+„credentİal=x“, „Bearer“ + U+00A0 + „x“ u. ä. als `opaque` (`TestCountPlaceholdersClasses`). Grenze, nur
+im Log: ein Token hinter dem Wert eines Schlüssels und einem Leerzeichen zählt ebenso als `secret_kw`.
+Auch Aufruf- und Eingabefehler schreiben
 eine Zeile, Exit-1-Fälle eine minimale.
 
 ## Version

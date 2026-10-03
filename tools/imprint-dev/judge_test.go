@@ -1351,10 +1351,11 @@ func TestCoreVersionFormat(t *testing.T) {
 
 // TestJudgeDeadlineCoversBuild: the deadline counts from the start of judge and
 // covers reading stdin, the transcript and masking. The slowest corpus
-// measured (dense street addresses) at 90 % of the mask budget for the 3 s
-// PostToolUse deadline is judged inside it; 16 MB of it is over that budget,
-// refused (too_large) inside the deadline, with nothing sent; a transcript of
-// 10,000 calls is judged inside the Stop deadline.
+// measured (dense key=value secrets since the address union of 2026-10-02,
+// 77 ns per byte; before it dense street addresses) at 90 % of the mask
+// budget for the 3 s PostToolUse deadline is judged inside it; 16 MB of it is
+// over that budget, refused (too_large) inside the deadline, with nothing
+// sent; a transcript of 10,000 calls is judged inside the Stop deadline.
 func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	logPath := setupJudge(t, "test-key")
 	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9, "instruction_to_agent": 0.1, "exfil_request": 0.1}))
@@ -1363,7 +1364,7 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	budget := maskBudgetBytes(ctx)
 	cancel()
-	worst := func(n int) string { return maskCorpus(rng, "addresses", n) }
+	worst := func(n int) string { return maskCorpus(rng, "keyvalues", n) }
 
 	n := budget * 9 / 10
 	big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": worst(n)}})
@@ -1377,7 +1378,7 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	if el >= 3*time.Second || v["latency_ms"].(float64) >= 3000 {
 		t.Errorf("%d bytes of worst-case text took %v (latency_ms %v); the PostToolUse deadline is 3 s", n, el, v["latency_ms"])
 	}
-	t.Logf("budget for 3 s: %d bytes; %d bytes of dense addresses judged in %v (build %v ms)", budget, n, el.Round(time.Millisecond), v["latency_parts_ms"].(map[string]any)["build"])
+	t.Logf("budget for 3 s: %d bytes; %d bytes of dense key=value secrets judged in %v (build %v ms)", budget, n, el.Round(time.Millisecond), v["latency_parts_ms"].(map[string]any)["build"])
 	if _, ok := v["latency_parts_ms"].(map[string]any)["build"]; !ok {
 		t.Errorf("latency_parts_ms lacks build: %v", v["latency_parts_ms"])
 	}

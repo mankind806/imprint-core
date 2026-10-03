@@ -26,18 +26,37 @@ import (
 //     the old step found, rejected and retried them one rune later, rescanning
 //     long digit runs each time (quadratic).
 //   - Text the fast path cannot treat exactly falls back to the old regex
-//     step: invalid UTF-8, and, for case-insensitive steps, the runes that Go
-//     folds onto ASCII letters (U+212A Kelvin sign for k, U+017F long s for s)
-//     or onto ß (U+1E9E).
+//     step: invalid UTF-8, and, for case-insensitive steps, the runes that
+//     fold onto ASCII letters (U+212A Kelvin sign for k, U+017F long s for s,
+//     and since 2026-10-02 U+0130 and U+0131 for i, which Python's (?i) folds
+//     and Go's does not, see turkishI) or onto ß (U+1E9E).
+//   - The address steps (since 2026-10-02, the union grammar) have no regex
+//     to fall back to: mask_address.go runs automata built from the
+//     grammars on every text, these runes and invalid UTF-8 included.
 //
 // maskDetailReference (a test-only copy of the old MaskDetail) is the oracle:
 // TestMaskDifferential compares both on a large generated corpus.
 
 const (
-	runeKelvin   = "\u212a"
-	runeLongS    = "\u017f"
-	runeCapSharp = "\u1e9e"
+	runeKelvin    = "\u212a"
+	runeLongS     = "\u017f"
+	runeCapSharp  = "\u1e9e"
+	runeCapIDot   = "\u0130" // İ
+	runeDotlessI  = "\u0131" // ı
+	turkishILead  = 0xc4     // the first byte of both
+	turkishIFirst = 'I'      // the smallest rune of their (?i) class
 )
+
+// hasTurkishI reports whether s holds U+0130 or U+0131.
+func hasTurkishI(s string) bool {
+	return strings.Contains(s, runeCapIDot) || strings.Contains(s, runeDotlessI)
+}
+
+// isTurkishI: r is in Python's (?i) class of i: I, i, U+0130, U+0131.
+func isTurkishI(r rune) bool { return r == 'I' || r == 'i' || r == 0x130 || r == 0x131 }
+
+// isPySpace is S, Python's \s on str: unicode.IsSpace plus U+001C..U+001F.
+func isPySpace(r rune) bool { return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f) }
 
 // anchoredRE matches a pattern exactly at a position, with the rune before
 // it as context for \b.
@@ -80,11 +99,10 @@ func (a anchoredRE) matchAt(text string, i, limit int) (int, bool) {
 var (
 	bearerAt     = newAnchoredRE(bearerBasicPattern)
 	secretKWAt   = newAnchoredRE(secretKWPattern)
-	secretKWHead = regexp.MustCompile(`^(?i:api[_-]?key|token|secret|passw(?:or)?d|pass(?:phrase|wort)?|pwd|credential|private[_-]?key|access[_-]?key|auth(?:orization)?)`)
+	secretKWHead = regexp.MustCompile(`^(?i:` + secretKWKeywords + `)`)
 	emailAt      = newAnchoredRE(emailPattern)
 	ibanAt       = newAnchoredRE(ibanPattern)
 	phoneAt      = newAnchoredRE(phonePattern)
-	plzOrtAt     = newAnchoredRE(plzOrtPattern)
 	awsKeyIDAt   = newAnchoredRE(awsKeyIDPattern)
 	knownTokenAt = newAnchoredRE(knownTokenPattern)
 )
@@ -116,6 +134,9 @@ func isASCIIDigit(c byte) bool  { return c >= '0' && c <= '9' }
 func isASCIIWordByte(c byte) bool {
 	return isASCIILetter(c) || isASCIIDigit(c) || c == '_'
 }
+
+// Go's \s: tab, newline, form feed, carriage return, space.
+func isRESpace(c byte) bool { return c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' ' }
 
 // hasPrefixFoldASCII reports whether s starts with the lower-case ASCII word
 // w, ignoring ASCII case.
@@ -150,7 +171,7 @@ func nextRune(text string, e int) rune {
 // --- 1. bearer / basic ---------------------------------------------------------------
 
 func maskBearer(text string, repl func(string) string) string {
-	if strings.Contains(text, runeLongS) {
+	if strings.Contains(text, runeLongS) || hasTurkishI(text) {
 		return bearerBasicRE.ReplaceAllStringFunc(text, repl)
 	}
 	return replaceFound(text, func(pos int) (int, int, bool) {
@@ -182,10 +203,24 @@ var secretKWFirst = func() (t [256]bool) {
 	return t
 }()
 
-func isSecretKWRunByte(c byte) bool { return isASCIIWordByte(c) || c == '.' || c == '-' }
+// isSecretKWRunRune is the class of the keyword and the [\w.-]* after it:
+// W, "." or "-".
+func isSecretKWRunRune(r rune) bool { return isNameWordRune(r) || r == '.' || r == '-' }
+
+// skipRunes returns the end of the run of runes in class that starts at j.
+func skipRunes(text string, j int, class func(rune) bool) int {
+	for j < len(text) {
+		r, w := utf8.DecodeRuneInString(text[j:])
+		if !class(r) {
+			break
+		}
+		j += w
+	}
+	return j
+}
 
 func maskSecretKW(text string, repl func(string) string) string {
-	if strings.Contains(text, runeLongS) || strings.Contains(text, runeKelvin) {
+	if strings.Contains(text, runeLongS) || strings.Contains(text, runeKelvin) || hasTurkishI(text) {
 		return secretKWRE.ReplaceAllStringFunc(text, repl)
 	}
 	return replaceFound(text, func(pos int) (int, int, bool) {
@@ -209,43 +244,33 @@ func maskSecretKW(text string, repl func(string) string) string {
 			// The keyword matched but nothing after it did: whatever follows
 			// the run of [\w.-] it sits in decides, so no later keyword in the
 			// same run can match either. Skip to the run's end.
-			j := i
-			for j < len(text) && isSecretKWRunByte(text[j]) {
-				j++
-			}
-			i = j - 1
+			i = skipRunes(text, i, isSecretKWRunRune) - 1
 		}
 		return 0, 0, false
 	}, repl)
 }
 
 // secretKWWindow bounds a secret-keyword match starting at i, given that a
-// keyword starts there: the keyword and [\w.-]* are one run of [\w.-] bytes
-// (inside it nothing else could follow), then an optional quote, \s*, [=:],
-// \s*, and the value: a quoted one ends at its closing quote (it holds no
-// newline), an unquoted one at the first \s, quote, comma or semicolon. The
-// pattern looks at nothing past its end, so the window loses nothing, and it
-// is usually small enough for regexp's backtracker. Each scan covers text
-// that belongs to this candidate only (see maskSecretKW), so the scans add up
-// to linear time.
+// keyword starts there: the keyword and [\w.-]* are one run of [\w.-] runes
+// (inside it nothing else could follow), then an optional quote, S*, [=:],
+// S*, and the value: a quoted one ends at its closing quote (it holds no
+// newline), an unquoted one at the first A character, quote, comma or
+// semicolon, which the pattern takes along (one byte, all of them are
+// ASCII). A value after fewer of the S runes (Python's backtracking, which
+// the pattern keeps) ends no later. The pattern looks at nothing past its
+// end, so the window loses nothing, and it is usually small enough for
+// regexp's backtracker. Each scan covers text that belongs to this candidate
+// only (see maskSecretKW), so the scans add up to linear time.
 func secretKWWindow(text string, i int) int {
-	j := i
-	for j < len(text) && isSecretKWRunByte(text[j]) {
-		j++
-	}
+	j := skipRunes(text, i, isSecretKWRunRune)
 	if j < len(text) && (text[j] == '"' || text[j] == '\'') {
 		j++
 	}
-	for j < len(text) && isRESpace(text[j]) {
-		j++
-	}
+	j = skipRunes(text, j, isPySpace)
 	if j >= len(text) || (text[j] != '=' && text[j] != ':') {
 		return min(len(text), j+1)
 	}
-	j++
-	for j < len(text) && isRESpace(text[j]) {
-		j++
-	}
+	j = skipRunes(text, j+1, isPySpace)
 	end := j
 	if j < len(text) && (text[j] == '"' || text[j] == '\'') {
 		q := text[j]
@@ -413,57 +438,15 @@ func knownTokenCand(text string) func(int) bool {
 
 func notASCIIAlnum(r rune) bool { return !isASCIIAlnum(r) }
 
-// --- 6. street + house number --------------------------------------------------------
+// --- 6., 7. street, postcode: mask_address.go -------------------------------------------
 
-// Go's \s: tab, newline, form feed, carriage return, space.
-func isRESpace(c byte) bool { return c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' ' }
-
-// streetSuffixes are the (?i) suffixes of the street name, plus the
-// case-sensitive Straße, Strasse, Str., Str, which they cover.
-var streetSuffixes = []string{"straße", "strasse", "str.", "str", "weg", "gasse", "platz", "allee", "ring", "ufer",
-	"damm", "chaussee", "zeile", "pfad", "steig", "gäßchen", "gaesschen"}
-
-// streetSuffixLast marks the last bytes the suffixes can end in, both cases;
-// their last letters have no case folds outside ASCII.
-var streetSuffixLast = func() (t [256]bool) {
-	for _, suf := range streetSuffixes {
-		c := suf[len(suf)-1]
-		t[c] = true
-		if c >= 'a' && c <= 'z' {
-			t[c-'a'+'A'] = true
-		}
-	}
-	return t
-}()
-
-// streetPrepParts are the words of the prepositions of the first branch.
-var streetPrepParts = map[string]bool{"Am": true, "An": true, "Auf": true, "Im": true, "In": true, "Vor": true,
-	"Hinter": true, "Zum": true, "Zur": true, "der": true, "dem": true}
-
-func isStreetUpper(r rune) bool { return (r >= 'A' && r <= 'Z') || r == 'Ä' || r == 'Ö' || r == 'Ü' }
-func isStreetWordRune(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' ||
-		r == 'ä' || r == 'ö' || r == 'ü' || r == 'ß' || r == 'Ä' || r == 'Ö' || r == 'Ü'
-}
-
-// isStreetWord: a whole token of the form [A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9.-]+.
-func isStreetWord(tok string) bool {
-	r, w := utf8.DecodeRuneInString(tok)
-	if !isStreetUpper(r) || len(tok) == w {
-		return false
-	}
-	for _, r := range tok[w:] {
-		if !isStreetWordRune(r) {
-			return false
-		}
-	}
-	return true
-}
+// --- 8. names -----------------------------------------------------------------------------
 
 // foldEqualRune: a and b are equal under Unicode simple case folding, as a
-// (?i) literal compares them.
+// (?i) literal compares them, with I, i, U+0130 and U+0131 in one class, as
+// in Python (since 2026-10-02).
 func foldEqualRune(a, b rune) bool {
-	if a == b {
+	if a == b || (isTurkishI(a) && isTurkishI(b)) {
 		return true
 	}
 	for f := unicode.SimpleFold(a); f != a; f = unicode.SimpleFold(f) {
@@ -472,227 +455,6 @@ func foldEqualRune(a, b rune) bool {
 		}
 	}
 	return false
-}
-
-// hasSuffixFold: s ends with suf under simple case folding.
-func hasSuffixFold(s, suf string) bool {
-	for len(suf) > 0 {
-		if len(s) == 0 {
-			return false
-		}
-		a, wa := utf8.DecodeLastRuneInString(s)
-		b, wb := utf8.DecodeLastRuneInString(suf)
-		if !foldEqualRune(b, a) {
-			return false
-		}
-		s, suf = s[:len(s)-wa], suf[:len(suf)-wb]
-	}
-	return true
-}
-
-// tokenBefore returns the start of the token (maximal run of non-\s bytes)
-// that ends at q, and the start of the \s run before it.
-func tokenBefore(text string, q int) (tokStart, spaceStart int) {
-	t := q
-	for t > 0 && !isRESpace(text[t-1]) {
-		t--
-	}
-	sp := t
-	for sp > 0 && isRESpace(text[sp-1]) {
-		sp--
-	}
-	return t, sp
-}
-
-// streetAnchor is a place where a street match can end its name part: q,
-// followed by \s+\d. A match whose name part ends at q starts in [rs, q) and
-// ends at or before re (re includes one rune of context for the final \b).
-type streetAnchor struct{ rs, q, re int }
-
-// streetAnchors lists, left to right, every q followed by \s+\d whose name
-// part can end there: it ends in a street suffix, or a chain of capitalised
-// words goes back to a preposition. rs is the start of the first token, going
-// back from q, that cannot belong to a street name (a match may start inside
-// it, after a \b); re is the end of the longest tail the pattern allows.
-// Matches starting in [rs, q) all end at q's tail: the range holds no other
-// \s\d (a token starting with a digit stops the walk), so ranges of later
-// anchors start after this one's digits.
-func streetAnchors(text string) []streetAnchor {
-	var anchors []streetAnchor
-	for d := 1; d < len(text); d++ {
-		if !isASCIIDigit(text[d]) || !isRESpace(text[d-1]) {
-			continue
-		}
-		q := d - 1
-		for q > 0 && isRESpace(text[q-1]) {
-			q--
-		}
-		if q == 0 {
-			continue
-		}
-		qualifies := false
-		if streetSuffixLast[text[q-1]] {
-			for _, suf := range streetSuffixes {
-				if hasSuffixFold(text[:q], suf) {
-					qualifies = true
-					break
-				}
-			}
-		}
-		rs := 0
-		end := q
-		for end > 0 {
-			t, sp := tokenBefore(text, end)
-			tok := text[t:end]
-			// A preposition of the first branch: a token ending in Am, Im,
-			// Zum or Zur (it may start inside the token, after a \b), or the
-			// token der or dem of the two-word ones.
-			if strings.HasSuffix(tok, "Am") || strings.HasSuffix(tok, "Im") || strings.HasSuffix(tok, "Zum") ||
-				strings.HasSuffix(tok, "Zur") || tok == "der" || tok == "dem" {
-				qualifies = true
-			}
-			if isStreetWord(tok) || streetPrepParts[tok] {
-				end = sp
-				if end == 0 {
-					rs = t
-				}
-				continue
-			}
-			rs = t
-			break
-		}
-		if !qualifies {
-			continue
-		}
-		// The longest tail: \d+ [a-zA-Z]? ( \s* [-/] \s* \d+ [a-zA-Z]? )?
-		e := d
-		for e < len(text) && isASCIIDigit(text[e]) {
-			e++
-		}
-		if e < len(text) && isASCIILetter(text[e]) {
-			e++
-		}
-		f := e
-		for f < len(text) && isRESpace(text[f]) {
-			f++
-		}
-		if f < len(text) && (text[f] == '-' || text[f] == '/') {
-			f++
-			for f < len(text) && isRESpace(text[f]) {
-				f++
-			}
-			if f < len(text) && isASCIIDigit(text[f]) {
-				for f < len(text) && isASCIIDigit(text[f]) {
-					f++
-				}
-				if f < len(text) && isASCIILetter(text[f]) {
-					f++
-				}
-				e = f
-			}
-		}
-		if e < len(text) {
-			_, w := utf8.DecodeRuneInString(text[e:])
-			e += w
-		}
-		anchors = append(anchors, streetAnchor{rs, q, e})
-	}
-	return anchors
-}
-
-var (
-	streetAt = newAnchoredRE(streetPattern)
-	// streetFrom finds the leftmost match after a context rune (streetFrom0:
-	// at the text start): the lazy prefix tries each start in order, and the
-	// pattern's own preference at that start.
-	streetFrom  = regexp.MustCompile(`^(?s:.)(?s:.*?)(` + streetPattern + `)`)
-	streetFrom0 = regexp.MustCompile(`^(?s:.*?)(` + streetPattern + `)`)
-)
-
-// streetMatchIn returns the leftmost match starting in [from, a.q). Matches
-// start with [A-ZÄÖÜ] after a \b; each such candidate is tried anchored, on a
-// window that ends at a.re, small enough for regexp's backtracker. After 16
-// failed candidates (a long chain of capitalised words) it searches the rest
-// of the range at once, in time linear in its length.
-func streetMatchIn(text string, from int, a streetAnchor) (int, int, bool) {
-	tried := 0
-	for c := from; c < a.q; {
-		r, w := utf8.DecodeRuneInString(text[c:])
-		if isStreetUpper(r) && isREWordRune(prevRune(text, c)) != isREWordRune(r) {
-			if tried++; tried > 16 {
-				return streetLeftmostFrom(text, c, a.re)
-			}
-			if e, ok := streetAt.matchAt(text, c, a.re-c); ok {
-				return c, e, true
-			}
-		}
-		c += w
-	}
-	return 0, 0, false
-}
-
-func streetLeftmostFrom(text string, c, re int) (int, int, bool) {
-	if c == 0 {
-		m := streetFrom0.FindStringSubmatchIndex(text[:re])
-		if m == nil {
-			return 0, 0, false
-		}
-		return m[2], m[3], true
-	}
-	_, w := utf8.DecodeLastRuneInString(text[:c])
-	m := streetFrom.FindStringSubmatchIndex(text[c-w : re])
-	if m == nil {
-		return 0, 0, false
-	}
-	return c - w + m[2], c - w + m[3], true
-}
-
-func maskStreet(text string, repl func(string) string) string {
-	if !utf8.ValidString(text) || strings.Contains(text, runeLongS) || strings.Contains(text, runeCapSharp) {
-		return streetRE.ReplaceAllStringFunc(text, repl)
-	}
-	anchors := streetAnchors(text)
-	ai := 0
-	return replaceFound(text, func(pos int) (int, int, bool) {
-		for ; ai < len(anchors); ai++ {
-			a := anchors[ai]
-			from := max(a.rs, pos)
-			if from >= a.q {
-				continue
-			}
-			if s, e, ok := streetMatchIn(text, from, a); ok {
-				return s, e, true
-			}
-		}
-		return 0, 0, false
-	}, repl)
-}
-
-// --- 7. postcode + place ------------------------------------------------------------------
-
-func maskPlzOrt(text string, repl func(string) string) string {
-	return replaceFound(text, func(pos int) (int, int, bool) {
-		for i := pos; i+5 < len(text); i++ {
-			// \b\d{5}\s: five ASCII digits at the start of a word, then a space
-			if !isASCIIDigit(text[i]) || (i > 0 && isASCIIWordByte(text[i-1])) {
-				continue
-			}
-			if !isASCIIDigit(text[i+1]) || !isASCIIDigit(text[i+2]) || !isASCIIDigit(text[i+3]) ||
-				!isASCIIDigit(text[i+4]) || !isRESpace(text[i+5]) {
-				continue
-			}
-			if e, ok := plzOrtAt.matchAt(text, i, 0); ok {
-				return i, e, true
-			}
-		}
-		return 0, 0, false
-	}, repl)
-}
-
-// --- 8. names -----------------------------------------------------------------------------
-
-func isREWordRune(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
 }
 
 // isNameWordRune is Python's \w on str, which ts_common's name pattern uses:
@@ -726,14 +488,18 @@ func newNameMatcher(name string) nameMatcher {
 	for f := unicode.SimpleFold(r0); f != r0; f = unicode.SimpleFold(f) {
 		add(f)
 	}
+	if isTurkishI(r0) {
+		nm.first['I'], nm.first['i'], nm.first[turkishILead] = true, true, true
+	}
 	return nm
 }
 
 // Fold-canonical form: every rune replaced by the smallest rune of its
-// simple case-fold orbit, the classes a (?i) literal compares by. Two runes
-// fold equal exactly when their canonical runes are the same. Where every
-// canonical rune has the length of its rune, offsets in the canonical text
-// are offsets in the text.
+// simple case-fold orbit, the classes a (?i) literal compares by, with I, i,
+// U+0130 and U+0131 in one class (canonical "I"; U+0130 and U+0131 thus
+// have a canonical rune of another length). Two runes fold equal exactly
+// when their canonical runes are the same. Where every canonical rune has the
+// length of its rune, offsets in the canonical text are offsets in the text.
 var (
 	foldCanonOnce sync.Once
 	foldCanonMap  map[rune]rune // non-ASCII runes whose canonical rune differs
@@ -752,6 +518,9 @@ func initFoldCanon() {
 			if f < m {
 				m = f
 			}
+		}
+		if isTurkishI(r) {
+			m = turkishIFirst
 		}
 		if m != r {
 			foldCanonMap[r] = m
@@ -797,7 +566,8 @@ func canonRune(r rune) rune {
 
 // foldCanon returns s in fold-canonical form; ok is false if some rune's
 // canonical rune has another UTF-8 length (the Kelvin sign, long s, capital
-// sharp s, Angstrom sign, Ohm sign, ...) or s is not valid UTF-8.
+// sharp s, Angstrom sign, Ohm sign, U+0130, U+0131, ...) or s is not valid
+// UTF-8.
 func foldCanon(s string) (string, bool) {
 	foldCanonOnce.Do(initFoldCanon)
 	b := make([]byte, len(s))
@@ -863,13 +633,19 @@ func (nm nameMatcher) matchAt(text string, i int) (int, bool) {
 	return j, true
 }
 
+// nameRep is one replacement of a name pass: bytes [p, e) of the text
+// before the pass became n bytes (the placeholder). The names step on an NFC
+// copy (mask_nfc.go) records them to map the copy back.
+type nameRep struct{ p, e, n int }
+
 // replaceFolded is replace on a text whose fold-canonical form is folded
 // (same offsets): every match is an occurrence of the name's canonical form
 // there, so strings.Index finds all candidate starts, each is checked exactly
 // (matchAt, with \b), and the leftmost non-overlapping ones are replaced, as
 // the regexp replaces a literal's matches. It returns the new text and its
-// canonical form, kept in step by the same edits.
-func (nm nameMatcher) replaceFolded(text, folded string, repl func(string) string) (string, string, bool) {
+// canonical form, kept in step by the same edits. If rec is not nil, each
+// replacement is appended to it.
+func (nm nameMatcher) replaceFolded(text, folded string, repl func(string) string, rec *[]nameRep) (string, string, bool) {
 	var tb, fb strings.Builder
 	done := 0
 	for from := 0; from < len(folded); {
@@ -890,7 +666,13 @@ func (nm nameMatcher) replaceFolded(text, folded string, repl func(string) strin
 		rf, rok := foldCanon(r)
 		if !rok {
 			// cannot happen for "<name>"; recompute the hard way
-			return nm.replace(text, repl), "", false
+			if rec != nil {
+				*rec = (*rec)[:0]
+			}
+			return nm.replace(text, repl, rec), "", false
+		}
+		if rec != nil {
+			*rec = append(*rec, nameRep{p, e, len(r)})
 		}
 		tb.WriteString(text[done:p])
 		tb.WriteString(r)
@@ -906,18 +688,32 @@ func (nm nameMatcher) replaceFolded(text, folded string, repl func(string) strin
 	return tb.String(), fb.String(), true
 }
 
-func (nm nameMatcher) replace(text string, repl func(string) string) string {
+// replace replaces the name's leftmost non-overlapping matches in text,
+// scanning rune by rune; if rec is not nil, each replacement is appended to
+// it.
+func (nm nameMatcher) replace(text string, repl func(string) string, rec *[]nameRep) string {
+	r := repl
+	if rec != nil {
+		r = func(m string) string {
+			out := repl(m)
+			(*rec)[len(*rec)-1].n = len(out)
+			return out
+		}
+	}
 	return replaceFound(text, func(pos int) (int, int, bool) {
 		for i := pos; i < len(text); i++ {
 			if !nm.first[text[i]] {
 				continue
 			}
 			if e, ok := nm.matchAt(text, i); ok {
+				if rec != nil {
+					*rec = append(*rec, nameRep{i, e, 0})
+				}
 				return i, e, true
 			}
 		}
 		return 0, 0, false
-	}, repl)
+	}, r)
 }
 
 // --- 9c. opaque --------------------------------------------------------------------------
@@ -926,8 +722,17 @@ func isOpaqueByte(c byte) bool {
 	return isASCIILetter(c) || isASCIIDigit(c) || c == '_' || c == '-' || c == '+' || c == '/'
 }
 
-// maskOpaque is [A-Za-z0-9_\-+/]{24,}={0,2}: every run of 24 or more such
-// bytes, with up to two "=" after it, is a match.
+// maskOpaque is ts_common.py's RX_OPAQUE,
+// (?=[A-Za-z0-9_\-+/]*\d)(?=[A-Za-z0-9_\-+/]*[A-Za-z])[A-Za-z0-9_\-+/]{24,}={0,2}
+// with Python's \d (Unicode Nd): a maximal run of 24 or more such bytes is a
+// match, with up to two "=" after it, if it holds an ASCII letter and either
+// an ASCII digit or, directly after the run (before any "="), a decimal
+// digit of any script ("...abcd" + U+0661). The lookaheads, tried from the
+// run's start, see the whole run and the rune after it; from a later start
+// they see less, so a run that fails at its start fails everywhere in it.
+// Invalid UTF-8 after the run is no digit (utf8.RuneError). Mask parity
+// spec amendment A9, 2026-10-03; until then Go wanted an ASCII digit in
+// the run (amendment A4, superseded).
 func maskOpaque(text string, repl func(string) string) string {
 	return replaceFound(text, func(pos int) (int, int, bool) {
 		for i := pos; i < len(text); {
@@ -939,7 +744,7 @@ func maskOpaque(text string, repl func(string) string) string {
 			for j < len(text) && isOpaqueByte(text[j]) {
 				j++
 			}
-			if j-i >= 24 {
+			if j-i >= 24 && opaqueRunQualifies(text, i, j) {
 				for k := 0; k < 2 && j < len(text) && text[j] == '='; k++ {
 					j++
 				}
@@ -949,4 +754,29 @@ func maskOpaque(text string, repl func(string) string) string {
 		}
 		return 0, 0, false
 	}, repl)
+}
+
+// opaqueRunQualifies: the run text[i:j] holds an ASCII letter, and an ASCII
+// digit or a Unicode decimal digit directly after it (text[j] is no opaque
+// byte, so a digit there is not ASCII).
+func opaqueRunQualifies(text string, i, j int) bool {
+	letter, digit := false, false
+	for k := i; k < j && !(letter && digit); k++ {
+		if isASCIIDigit(text[k]) {
+			digit = true
+		} else if isASCIILetter(text[k]) {
+			letter = true
+		}
+	}
+	if !letter {
+		return false
+	}
+	if digit {
+		return true
+	}
+	if j < len(text) && text[j] >= utf8.RuneSelf {
+		r, _ := utf8.DecodeRuneInString(text[j:])
+		return unicode.IsDigit(r)
+	}
+	return false
 }
