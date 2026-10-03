@@ -164,6 +164,9 @@ def _git_text(args, cwd=None):
 
 
 _HUNK_RE = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Besides \n, str.splitlines() - which ts_common.added_lines uses - breaks a line at
+# these; git does not, so the rest of such a line would be lost to the alarm.
+_LINE_BREAKS = str.maketrans({c: " " for c in "\r\x0b\x0c\x1c\x1d\x1e\x85  "})
 
 
 def _added_records(diff_text):
@@ -201,7 +204,7 @@ def merge_added(parents, cwd=None):
     PARENTS, or an error text. A line counts only when each parent's diff adds it at
     the same place - same path, same line number in the index, same content - the
     rule .githooks/pre-push applies to a pushed merge. A new file name is a path no
-    parent has (renames not followed, so a renamed path counts as new)."""
+    parent has: one a parent already has passes, even if that parent renamed a file to it."""
     per_parent, new_names, ordered = [], None, []
     for i, p in enumerate(parents):
         diff = _git_text(["diff-index", "--cached", "-p", "-M", "-U0", "--text",
@@ -227,7 +230,7 @@ def merge_added(parents, cwd=None):
             files.append(shown)
         if last is None or last != (path, ln - 1):
             out.append(f"@@ +{ln} @@")
-        out.append("+" + content)
+        out.append("+" + content.translate(_LINE_BREAKS))
         last = (path, ln)
     names = "\n".join(sorted(new_names))
     stat = "\n".join(files + [n for n in sorted(new_names) if n not in files])

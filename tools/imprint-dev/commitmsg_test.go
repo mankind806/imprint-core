@@ -281,6 +281,20 @@ func TestCommitMsgEvilMergeRefused(t *testing.T) {
 			// A Latin-1 byte must not turn the whole diff into nothing.
 			r.write("latin1.txt", "caf\xe9\n"+cmShapeB+"\n")
 		}},
+		// Python's str.splitlines splits on these too; git does not, so to git
+		// each is one line, whose rest must still be read.
+		{"line after a lone CR", func(r *cmRepo) {
+			r.write("feature.txt", "feature work\nx\r"+cmShapeB+"\n")
+		}},
+		{"line after a form feed", func(r *cmRepo) {
+			r.write("feature.txt", "feature work\nx\f"+cmShapeB+"\n")
+		}},
+		{"line after U+2028", func(r *cmRepo) {
+			r.write("feature.txt", "feature work\nx "+cmShapeB+"\n")
+		}},
+		{"lone CR before a line that starts with diff", func(r *cmRepo) {
+			r.write("feature.txt", "feature work\nx\rdiff y\n"+cmShapeB+"\n")
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := cmDiverged(t)
