@@ -3,7 +3,9 @@
 
 Every case holds a text, the exact output of ts_common.mask_detail for it and all seven
 counts. tests/test_mask_golden.py checks the file against ts_common (Python);
-imprint-core copies it to tools/typesafe/tests/ and checks MaskDetail (Go) against it.
+TestMaskGolden in imprint-core's tools/imprint-dev checks MaskDetail (Go) against the
+same file (tools/typesafe is the canonical home of ts_common.py since 2026-10-03; before,
+typesafe-dev generated the file and imprint-core copied it).
 
     python3 tests/gen_mask_golden.py            # writes tests/mask-golden.json
     python3 tests/gen_mask_golden.py -o FILE    # writes FILE
@@ -14,7 +16,8 @@ corpus: every fragment (all categories, every example named in the spec and its
 amendments, multilingual) in every short context, every separator character (Python
 \\s) in a few templates, and a seeded soup of fragments, words and single characters.
 The A8 fragments (local widening), the A9 fragments (opaque runs before a decimal
-digit) and the NFC union fragments are in the grid only, not in the soup's pool.
+digit), the NFC union fragments and the key=value tail fragments are in the grid only,
+not in the soup's pool.
 
 Exclusions, asserted (not hoped for) and listed in the header:
   - code points that are unassigned (Cn) in Python's unicodedata, and surrogates;
@@ -51,7 +54,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 OUT = os.path.join(HERE, "mask-golden.json")
 SEED = 20261002
-CORPUS_DATE = "2026-10-03"  # date of the corpus definition (last change: NFC union after A9), not of the run
+CORPUS_DATE = "2026-10-03"  # date of the corpus definition (last change: key=value tail fragments), not of the run
 N_SOUP = 1000
 MAX_BYTES = 2_000_000
 BS = chr(92)
@@ -334,6 +337,20 @@ UNION_FRAGMENTS = [
     ("union_street_kelvin", "\u212aönigsweg 4"),
     ("union_street_and_plz_nfd", "Mu\u0308hlenweg 3, " + plz("1234", "5") + " Mu\u0308nster"),
     ("union_street_number_mark_after", "Musterstrasse 1\u0308"),
+]
+
+# Key=value tail, added 2026-10-03: the tail [\w.-]* after a keyword is W, "." and "-" in
+# both implementations (Python's (?i) leaves \w unfolded). U+0345 folds to iota but is no
+# word character, so no tail and nothing masked. Go's regex path, taken for text with a
+# long s, Kelvin sign or Turkish i anywhere, folded the class and masked these until
+# 2026-10-03; its fast path did not. With and without such a rune after the pair (the
+# context "turkish" puts one around every fragment).
+# Grid only, like A8_FRAGMENTS: the seeded soup keeps drawing from FRAGMENTS.
+KV_TAIL_FRAGMENTS = [
+    ("kv_tail_mark", "token\u0345=abc"),
+    ("kv_tail_mark_dotless_i", "token\u0345=abc \u0131"),
+    ("kv_tail_mark_long_s", "token\u0345x=abc \u017f"),
+    ("kv_tail_mark_second_key_kelvin", "token\u0345=a\"b secret=c \u212a"),
 ]
 
 # The examples the spec and its amendments name; each must be the text of a case.
@@ -671,7 +688,7 @@ def mask_and_check_a9(tc, text):
 # --- corpus -----------------------------------------------------------------------------------
 def candidates(rng):
     """(id, text) in a fixed order: grid, separators, soup."""
-    for fid, frag in FRAGMENTS + A8_FRAGMENTS + A9_FRAGMENTS + UNION_FRAGMENTS:
+    for fid, frag in FRAGMENTS + A8_FRAGMENTS + A9_FRAGMENTS + UNION_FRAGMENTS + KV_TAIL_FRAGMENTS:
         for cid, ctx in CONTEXTS:
             yield "g/%s/%s" % (fid, cid), ctx.replace("{}", frag)
     contexts = dict(CONTEXTS)
@@ -753,8 +770,9 @@ def main():
     # Final checks on the corpus.
     assert cases, "no cases"
     present = {c["text"] for c in cases}
-    frags = dict(FRAGMENTS + A8_FRAGMENTS + A9_FRAGMENTS + UNION_FRAGMENTS)
-    assert len(frags) == len(FRAGMENTS + A8_FRAGMENTS + A9_FRAGMENTS + UNION_FRAGMENTS), "fragment id used twice"
+    grid = FRAGMENTS + A8_FRAGMENTS + A9_FRAGMENTS + UNION_FRAGMENTS + KV_TAIL_FRAGMENTS
+    frags = dict(grid)
+    assert len(frags) == len(grid), "fragment id used twice"
     missing = [f for f in SPEC_EXAMPLES if frags[f] not in present]
     assert not missing, "spec examples missing: %s" % missing
     missing = [f for f, text in A9_FRAGMENTS if text not in present]
@@ -769,7 +787,8 @@ def main():
 
     header = {
         "description": "Golden corpus of the mask parity spec (section 8, amendments A1-A9, A9 superseding A4, "
-                       "NFC union of the email and address passes, 2026-10-03): for every case, "
+                       "NFC union of the email and address passes, key=value tail fragments, 2026-10-03): "
+                       "for every case, "
                        "ts_common.mask_detail (Python) and MaskDetail (Go) must return exactly 'masked' and all "
                        "seven 'counts' for 'text', with TYPESAFE_NAMES_FILE holding exactly 'names', one per "
                        "line. Generated, do not edit: python3 tests/gen_mask_golden.py.",
