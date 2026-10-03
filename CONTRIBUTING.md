@@ -79,9 +79,9 @@ whose new commits carry, in their messages, in their header lines or in the line
 to tracked files, an address of the kind mail uses or a few other shapes of personal data,
 or whose commits carry an author or committer identity the clone has not declared, or the
 tagger of a merged tag that it has not; an annotated tag is held to the same, its tagger and
-every other line of it, and a ref that ends in a blob or a tree is refused unread. It runs
-only in a clone that opted in (`git config core.hooksPath .githooks`); the README section
-"The pre-push hook" says what it checks and what it does not.
+every other line of it but a signature's base64 lines, and a ref that ends in a blob or a
+tree is refused unread. It runs only in a clone that opted in (`git config core.hooksPath
+.githooks`); the README section "The pre-push hook" says what it checks and what it does not.
 
 ## Commit identity and messages, checked in CI
 

@@ -7,28 +7,28 @@
 # commits carry an identity this clone has not declared - as author, as
 # committer, as the tagger of a tag a merge carries - and it refuses a push
 # whose new commits add a line, or carry one in their message or header, that
-# matches a shape that personal data takes - phone numbers, bank account
-# numbers and postal addresses in the formats the patterns below spell out. An
-# annotated tag is held to the same: its tagger has to be a declared identity,
-# and nothing else in it - the message above all - may match a shape. A ref
-# that ends in a blob or a tree is refused unread.
+# matches a shape that personal data takes - phone numbers, bank account numbers
+# and postal addresses in the formats the patterns below spell out. An annotated
+# tag is held to the same: its tagger has to be a declared identity, and nothing
+# else in it - the message above all, a signature's base64 lines aside - may
+# match a shape. A ref that ends in a blob or a tree is refused unread.
 #
 # WHAT IT READS. The new commits: each commit object as stored, all of it but
-# for the identities the identity check reads - a merged tag's tagger
-# included - and a signature's base64 lines, and of their content only the
-# lines they add; and every tag object a pushed
-# ref leads to, all of it. A commit is new unless the remote's old tip for that
-# ref reaches it, or one of this clone's tracking refs for the destination
-# remote does (refs/remotes/<remote>/*, only when the push goes to the URL they
-# are fetched from, and only while no other remote stores refs under that
-# prefix). Those refs are what this clone last fetched, not what the remote
-# holds now: after pointing a remote at another repository, run
-# `git fetch --prune` first. A line already on it was checked on its way there,
-# or predates the hook; reading it again would refuse every push for what is
-# already published. A new commit whose header names an encoding other than
-# UTF-8, or names none on its encoding line, is read as git converts it, too;
-# one that names an encoding this hook cannot read in full, holds a NUL where
-# git stops converting, or that git could not convert is a finding.
+# for the identities the identity check reads - a merged tag's tagger included -
+# and a signature's base64 lines, and of their content only the lines they add;
+# and every tag object a pushed ref leads to, all of it but a signature's base64
+# lines. A commit is new unless the remote's old tip for that ref reaches it, or
+# one of this clone's tracking refs for the destination remote does
+# (refs/remotes/<remote>/*, only when the push goes to the URL they are fetched
+# from, and only while no other remote stores refs under that prefix). Those
+# refs are what this clone last fetched, not what the remote holds now: after
+# pointing a remote at another repository, run `git fetch --prune` first. A line
+# already on it was checked on its way there, or predates the hook; reading it
+# again would refuse every push for what is already published. A new commit
+# whose header names an encoding other than UTF-8, or names none on its encoding
+# line, is read as git converts it, too; one that names an encoding this hook
+# cannot read in full, holds a NUL where git stops converting, or that git could
+# not convert is a finding.
 #
 # WHAT IT DOES NOT ENFORCE, which is the larger half. The rule asks for
 # abstraction: a worked case told generically, with no organisation, no
@@ -506,6 +506,55 @@ grep_both() {
 # last byte; git then reads no message from it, but the bytes are published all
 # the same. A part this hook skipped would be a place to hide a line in.
 #
+# But for a signature's base64 lines, as in a commit's gpgsig and mergetag
+# headers (see prepare): encoded bytes, in which no shape can be read, yet a run
+# of their letters and digits takes the IBAN pattern's form in about one
+# RSA-4096 signature in 425 (simulated, 2026-10-02). From the last line that
+# opens a signature, as git finds one in a tag, to the -----END ...----- line
+# after it - an armour only when that line is there - a line made only of base64
+# characters is not matched (the owner's call, 2026-10-02). The hole is the same
+# as there: an IBAN without spaces, or a phone number with a slash, on a line of
+# base64 characters alone between those two lines. A tag's message is a person's
+# text, and git tag -a writes such an armour into it as typed.
+#
+# tagprep reads one tag object, any NUL turned into \001, twice: the first pass
+# counts its lines, finds that last line - one that starts with a marker, as
+# git's own test is - and whether an exact END line follows it; the second
+# prints every line as it read it, but for the identity on a tagger line of the
+# header - everything up to its last ">" - and a line of the signature that is
+# base64 alone in the object, when there is an END line, printed empty so that
+# line numbers stay those of the object. It fails when the second pass did not
+# read as many lines as the first, and writes the number of lines it printed to
+# IMPRINT_OBJCNT.
+tagprep='
+BEGIN {
+  pass = 0; k = 0; n1 = 0; last = 0; endok = 0; hd = 0; armour = 0
+  b64 = "^[A-Za-z0-9+/=]*$"; armend = "^-----END [A-Z ]*-----$"
+  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----"
+}
+FNR == 1 { pass++ }
+pass == 1 {
+  n1++
+  if ($0 ~ sigbegin) { last = FNR; endok = 0 }
+  else if (last && $0 ~ armend) endok = 1
+  next
+}
+{
+  line = $0
+  if (!hd && line == "") hd = 1
+  else if (!hd && match(line, /^tagger .*>/)) line = "tagger" substr(line, RLENGTH + 1)
+  if (armour && $0 ~ b64) line = ""
+  else if (FNR == last && endok) armour = 1
+  else if (armour && $0 ~ armend) armour = 0
+  print line; k++
+}
+END {
+  if (k != n1) exit 3
+  cnt = ENVIRON["IMPRINT_OBJCNT"]; print k > cnt
+}
+'
+
+#
 # Each shape is matched twice: under your own locale, since a pattern holds
 # characters outside ASCII, and under C, since a tag object is raw bytes that
 # git does not re-encode, and a byte that is not valid in your locale's
@@ -561,8 +610,13 @@ TAGGERS
       note errors 'sed could not read the tagger of tag %s\n' "$t_name"
     fi
     # The object as it is, but for the identity on each tagger line of the
-    # header, checked above; line numbers stay those of the object.
-    if LC_ALL=C sed -e '/^$/,$b' -e 's/^tagger .*>/tagger/' "$t_file" >"$work/tagtext"; then
+    # header, checked above, and the signature's base64 lines; line numbers
+    # stay those of the object. A line one pass of awk read and the other did
+    # not, or a count its output does not hold, is a check that could not run.
+    true >"$work/objcnt" || refuse "$cannot_write"
+    if IMPRINT_OBJCNT="$work/objcnt" LC_ALL=C awk "$tagprep" "$t_file" "$t_file" >"$work/tagtext" </dev/null \
+      && t_k="$(cat "$work/objcnt")" && [ -n "$t_k" ] \
+      && [ "$t_k" = "$(wc -l <"$work/tagtext" | tr -d ' ')" ]; then
       n_done=0
       while IFS="$tab" read -r name pattern; do
         t_state=clean
@@ -611,7 +665,7 @@ TAGGERS
       [ "$n_done" = "$n_shapes" ] || note errors \
         'ran %s of %s shape(s) over tag %s\n' "$n_done" "$n_shapes" "$t_name"
     else
-      note errors 'sed could not read tag %s\n' "$t_name"
+      note errors 'awk could not read tag %s whole\n' "$t_name"
     fi
   done <"$work/tags" || refuse "could not read back the tag list."
   [ "$n_tags_read" = "$n_tags" ] || refuse "read back $n_tags_read of $n_tags tag object(s)."
@@ -748,14 +802,16 @@ note committers '%s\n' "$web_flow"
 #
 # A signed commit carries its signature in a gpgsig header, and a merge of a
 # signed tag carries that tag, tagger and signature, in a mergetag header; git
-# writes one only for a tag that holds a signature (measured with git 2.55.0,
-# 2026-10-02). A signature's base64 lines are encoded bytes, in which no shape
-# can be read, yet a run of their letters and digits takes the IBAN pattern's
-# form in about one RSA-4096 signature in 425 (simulated, 2026-10-02). So in
-# these two headers a signature's base64 lines are not matched: from the last
-# line of the header that opens a signature, as git finds one - -----BEGIN PGP
-# SIGNATURE-----, PGP MESSAGE, SSH SIGNATURE or SIGNED MESSAGE - to the
-# -----END ...----- line after it, a line made only of base64 characters is
+# writes one only for a tag whose message holds a line that starts with a
+# signature marker - signed, or typed into an unsigned tag's message (measured
+# with git 2.55.0, 2026-10-02). A signature's base64 lines are encoded bytes, in
+# which no shape can be read, yet a run of their letters and digits takes the
+# IBAN pattern's form in about one RSA-4096 signature in 425 (simulated,
+# 2026-10-02). So in these two headers a signature's base64 lines are not
+# matched: from the last line of the header that opens a signature, as git finds
+# one - a line that starts with -----BEGIN PGP SIGNATURE-----, PGP MESSAGE, SSH
+# SIGNATURE or SIGNED MESSAGE - to the -----END ...----- line after it - an
+# armour only when that line is there - a line made only of base64 characters is
 # skipped. Every other line of them is matched: the armour lines, an armour
 # header such as Comment:, the merged tag's name and message, any armour of
 # another name or before the last one. The merged tag's tagger is left out the
@@ -793,7 +849,8 @@ note committers '%s\n' "$web_flow"
 # shows; git drops the encoding line from what it has converted. The first pass
 # counts the author and committer lines of the header, finds its encoding line
 # and the last line that opens a signature in each header field. It reads the
-# declared identities from IMPRINT_ALLOWED and IMPRINT_COMMITTERS. The second
+# declared identities from IMPRINT_ALLOWED and IMPRINT_COMMITTERS, and fails
+# when the second pass does not read as many lines as the first. The second
 # prints the lines to match - each line it does not change as it read it - and
 # appends where each comes from, "commit:N" with N its line in what it reads -
 # the object, or git's printout - to IMPRINT_COMMITLOC, and each merged tag's
@@ -801,8 +858,8 @@ note committers '%s\n' "$web_flow"
 # tagger line holds no ">"; reading a commit as converted, a tagger is not
 # written when the one in its place in the object as stored, from
 # IMPRINT_RAWTAGGERS, is the same, or is declared - and, with IMPRINT_UNREAD
-# set, differs from it in nothing but characters outside ASCII. It writes
-# five counts to IMPRINT_OBJCNT, one to a line: the lines it printed; 1 when the
+# set, differs from it in nothing but characters outside ASCII. It writes five
+# counts to IMPRINT_OBJCNT, one to a line: the lines it printed; 1 when the
 # header names an encoding other than UTF-8 - reading a commit as converted,
 # when it holds at least as many encoding lines as IMPRINT_ENCLINES says the
 # object does, so git did not convert it - else 0; the taggers; and 1 when that
@@ -817,7 +874,7 @@ BEGIN {
   # \001 stands for a NUL only in an object that holds one; a \001 of its own
   # is a control character like any other.
   hasnul = (ENVIRON["IMPRINT_HASNUL"] == "1")
-  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----$"
+  sigbegin = "^-----BEGIN (PGP SIGNATURE|PGP MESSAGE|SSH SIGNATURE|SIGNED MESSAGE)-----"
   readable = "^(utf-?8|us-ascii|ascii|iso[-_]?8859[-_][0-9]+|latin-?[0-9]+|(windows|cp)-?125[0-8]|koi8-?[ru]|euc-?(jp|kr|cn|tw)|gb2312|gbk|gb18030|big5(-hkscs)?|shift[-_]jis|sjis|cp932|windows-31j)$"
   pass = 0; k = 0; m = 0; na = 0; nc = 0; hd = 0; enc = 0; ev = ""; conv = 0; unread = 0; nenc = 0; anynul = 0
   body = 0; nul = 0; field = ""; fstart = 0; armour = 0; inner = 0
@@ -856,6 +913,7 @@ FNR == 1 {
   if (pass == 2 && ENVIRON["IMPRINT_UNREAD"] == "1") unread = 1
 }
 pass == 1 {
+  n1++
   if (hasnul && index($0, soh)) anynul = 1
   if (hd) next
   if ($0 == "") { hd = 1; next }
@@ -867,9 +925,11 @@ pass == 1 {
     else if (substr($0, 1, 10) == "committer ") nc++
     else if (f1 == "encoding" && substr($0, 9, 1) == " ") { nenc++; if (!enc) { enc = 1; ev = t1 } }
   }
-  if (signed(f1) && t1 ~ sigbegin) lastsig[s1] = FNR
+  if (signed(f1) && t1 ~ sigbegin) { lastsig[s1] = FNR; endok[s1] = 0 }
+  else if (signed(f1) && (s1 in lastsig) && t1 ~ armend) endok[s1] = 1
   next
 }
+{ n2++ }
 body { put($0); next }
 $0 == "" { body = 1; next }
 {
@@ -883,7 +943,7 @@ $0 == "" { body = 1; next }
   }
   if (signed(field)) {
     if (armour && text ~ b64) next
-    if ((fstart in lastsig) && lastsig[fstart] == FNR) armour = 1
+    if ((fstart in lastsig) && lastsig[fstart] == FNR && endok[fstart]) armour = 1
     else if (armour && text ~ armend) armour = 0
     if (inner && text == "") inner = 0
     else if (inner && substr(text, 1, 7) == "tagger ") {
@@ -910,6 +970,7 @@ $0 == "" { body = 1; next }
   put($0)
 }
 END {
+  if (n2 != n1) exit 3
   if (ENVIRON["IMPRINT_ENCLINES"] != "") conv = (nenc >= ENVIRON["IMPRINT_ENCLINES"] + 0) ? 1 : 0
   cnt = ENVIRON["IMPRINT_OBJCNT"]
   print k > cnt; print conv > cnt; print m > cnt; print unread > cnt; print nenc > cnt
