@@ -129,7 +129,12 @@ a reason). It checks only the new commits — a pull request's `base..head`, or,
   stay on regardless. Unicode normalization beyond what `normalizeForSession` already does
   (CRLF/lone-CR line endings, zero-width characters, a Markdown backslash escape — see
   `tools/imprint-dev/commitcheck.go`) is not implemented, because it needs a library beyond the
-  standard one this module depends on. Left open, not yet measured against a real incident:
+  standard one this module depends on. (*Superseded 2026-10-02 for NFC, by the mask parity work:
+  the module has its own NFC since then, standard library only (`tools/imprint-dev/nfc.go`, tables
+  generated from Python's `unicodedata` 16.0.0 by `gen_nfc_tables.py`), so NFC no longer needs a
+  library; the commit check still does not apply it, nothing changed there. NFKC, which would fold
+  a full-width letter or colon onto its plain form, still needs a library or tables the module
+  does not have.*) Left open, not yet measured against a real incident:
   a session marker split by U+2010 (hyphen), U+00AD (soft hyphen), a full-width variant of a
   letter or the colon, `%2E` in place of a URL's literal dot, `//` in place of `/`, or a URL
   wrapped across two lines by a renderer; an AI tool named only as Devin or aider, which

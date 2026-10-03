@@ -1350,67 +1350,78 @@ func TestCoreVersionFormat(t *testing.T) {
 // --- review round 1 (2026-10-02) ---------------------------------------------------
 
 // TestJudgeDeadlineCoversBuild: the deadline counts from the start of judge and
-// covers reading stdin, the transcript and masking. The slowest corpus
-// measured (dense street addresses) at 90 % of the mask budget for the 3 s
-// PostToolUse deadline is judged inside it; 16 MB of it is over that budget,
-// refused (too_large) inside the deadline, with nothing sent; a transcript of
-// 10,000 calls is judged inside the Stop deadline.
+// covers reading stdin, the transcript and masking. The slowest corpora
+// measured at 90 % of the mask budget for the 3 s PostToolUse deadline are
+// judged inside it; 15 MiB of each is over that budget, refused (too_large)
+// inside the deadline, with nothing sent; a transcript of 10,000 calls is
+// judged inside the Stop deadline. The corpora: dense key=value secrets, the
+// slowest NFC text (since the address union of 2026-10-02, 77 ns per byte;
+// before it dense street addresses), and since the NFC union of 2026-10-02
+// (aa9d2d4) nfdanchors, dense NFD addresses and emails, the slowest of all
+// (116 ns per byte at 2 MiB, 109 at 16 MiB, against 75 to 84 for key=value;
+// allowed about 208 and 209). nfdanchors is not NFC: the email, street and
+// postcode steps scan an NFC copy too, maskNsPerByte builds one more to price
+// it, and at 15 MiB it is refused before that, at the lowest rate.
 func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	logPath := setupJudge(t, "test-key")
 	ts := newFakeTS(t, answers(map[string]float64{"claim": 0.9, "backed": 0.9, "instruction_to_agent": 0.1, "exfil_request": 0.1}))
 	mail := "max" + "@" + "example.test"
-	rng := rand.New(rand.NewSource(5))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	budget := maskBudgetBytes(ctx)
 	cancel()
-	worst := func(n int) string { return maskCorpus(rng, "addresses", n) }
+	patterns := len(loadNameSet().matchers)
 
-	n := budget * 9 / 10
-	big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": worst(n)}})
-	start := time.Now()
-	code, stdout, stderr := runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
-	el := time.Since(start)
-	v := decodeObject(t, stdout)
-	if code != exitOK || v["failed"] != false {
-		t.Fatalf("%d bytes: exit %d %v %s", n, code, v, stderr)
-	}
-	if el >= 3*time.Second || v["latency_ms"].(float64) >= 3000 {
-		t.Errorf("%d bytes of worst-case text took %v (latency_ms %v); the PostToolUse deadline is 3 s", n, el, v["latency_ms"])
-	}
-	t.Logf("budget for 3 s: %d bytes; %d bytes of dense addresses judged in %v (build %v ms)", budget, n, el.Round(time.Millisecond), v["latency_parts_ms"].(map[string]any)["build"])
-	if _, ok := v["latency_parts_ms"].(map[string]any)["build"]; !ok {
-		t.Errorf("latency_parts_ms lacks build: %v", v["latency_parts_ms"])
-	}
-	var req struct {
-		State map[string]string `json:"state"`
-	}
-	_ = json.Unmarshal(ts.lastBody(t), &req)
-	if n := len([]rune(req.State["foreign_text"])); n > 8000 || n < 7900 {
-		t.Errorf("foreign_text = %d runes, want about the cap 8000", n)
-	}
+	for _, kind := range []string{"keyvalues", "nfdanchors"} {
+		rng := rand.New(rand.NewSource(5))
+		n := budget * 9 / 10
+		text := maskCorpus(rng, kind, n)
+		big, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": map[string]any{"result": text}})
+		start := time.Now()
+		code, stdout, stderr := runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
+		el := time.Since(start)
+		v := decodeObject(t, stdout)
+		if code != exitOK || v["failed"] != false {
+			t.Fatalf("%s, %d bytes: exit %d %v %s", kind, n, code, v, stderr)
+		}
+		if el >= 3*time.Second || v["latency_ms"].(float64) >= 3000 {
+			t.Errorf("%s, %d bytes of worst-case text took %v (latency_ms %v); the PostToolUse deadline is 3 s", kind, n, el, v["latency_ms"])
+		}
+		t.Logf("budget for 3 s: %d bytes; %s, %d bytes (%.1f ns per byte allowed, %d patterns): judged in %v (build %v ms)", budget, kind, n,
+			maskNsPerByte(text, patterns), patterns, el.Round(time.Millisecond), v["latency_parts_ms"].(map[string]any)["build"])
+		if _, ok := v["latency_parts_ms"].(map[string]any)["build"]; !ok {
+			t.Errorf("%s: latency_parts_ms lacks build: %v", kind, v["latency_parts_ms"])
+		}
+		var req struct {
+			State map[string]string `json:"state"`
+		}
+		_ = json.Unmarshal(ts.lastBody(t), &req)
+		if n := len([]rune(req.State["foreign_text"])); n > 8000 || n < 7900 {
+			t.Errorf("%s: foreign_text = %d runes, want about the cap 8000", kind, n)
+		}
 
-	// 15 MiB (under the 16 MB stdin limit once JSON-escaped, over the budget):
-	// refused inside the deadline, nothing sent.
-	before := ts.calls()
-	big, _ = json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": worst(15 << 20)})
-	start = time.Now()
-	code, stdout, stderr = runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
-	el = time.Since(start)
-	v = decodeObject(t, stdout)
-	if code != exitOK || v["error_class"] != "too_large" || v["verdict"] != "allow" || ts.calls() != before || el >= 3*time.Second {
-		t.Fatalf("15 MiB: exit %d %v after %v, requests %d; %s", code, v, el, ts.calls()-before, stderr)
+		// 15 MiB (under the 16 MB stdin limit once JSON-escaped, over the budget):
+		// refused inside the deadline, nothing sent.
+		before := ts.calls()
+		big, _ = json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_response": maskCorpus(rng, kind, 15<<20)})
+		start = time.Now()
+		code, stdout, stderr = runJudgeCLI(t, string(big), "--gate", "foreign_return", "--endpoint", ts.srv.URL)
+		el = time.Since(start)
+		v = decodeObject(t, stdout)
+		if code != exitOK || v["error_class"] != "too_large" || v["verdict"] != "allow" || ts.calls() != before || el >= 3*time.Second {
+			t.Fatalf("%s, 15 MiB: exit %d %v after %v, requests %d; %s", kind, code, v, el, ts.calls()-before, stderr)
+		}
+		t.Logf("%s, 15 MiB (%d bytes as JSON): refused (too_large) in %v", kind, len(big), el.Round(time.Millisecond))
 	}
-	t.Logf("15 MiB of worst-case text: refused (too_large) in %v", el.Round(time.Millisecond))
 
 	var calls []tcall
 	for i := 0; i < 5000; i++ {
 		calls = append(calls, tcall{tool: "Edit"}, tcall{tool: "Bash", cmd: "echo " + mail + " && go test ./..."})
 	}
 	tr := writeDoneTranscript(t, calls)
-	start = time.Now()
-	code, stdout, stderr = runJudgeCLI(t, stopPayload(t, "Fertig.", tr), "--gate", "done", "--endpoint", ts.srv.URL)
-	el = time.Since(start)
-	v = decodeObject(t, stdout)
+	start := time.Now()
+	code, stdout, stderr := runJudgeCLI(t, stopPayload(t, "Fertig.", tr), "--gate", "done", "--endpoint", ts.srv.URL)
+	el := time.Since(start)
+	v := decodeObject(t, stdout)
 	if code != exitOK || v["failed"] != false {
 		t.Fatalf("10k calls: exit %d %v %s", code, v, stderr)
 	}
@@ -1419,12 +1430,12 @@ func TestJudgeDeadlineCoversBuild(t *testing.T) {
 	}
 
 	// A deadline that has passed while building: timeout, no request.
-	before = ts.calls()
+	before := ts.calls()
 	_, stdout, _ = runJudgeCLI(t, stopPayload(t, "Fertig.", tr), "--gate", "done", "--endpoint", ts.srv.URL, "--deadline-ms", "1")
 	if v := decodeObject(t, stdout); v["error_class"] != "timeout" || ts.calls() != before {
 		t.Errorf("expired deadline: %v, requests %d", v, ts.calls()-before)
 	}
-	if n := len(readJudgeLog(t, logPath)); n != 4 {
+	if n := len(readJudgeLog(t, logPath)); n != 6 {
 		t.Errorf("log lines = %d", n)
 	}
 }

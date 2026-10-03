@@ -47,9 +47,12 @@ class TestMaskParity(unittest.TestCase):
             pass
 
     def test_cases(self):
+        self.assertGreater(len(self.spec["cases"]), 0, "no cases loaded")
         for case in self.spec["cases"]:
             with self.subTest(case=case["id"]):
                 masked, counts = tc.mask_detail(case["text"])
+                if "masked" in case:
+                    self.assertEqual(masked, case["masked"], f"[{case['id']}] masked text")
                 for secret in case.get("must_not_contain", []):
                     self.assertNotIn(secret, masked,
                                       f"[{case['id']}] secret survived masking: {secret!r}")

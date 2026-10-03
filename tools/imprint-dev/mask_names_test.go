@@ -17,10 +17,12 @@ import (
 // or end with a non-ASCII letter mask next to spaces and punctuation too.
 
 // nameCorpusNames is the names file of the parity corpus: German umlauts and
-// ß, Greek (with final sigma and accents), Cyrillic, accented Latin.
+// ß, Greek (with final sigma and accents), Cyrillic, accented Latin, Turkish
+// dotted and dotless i (since 2026-10-02).
 const nameCorpusNames = "Jürgen Weiß\nMesut Özil\nJohann Strauß\nΣωκράτης\n" +
 	"Владимир\nΆννα Μαρία\nZoë\nÉmile Zola\n" +
-	"Мария Иванова\nMax Mustermann\n"
+	"Мария Иванова\nMax Mustermann\n" +
+	"I\u015f\u0131l Y\u0131ld\u0131z\n\u0130lker\n"
 
 // nameCorpusTexts: names alone, at the start and end of a text, next to
 // spaces, tabs, newlines and punctuation, in other cases, and inside longer
@@ -39,6 +41,9 @@ var nameCorpusTexts = []string{
 	"Max Mustermann", "max mustermann", "MaxMustermann", "Max_Mustermann", "Max-Mustermann", "Strauss", "STRAUẞ",
 	"JÜRGEN", "Mesut Özil", "Özil Mesut", "Grüße an Jürgen und Wladimir, Владимир und Σωκράτης!",
 	"äÖzil", "Özilä", "ßÖzil", "Özil·", "·Özil", "Özil’s",
+	// Turkish i: Python's (?i) puts I, i, U+0130 and U+0131 into one class
+	"I\u015f\u0131l Y\u0131ld\u0131z", "I\u015eIL YILDIZ", "i\u015fil yildiz", "Herr Yildiz kommt", "Y\u0130LD\u0130Z.",
+	"\u0130lker", "ilker", "ILKER", "\u0131lker", "\u0130LKER", "\u0130lker\u2019in", "\u0130lkerx", "x\u0130lker", "\u0131\u015f\u0131l",
 }
 
 func TestNamesUnicodeBoundaries(t *testing.T) {
@@ -118,10 +123,38 @@ json.dump(out, sys.stdout)
 	t.Logf("%d texts, identical to ts_common.py; %d with a name masked", len(nameCorpusTexts), masked)
 }
 
+// TestNamesTurkishI (mask parity spec, section 0, 2026-10-02): a name
+// matches across I, i, U+0130 and U+0131 in both directions, on the
+// fold-canonical path (text without U+0130 and U+0131) and on the scan.
+func TestNamesTurkishI(t *testing.T) {
+	setupJudge(t, "")
+	nf := filepath.Join(t.TempDir(), "names.txt")
+	if err := os.WriteFile(nf, []byte("Y\u0131ld\u0131z\nIlker\nErika\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TYPESAFE_NAMES_FILE", nf)
+	for in, want := range map[string]string{
+		"Herr Yildiz":                  "Herr <name>",
+		"YILDIZ und ilker":             "<name> und <name>",
+		"y\u0131ld\u0131z, \u0130LKER": "<name>, <name>",
+		"\u0131lker":                   "<name>",
+		"ER\u0130KA \u0131lkerx":       "<name> \u0131lkerx",
+		"Yildizlar":                    "Yildizlar",
+	} {
+		got, _ := MaskDetail(in)
+		ref, _ := maskDetailReference(in)
+		if got != want || ref != want {
+			t.Errorf("%+q: got %+q, reference %+q, want %+q", in, got, ref, want)
+		}
+	}
+}
+
 // TestFoldCanonExhaustive (review round 7, N3): for every rune, the
 // canonical rune is the minimum of its full SimpleFold orbit, so runes that
 // fold equal are canon-equal; and the two pairs CaseRanges alone missed
-// mask each other.
+// mask each other. Since 2026-10-02 (mask parity spec, section 0) I, i,
+// U+0130 and U+0131 are one class, as in Python's (?i): their minimum is I;
+// before, U+0130 and U+0131 were each their own.
 func TestFoldCanonExhaustive(t *testing.T) {
 	for r := rune(0); r <= unicode.MaxRune; r++ {
 		if r >= 0xD800 && r <= 0xDFFF {
@@ -132,6 +165,9 @@ func TestFoldCanonExhaustive(t *testing.T) {
 			if f < m {
 				m = f
 			}
+		}
+		if r == 'I' || r == 'i' || r == 0x130 || r == 0x131 {
+			m = 'I'
 		}
 		if got := canonRune(r); got != m {
 			t.Fatalf("canonRune(%U) = %U, want %U (orbit minimum)", r, got, m)
