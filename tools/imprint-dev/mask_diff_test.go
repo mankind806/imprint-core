@@ -548,7 +548,7 @@ func TestMaskOpaqueExamples(t *testing.T) {
 		// earlier steps: a placeholder takes the digit, or borders the run
 		{r24 + "-١٢٣٤٥ Berlin", r24 + "-<address>", MaskCounts{Address: 1}},
 		{r24 + "/١" + at + "example.test", r24 + "/<email>", MaskCounts{Email: 1}},
-		{"a" + at + "b.de/" + r24 + "١", "<email>" + red + "١", MaskCounts{Email: 1, Opaque: 1}},
+		{"a" + at + "b.test/" + r24 + "١", "<email>" + red + "١", MaskCounts{Email: 1, Opaque: 1}},
 		{red + r24 + "١", red + red + "١", MaskCounts{Opaque: 1}},
 		{"Bearer " + r24 + "١", "Bearer " + red, MaskCounts{SecretKW: 1}},
 		{"token=abc " + r24 + "١", "token=" + red + " " + red + "١", MaskCounts{SecretKW: 1, Opaque: 1}},

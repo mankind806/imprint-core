@@ -325,7 +325,7 @@ A9_FRAGMENTS = (
 # Grid only, like A8_FRAGMENTS: the seeded soup keeps drawing from FRAGMENTS.
 UNION_FRAGMENTS = [
     ("union_email_nfd_domain", "x local" + AT + "mu\u0308nchen.example y"),
-    ("union_email_nfd_local", "x ju\u0308rgen.mu\u0308ller" + AT + "example.org y"),
+    ("union_email_nfd_local", "x ju\u0308rgen.mu\u0308ller" + AT + "example.test y"),
     ("union_email_nfd_after_tld", "info" + AT + "mail.exampleu\u0308"),
     ("union_email_nfd_bridges_two", "ab" + AT + "mail.example\u0308x" + AT + "mail.example"),
     ("union_plz_nfd_place", "Adresse: " + plz("8033", "1") + " Mu\u0308nchen, fertig"),

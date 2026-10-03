@@ -798,9 +798,9 @@ class TestNfcUnionPasses(unittest.TestCase):
             # Domain with a decomposed umlaut: no match on the text.
             ("email", "x local" + AT + "mu" + DIA + "nchen.example y", "x <email> y", 1),
             # Local part: the text matched from "ller" only.
-            ("email", "x ju" + DIA + "rgen.mu" + DIA + "ller" + AT + "example.org y", "x <email> y", 1),
+            ("email", "x ju" + DIA + "rgen.mu" + DIA + "ller" + AT + "example.test y", "x <email> y", 1),
             # Right after the TLD: the text left the mark, "<email>" + U+0308.
-            ("email", "info" + AT + "example.deu" + DIA, "<email>", 1),
+            ("email", "info" + AT + "example.testu" + DIA, "<email>", 1),
             # A mark NFC keeps after an email ("e" + U+0301 composes): "<email>" + U+0301.
             ("email", "test.user" + AT + "mail.example" + ACUTE, "<email>", 1),
             # PLZ + NFD place name (both PLZ branches): the text matched "... Mu" only.
