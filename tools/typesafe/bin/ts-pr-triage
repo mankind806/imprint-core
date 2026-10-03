@@ -7,14 +7,15 @@ Determines:
  3. leak (Noul + lokal): Reale Tokens, Keys oder PII in Code oder Testdaten?
     Lokal (ts_common.leak_found, jeder Commit des Bereichs einzeln) auch ohne Key:
     ein Treffer setzt leak_prob auf 1.0. Ohne Key oder bei API-Fehler fail-open:
-    status "fail_open", exit 0, der lokale Befund wird trotzdem gemeldet.
+    status "fail_open", exit 0, der lokale Befund wird trotzdem gemeldet. Jeder Diff
+    wird als Text gelesen wie bei ts-commit-check (ts_common.DIFF_AS_TEXT). Liest git
+    den Bereich nicht, endet es mit exit 1 (status "error") statt einer leeren Prüfung.
  4. tests_present (Noul): Ausreichende Tests für neue Logik vorhanden?
 """
 import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
@@ -56,14 +57,22 @@ CONF_FLOOR = 0.5
 
 
 def run_cmd(cmd, cwd=None):
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=10)
-    return r.stdout.strip()
+    """stdout of the git command CMD (["git", ...]), stripped; None if git fails. Read
+    as tc.git_text reads it, as bytes: text=True stopped the run with
+    UnicodeDecodeError at a byte that is not UTF-8 and ended a line at a lone CR."""
+    out = tc.git_text(cmd[1:], cwd)
+    return None if out is None else out.strip()
 
 
 def evaluate_diff(commit_range, cwd=None):
-    log_text = run_cmd(["git", "log", "-n", "3", "--oneline", commit_range], cwd=cwd)
-    stat_text = run_cmd(["git", "diff", "--stat", commit_range], cwd=cwd)
-    diff_text = run_cmd(["git", "diff", commit_range], cwd=cwd)
+    log_text = run_cmd(["git", "log", "-n", "3", "--oneline", "--no-color", commit_range], cwd=cwd)
+    stat_text = run_cmd(["git", "diff", "--stat", "--no-color", commit_range], cwd=cwd)
+    diff_text = run_cmd(["git", "diff", *tc.DIFF_AS_TEXT, commit_range], cwd=cwd)
+    paths = run_cmd(["git", "diff", "--name-only", commit_range], cwd=cwd)
+    units = tc.commit_units(commit_range, cwd=cwd)
+    # A range git cannot read is no clean range: an empty diff would pass as risk 0.
+    if None in (log_text, stat_text, diff_text, paths) or units is None:
+        return {"status": "error", "message": f"git liest den Bereich {commit_range!r} nicht"}
 
     # Only masked text leaves the machine (user decision 2026-09-29). Secrets and
     # emails are found locally by the masking itself; TypeSafe judges the rest.
@@ -78,8 +87,8 @@ def evaluate_diff(commit_range, cwd=None):
     local_hits = sum(hits.values())
     # Local leak alarm per commit (rules in ts_common), independent of TypeSafe.
     allowed = tc.allowed_addresses(cwd)
-    local_leak = any(tc.leak_found(*u, allowed=allowed) for u in tc.commit_units(commit_range, cwd=cwd))
-    paths = run_cmd(["git", "diff", "--name-only", commit_range], cwd=cwd).splitlines()
+    local_leak = any(tc.leak_found(*u, allowed=allowed) for u in units)
+    paths = paths.splitlines()
 
     state = {
         "commits": log_text,
@@ -149,7 +158,11 @@ def main():
     res = evaluate_diff(args.range, cwd=args.cwd)
     if args.json:
         print(json.dumps(res, indent=2))
-        return
+        sys.exit(1 if res["status"] == "error" else 0)
+
+    if res["status"] == "error":
+        print(f"Fehler: {res['message']}")
+        sys.exit(1)
 
     if res["status"] == "fail_open":
         print(f"Hinweis: {res['message']}")

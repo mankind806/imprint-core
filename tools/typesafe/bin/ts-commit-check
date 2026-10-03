@@ -14,7 +14,8 @@ Validates:
     toward TypeSafe is separate and more generous.
     Range mode: TypeSafe judges the net diff and the last message; the local alarm
     checks every commit of the range on its own (git rev-list), so a value added in
-    one commit and removed in the next still blocks.
+    one commit and removed in the next still blocks. Each diff is read as normal mode
+    reads it (ts_common.git_text, DIFF_AS_TEXT); a git error exits 1 rather than check less.
     Normal mode (--msg-file or --cached, no MERGE_HEAD): the index against HEAD, read
     as text even for a NUL byte, a -diff file or bytes that are not UTF-8 (cached_added).
     A git error exits 1 rather than check less.
@@ -35,7 +36,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
@@ -74,11 +74,10 @@ QUESTIONS = {
 
 
 def run_cmd(cmd, cwd=None):
-    try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=10)
-        return r.stdout.strip()
-    except Exception:
-        return ""
+    """stdout of the git command CMD (["git", ...]), stripped; "" if git fails. Read
+    as tc.git_text reads it: as bytes, and without `git replace`, like every diff."""
+    out = tc.git_text(cmd[1:], cwd)
+    return "" if out is None else out.strip()
 
 
 def get_diff_and_msg(args, cwd=None):
@@ -113,20 +112,24 @@ def get_diff_and_msg(args, cwd=None):
         diff_text, stat_text, names = read
         return commit_msg, diff_text, stat_text, [(commit_msg, diff_text, names)], None
 
-    resolved = resolve_range(args.range or "HEAD~1..HEAD", cwd)
+    rng = args.range or "HEAD~1..HEAD"
+    resolved = resolve_range(rng, cwd)
     if isinstance(resolved, str):
         return None, None, None, None, resolved
     start, end = resolved
     if commit_msg is None:
-        commit_msg = run_cmd(["git", "log", "-1", "--pretty=%B", end], cwd=cwd)
+        commit_msg = tc.git_text(["log", "-1", "--format=%B", end], cwd)
     if start is None:  # the range reaches back past the root commit: diff the root itself
-        diff_text = run_cmd(["git", "diff-tree", "-p", "--root", "--no-commit-id", end], cwd=cwd)
-        stat_text = run_cmd(["git", "diff-tree", "--stat", "--root", "--no-commit-id", end], cwd=cwd)
+        diff_text = tc.git_text(["diff-tree", "-p", "--root", "--no-commit-id", *tc.DIFF_AS_TEXT, end], cwd)
+        stat_text = tc.git_text(["diff-tree", "--stat", "--root", "--no-commit-id", "--no-color", end], cwd)
         units = tc.commit_units(end + "^!", cwd=cwd)
     else:
-        diff_text = run_cmd(["git", "diff", start, end], cwd=cwd)
-        stat_text = run_cmd(["git", "diff", "--stat", start, end], cwd=cwd)
+        diff_text = tc.git_text(["diff", *tc.DIFF_AS_TEXT, start, end], cwd)
+        stat_text = tc.git_text(["diff", "--stat", "--no-color", start, end], cwd)
         units = tc.commit_units(f"{start}..{end}", cwd=cwd)
+    if None in (commit_msg, diff_text, stat_text) or units is None:
+        return None, None, None, None, f"Commit-Bereich {rng!r}: git liest einen Commit nicht"
+    commit_msg, diff_text, stat_text = commit_msg.strip(), diff_text.strip(), stat_text.strip()
     if args.msg:  # an explicit message is checked too
         units.append((commit_msg, "", ""))
     return commit_msg, diff_text, stat_text, units, None
@@ -139,9 +142,9 @@ def cached_added(cwd=None):
     (color.ui=always would hide every '+'), and a byte that is not UTF-8 as U+FFFD.
     The environment stays, so `git commit -a` and `git commit <path>` keep their
     GIT_INDEX_FILE. A git error exits 1 rather than check less."""
-    diff = _git_text(["diff", "--cached", "--text", "--no-ext-diff", "--no-textconv", "--no-color"], cwd)
-    stat = _git_text(["diff", "--cached", "--stat", "--no-color"], cwd)
-    names = _git_text(["diff", "--cached", "--name-only"], cwd)
+    diff = tc.git_text(["diff", "--cached", *tc.DIFF_AS_TEXT], cwd)
+    stat = tc.git_text(["diff", "--cached", "--stat", "--no-color"], cwd)
+    names = tc.git_text(["diff", "--cached", "--name-only"], cwd)
     if diff is None or stat is None or names is None:
         return "Diff des Index (git diff --cached) nicht lesbar"
     return diff.rstrip("\n"), stat.rstrip("\n"), names.rstrip("\n")
@@ -167,19 +170,6 @@ def merge_parents(cwd=None):
     if not entries or not all(parents):
         return None
     return parents
-
-
-def _git_text(args, cwd=None):
-    """stdout of git ARGS, None if git fails. Bytes that are not UTF-8 become U+FFFD
-    instead of failing the decode, so such a file is read, not dropped. GIT_DIFF_OPTS
-    could override -U0; a `git replace` would show something other than the commit."""
-    env = {k: v for k, v in os.environ.items() if k != "GIT_DIFF_OPTS"}
-    env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    try:
-        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, timeout=120, env=env)
-    except Exception:
-        return None
-    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
 
 
 _HUNK_RE = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -223,11 +213,10 @@ def merge_added(parents, cwd=None):
     parent has: one a parent already has passes, even if that parent renamed a file to it."""
     per_parent, new_names, ordered = [], None, []
     for i, p in enumerate(parents):
-        diff = _git_text(["diff-index", "--cached", "-p", "-M", "-U0", "--text",
-                          "--no-ext-diff", "--no-textconv", "--no-color", p], cwd)
+        diff = tc.git_text(["diff-index", "--cached", "-p", "-M", "-U0", *tc.DIFF_AS_TEXT, p], cwd)
         recs = _added_records(diff) if diff is not None else None
-        names = _git_text(["diff-index", "--cached", "--name-only", "--no-renames",
-                           "--diff-filter=A", p], cwd)
+        names = tc.git_text(["diff-index", "--cached", "--name-only", "--no-renames",
+                             "--diff-filter=A", p], cwd)
         if recs is None or names is None:
             return f"Merge: Diff des Index gegen Elternteil {p} nicht lesbar"
         per_parent.append(set(recs))
