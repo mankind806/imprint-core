@@ -448,6 +448,14 @@ undeclared identity or the shape of personal data, and it fails closed. It does 
 with a clone. How to switch it on, and what it does not enforce:
 [docs/pre-push-hook.md](docs/pre-push-hook.md).
 
+### The commit-msg hook
+
+For this repository, not for the plugin: `.githooks/commit-msg` runs `ts-commit-check`, whose
+local alarm refuses a commit that adds an e-mail address or a value that looks like a secret.
+For a merge it reads only the lines that are new against every parent, so lines a merge brings
+in from either side pass. It is opt-in per clone and fails open when `ts-commit-check` is not
+installed. What it reads for each kind of commit: [docs/commit-msg-hook.md](docs/commit-msg-hook.md).
+
 ## License
 
 MIT, and it covers the whole work – the prose as much as any code. The MIT text speaks of
