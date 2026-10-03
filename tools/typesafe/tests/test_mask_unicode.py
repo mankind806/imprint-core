@@ -39,6 +39,20 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import ts_common as tc  # noqa: E402
 
+# Unicode version gate (2026-10-03). ts_common ships the class-0 NFC quick check Maybe
+# characters of Unicode 16.0.0 as a literal (_NFC_QC_MAYBE_STARTERS, 93; 21 of them are
+# new in 16.0, so a Python with unicodedata 15.0.0, as Python 3.12, derives 72). The tests
+# that compare that literal or its size with unicodedata skip on any other version, as
+# test_mask_golden.test_cases does; masking itself runs on any version. Found by running
+# this suite with unicodedata replaced by a Unicode 15.0 view (code points first assigned
+# in 15.1 or 16.0 unassigned, per DerivedAge.txt): only these two tests failed.
+UNIDATA = "16.0.0"
+needs_unidata = unittest.skipUnless(
+    unicodedata.unidata_version == UNIDATA,
+    "needs unicodedata %s, this Python has %s: the test checks ts_common's literal of the "
+    "Unicode %s quick check Maybe starters (21 of the 93 are new in 16.0); run it with "
+    "Python 3.14" % (UNIDATA, unicodedata.unidata_version, UNIDATA))
+
 # --- Reference grammars (spec section 4), Python syntax, no \b inside -----------------
 SUF_PY = ("stra[ßs]e|strasse|str\\.?|weg|gasse|platz|allee|ring|damm|ufer|chaussee|zeile|stieg"
           "|gässchen|pfad|markt")
@@ -289,6 +303,7 @@ class TestCharacterPredicates(unittest.TestCase):
                 if len(parts) == 2 and parts[1] < "\x80":
                     self.assertNotEqual(unicodedata.normalize("NFC", "".join(parts)), c, repr(c))
 
+    @needs_unidata
     def test_nfc_qc_maybe_starters(self):
         """ts_common ships the class-0 NFC_Quick_Check=Maybe characters as a literal
         (spec A1); it must equal the set derived from unicodedata here (93 in 16.0.0)."""
@@ -684,6 +699,7 @@ class TestNamesLocalWidening(unittest.TestCase):
                          "edge inside a segment of an NFC T); the first: %s"
                          % (len(bad), 2 * n_samples, n_samples, nfc_t, sensitive, " | ".join(bad[:3])))
 
+    @needs_unidata
     def test_every_maybe_starter_after_a_name(self):
         """"Max" + m for every quick check Maybe starter m (spec A1: m starts no segment;
         "x" + m is a segment NFC keeps): one-to-one in NFC text and in text that is not
