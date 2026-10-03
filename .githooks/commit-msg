@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# imprint - commit-msg gate (TypeSafe Jev commit-message & diff check)
+#
+# WHAT IT ENFORCES. Opt-in and fail-open: if `ts-commit-check` is not on PATH,
+# this hook exits 0 and checks nothing. When it is on PATH, it runs
+# `ts-commit-check --msg-file "$1"`, which runs its own local check first,
+# needing no TypeSafe API key: a secret, API key, password, or email-shaped
+# string in the commit message, in the newly added diff lines, or in a changed
+# file name sets its leak probability to 1.0, and that alone refuses the
+# commit (exit 1). With a key configured, `ts-commit-check` also asks TypeSafe
+# System One (Jev) to judge how well the message matches the diff
+# (alignment), whether it omits significant changes, and whether it follows
+# Conventional Commits style - but in this hook's plain `--msg-file` mode
+# (no `--strict`), only the leak check can refuse the commit; the other three
+# print in the report and let it through either way.
+#
+# WHAT IT DOES NOT ENFORCE, which is the larger half here too. Alignment,
+# omissions and Conventional Commits style stay advisory in this hook:
+# `ts-commit-check --strict`, run by hand or from CI, turns the first two into
+# blockers as well, but this hook does not pass that flag.
+#
+# INSTALL - per clone, and it does not arrive with one (the same line
+# `.githooks/pre-push` needs; one `core.hooksPath` covers both files):
+#     git config core.hooksPath .githooks
+# `ts-commit-check` itself is not shipped on this repository's PATH - see
+# tools/typesafe/README.md for building or installing it.
+#
+# BYPASS. `git commit --no-verify` skips this hook silently, the same as it
+# does for pre-push, and this script cannot see that it happened.
+#
+# FAIL-OPEN BY DESIGN - unlike pre-push's fail-closed gate. A missing
+# `ts-commit-check` binary is not treated as a failure here, it is the
+# opted-out state, so the hook exits 0 instead of refusing the commit.
+#
+# In the repository's own four-state vocabulary: the local leak check is
+# **enforced** whenever `ts-commit-check` is on PATH; alignment, omissions and
+# Conventional Commits style are **behaviour rules** in this hook's mode, with
+# `--strict` elsewhere as the enforceable-but-not-enforced-here tooling; and
+# whether `ts-commit-check` is installed at all is reserved to each clone.
+
+command -v ts-commit-check >/dev/null 2>&1 || exit 0
+exec ts-commit-check --msg-file "$1"

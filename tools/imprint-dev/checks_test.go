@@ -645,26 +645,26 @@ func TestCheckHookHostBinary(t *testing.T) {
 		// must not count as a call either — both used to slip past the
 		// "called" scan below since it matched \bimprint_host\b unconditionally.
 		{"a second definition outside the canonical block does not count as calling it", script(
-			"#!/bin/sh\n"+rHostV3Block+"\nimprint_host() { echo claude; }\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			"#!/bin/sh\n" + rHostV3Block + "\nimprint_host() { echo claude; }\nhost=$(imprint_host)\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"imprint_host differs from R-HOST v3", "a second imprint_host definition sits outside the canonical block"}},
 		{"a comment mentioning imprint_host does not count as calling it", script(
-			"#!/bin/sh\n"+rHostV3Block+"\n# imprint_host decides the host\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			"#!/bin/sh\n" + rHostV3Block + "\n# imprint_host decides the host\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"never calls it outside its own definition"}},
 		// P2 residue (Codex's re-review of the first fix): a bare word match
 		// still counted a mention inside quotes as a call.
 		{"a quoted echo mentioning imprint_host is not a call", script(
-			"#!/bin/sh\n"+rHostV3Block+"\necho 'imprint_host is configured'\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			"#!/bin/sh\n" + rHostV3Block + "\necho 'imprint_host is configured'\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"never calls it outside its own definition"}},
 		{"a quoted printf mentioning imprint_host is not a call", script(
-			"#!/bin/sh\n"+rHostV3Block+"\nprintf '%s\\n' \"imprint_host\"\nout=\"$(claude --version)\" || exit 0\n"), 1,
+			"#!/bin/sh\n" + rHostV3Block + "\nprintf '%s\\n' \"imprint_host\"\nout=\"$(claude --version)\" || exit 0\n"), 1,
 			[]string{"never calls it outside its own definition"}},
 		{"Codex's exact reproduction: canonical block, a quoted echo, a blind claude call", script(
-			"#!/bin/sh\n"+rHostV3Block+"\necho 'imprint_host is configured'\n$(claude --version)\n"), 1,
+			"#!/bin/sh\n" + rHostV3Block + "\necho 'imprint_host is configured'\n$(claude --version)\n"), 1,
 			[]string{"never calls it outside its own definition"}},
 		{"a quoted command substitution assignment is a real call", script(
-			"#!/bin/sh\n"+rHostV3Block+"\nhost=\"$(imprint_host)\"\nout=\"$(claude --version)\" || exit 0\n"), 0, nil},
+			"#!/bin/sh\n" + rHostV3Block + "\nhost=\"$(imprint_host)\"\nout=\"$(claude --version)\" || exit 0\n"), 0, nil},
 		{"a call inside a case subject is a real call", script(
-			"#!/bin/sh\n"+rHostV3Block+"\ncase \"$(imprint_host)\" in\n\tclaude) out=\"$(claude --version)\" ;;\nesac\n"), 0, nil},
+			"#!/bin/sh\n" + rHostV3Block + "\ncase \"$(imprint_host)\" in\n\tclaude) out=\"$(claude --version)\" ;;\nesac\n"), 0, nil},
 		{"indentation style (tabs vs spaces) does not break the verbatim match", script(
 			strings.ReplaceAll(rHostV3Script, "\t", "    ")), 0, nil},
 		{"R-HOST v3's canonical block, verbatim and called, passes", script(rHostV3Script), 0, nil},

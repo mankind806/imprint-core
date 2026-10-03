@@ -11,15 +11,76 @@ Fails open on everything (no key, timeout, non-200, parse error): exit 0, no out
 Payload to TypeSafe: last assistant message (masked) + last 15 tool calls as
 {tool, cmd (Bash only, secret-looking parts masked, <=200 chars), error}.
 No file contents, no tool outputs.
+
+Process layout (2026-10-02). The hook runs under a 10 s host timeout
+(~/.claude/settings.json). An in-process deadline (SIGALRM + watchdog thread +
+pthread_sigmask + a finish lock) kept producing races over four review rounds,
+so the deadline now lives in a separate, minimal process:
+
+    Claude Code --stdin--> supervisor  (main(): this file, no arguments)
+                             |  reads stdin (at most STDIN_CAP bytes)
+                             |  spawns the worker in a new session (own pgid)
+                             v
+                           worker  (this file, --worker <start> <deadline> <cap>)
+                             |  prefilter, transcript, masking, keyring, POST
+                             |  stdout: {"stage": ...} lines, then one {"final": ...} line
+                             v
+                           supervisor: select() until DEADLINE_S after its own start
+                             final record in time -> log its record (if any),
+                                                     print the block JSON iff decision == block
+                             timeout / EOF without final / bad line
+                                                  -> killpg(SIGKILL), one error line
+                             always exit 0
+
+The supervisor runs no regex on the input, no keyring, no network, no threads and
+no signal handlers, so it can't be stuck where the worker can (a GIL-holding regex
+match, glibc's resolver, a hung secret-tool). It alone writes the log, so a run
+writes at most one line and the printed decision always matches it. The worker
+has no deadline machinery; it only passes the remaining budget to the keyring
+and POST timeouts so that the usual slow cases end with their own clean record.
+
+Silent paths (stop_hook_active, no claim, no key configured) write no line, as
+before. Every other path writes exactly one: a decision, or result=error with the
+stage the worker last reported: startup (input, transcript, masking), keyring,
+post, parse (the answer) or internal (an unexpected exception in the worker), and
+always a cause:
+    timeout       the deadline, or a keyring/POST call that used up its timeout
+    crash         the worker ended without a final record (any exit status)
+    bad_record    a worker line that isn't a JSON object, a malformed final record,
+                  a line over WORKER_LINE_MAX
+    http_status   the API answered non-200; the status is in "http_status"
+                  (401: key revoked or wrong, 302: an unfollowed redirect, 500, ...)
+    network       connection refused, DNS failure, TLS error, reset, truncated body
+    bad_response  the body isn't JSON, or has no "answers" object
+    parse         "answers" lacks a usable claim/backed noul (missing, not a number,
+                  or not finite: NaN, +-Infinity, an overflow such as 1e400)
+    internal      an exception in the worker or the supervisor
+Non-finite floats (a NaN/Infinity noul) are written as null, here and on the
+worker->supervisor pipe: no line ever carries NaN/Infinity tokens.
+
+If the supervisor itself is killed before the deadline (e.g. by the host), the
+worker is not orphaned for long: it is spawned with PR_SET_PDEATHSIG=SIGKILL, so the
+kernel kills it when the supervisor dies, and with RLIMIT_CPU of WORKER_CPU_LIMIT_S
+as a further backstop. Both are set in the supervisor's spawn (preexec_fn, safe here
+because the supervisor has no threads), not as deadline logic in the worker.
 """
+import time
+_PROCESS_START = time.monotonic()  # before any other import, so DEADLINE_S
+# covers interpreter startup too, not just main()'s own body.
+
 import datetime
+import fcntl
 import json
+import math
 import os
 import re
+import resource
+import select
+import signal
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/..")
-import ts_common as tc  # noqa: E402
 
 CLAIM_MIN = 0.7      # block only if claim >= this ...
 BACKED_MAX = 0.5     # ... and (no local evidence or Jev's backed <= this)
@@ -27,16 +88,11 @@ BACKED_MAX = 0.5     # ... and (no local evidence or Jev's backed <= this)
 EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 MAX_TOOLS = 15
 MAX_MSG = 4000       # keep the tail of the message
-LOG = os.path.expanduser("~/.local/state/typesafe-dev/done-check.jsonl")
 REASON = ("TypeSafe: Erfolgsbehauptung ohne sichtbaren Beleg – bitte erst prüfen "
           "(Befehl/Test ausführen) oder 'nicht geprüft' sagen.")
-CLAIM_RE = re.compile(
+CLAIM_PATTERN = (
     r"\b(fertig|erledigt|funktioniert|behoben|grün|bestanden|klappt|läuft|laufen|erfolgreich|"
-    r"verifiziert|done|fixed|passes|passing|works|verified|succeeded)\b|✔|✅",
-    re.IGNORECASE)
-def redact(text):
-    return tc.mask(text)[0]
-
+    r"verifiziert|done|fixed|passes|passing|works|verified|succeeded)\b|✔|✅")
 
 QUESTIONS = {
     "claim": {"type": "noul", "instructions":
@@ -46,9 +102,117 @@ QUESTIONS = {
                "the last change and succeeded (error=false)."},
 }
 
+# TS_DONE_CHECK_LOG/_DEADLINE_S/_KEYRING_CAP_S exist only for tests and are honoured
+# only together with TS_DONE_CHECK_TESTING=1, so a stray env var in a real
+# environment can't widen the budget or point the log somewhere else. The overrides
+# can only shorten the production budgets, never below the floors.
+_TESTING = os.environ.get("TS_DONE_CHECK_TESTING") == "1"
+_PROD_LOG = os.path.expanduser("~/.local/state/typesafe-dev/done-check.jsonl")
+_PROD_DEADLINE_S = 8.0
+_PROD_KEYRING_CAP_S = 2.0
+_MIN_DEADLINE_S = 1.0
+_MIN_KEYRING_CAP_S = 0.5
+KEYRING_MARGIN_S = 0.3   # keyring timeout stays this far inside the remaining budget
+POST_MARGIN_S = 0.2      # same for the POST timeout
+
+
+def _env_float(name, default, floor=0.0):
+    """A defensive env override: unparsable, nan, or <= 0 -> default; otherwise
+    clamped to [floor, default]. nan needs its own check: it compares False against
+    everything and would otherwise slip through to max(floor, min(nan, default))."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if val != val:  # nan
+        return default
+    if val <= 0:
+        return default
+    return max(floor, min(val, default))
+
+
+def _finite(obj):
+    """obj with every non-finite float (nan, inf, -inf) replaced by None, so
+    json.dumps(..., allow_nan=False) never raises and no NaN/Infinity token is
+    written."""
+    if isinstance(obj, float):
+        return obj if obj - obj == 0 else None  # nan - nan and inf - inf are nan
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    return obj
+
+
+def _dumps(obj):
+    return json.dumps(_finite(obj), allow_nan=False)
+
+
+if _TESTING:
+    LOG = os.environ.get("TS_DONE_CHECK_LOG") or _PROD_LOG
+    DEADLINE_S = _env_float("TS_DONE_CHECK_DEADLINE_S", _PROD_DEADLINE_S, floor=_MIN_DEADLINE_S)
+    KEYRING_CAP_S = _env_float("TS_DONE_CHECK_KEYRING_CAP_S", _PROD_KEYRING_CAP_S,
+                                floor=_MIN_KEYRING_CAP_S)
+else:
+    LOG = _PROD_LOG
+    DEADLINE_S = _PROD_DEADLINE_S
+    KEYRING_CAP_S = _PROD_KEYRING_CAP_S
+
+# Bumped whenever a field is added or its meaning changes. 1: ts, claim, backed,
+# decision (master). 2: + log_version, session_id, transcript_path, payload_masked,
+# error lines (result, fail, stage, elapsed_ms). 3: written by the supervisor; error
+# lines also cover a worker that timed out, crashed or wrote an unreadable record, and
+# carry a cause (see the module docstring).
+LOG_VERSION = 3
+LOG_MAX_BYTES = 20 * 1024 * 1024  # rotate to LOG+".1" (one generation kept) past this
+LOCK_WAIT_MAX_S = 1.0    # a stuck (e.g. SIGSTOP'd) lock holder costs at most this
+_LOCK_POLL_S = 0.02
+STDIN_CAP = 16 * 1024 * 1024        # stdin beyond this is not read
+ENVELOPE_PARSE_MAX = 1024 * 1024    # the supervisor parses stdin itself only up to this
+WORKER_LINE_MAX = 8 * 1024 * 1024   # a worker line longer than this is bad output
+REAP_WAIT_S = 0.1
+WORKER_CPU_LIMIT_S = 10  # RLIMIT_CPU soft limit on the worker (SIGXCPU); hard limit + 1 (SIGKILL)
+_PR_SET_PDEATHSIG = 1    # <linux/prctl.h>
+_STAGES = ("startup", "keyring", "post", "parse")
+
+
+# ---------------------------------------------------------------- worker ----
+
+_TC = []
+
+
+def _tc():
+    """ts_common, imported on first use: the supervisor never imports it, and the
+    worker only once a claim got past the prefilter."""
+    if not _TC:
+        import ts_common
+        _TC.append(ts_common)
+    return _TC[0]
+
+
+def _claim_re():
+    """CLAIM_PATTERN, compiled on first use: in the worker only, never in the supervisor."""
+    if not _CLAIM_RE:
+        _CLAIM_RE.append(re.compile(CLAIM_PATTERN, re.IGNORECASE))
+    return _CLAIM_RE[0]
+
+
+_CLAIM_RE = []
+
+
+def redact(text):
+    return _tc().mask(text)[0]
+
 
 def tool_calls(path):
-    """Last MAX_TOOLS tool calls (chronological) from the transcript JSONL."""
+    """Last MAX_TOOLS tool calls (chronological) from the transcript JSONL.
+
+    Bash commands are redacted only after slicing to the last MAX_TOOLS calls (the
+    returned content is the same as redacting every call first): redacting every
+    Bash call of a long transcript made this scale with the whole transcript."""
     calls, by_id = [], {}
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -64,15 +228,24 @@ def tool_calls(path):
                     continue
                 if b.get("type") == "tool_use":
                     inp = b.get("input") or {}
-                    c = {"tool": b.get("name")}
-                    if b.get("name") == "Bash":
-                        c["cmd"] = redact(str(inp.get("command", "")))[:200]
-                    c["error"] = None          # unknown until a result shows up
+                    name = b.get("name")
+                    if name == "Bash":
+                        # Key order tool, cmd, error as in master; "cmd" is filled in
+                        # below (re-assigning an existing key doesn't move it).
+                        c = {"tool": name, "cmd": None, "error": None,
+                             "_raw_cmd": str(inp.get("command", ""))}
+                    else:
+                        c = {"tool": name, "error": None}  # error: unknown until a result shows up
                     calls.append(c)
                     by_id[b.get("id")] = c
                 elif b.get("type") == "tool_result" and b.get("tool_use_id") in by_id:
                     by_id[b["tool_use_id"]]["error"] = bool(b.get("is_error"))
-    return calls[-MAX_TOOLS:]
+    calls = calls[-MAX_TOOLS:]
+    for c in calls:
+        raw = c.pop("_raw_cmd", None)
+        if raw is not None:
+            c["cmd"] = redact(raw)[:200]
+    return calls
 
 
 def last_assistant_text(path):
@@ -95,46 +268,388 @@ def last_assistant_text(path):
     return txt
 
 
-def log(claim, backed, decision):
-    try:
-        os.makedirs(os.path.dirname(LOG), exist_ok=True)
-        rec = {"ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-               "claim": claim, "backed": backed, "decision": decision}
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
-    except Exception:
-        pass
-
-
 def local_evidence(calls):
     """Order is decided in code, not by the model: a successful non-edit call after the last edit."""
     last_edit = max((i for i, c in enumerate(calls) if c.get("tool") in EDIT_TOOLS), default=-1)
     return any(c.get("error") is False and c.get("tool") not in EDIT_TOOLS for c in calls[last_edit + 1:])
 
 
-def main():
+def check(raw, emit=None, start=None, deadline=None, keyring_cap=None):
+    """The worker's whole job, callable in-process (tests do). `raw` is the hook's
+    stdin as bytes. Reports progress through emit({"stage": ...}) and returns the
+    final record: {"final": True, "session_id", "transcript_path", "log": body}, where
+    body is the log line without its envelope, or None for the silent paths.
+    start/deadline are time.monotonic() values (CLOCK_MONOTONIC is system-wide, so the
+    supervisor's values are valid here); the defaults suit an in-process call."""
+    if emit is None:
+        def emit(rec):
+            pass
+    if start is None:
+        start = time.monotonic()
+    if deadline is None:
+        deadline = start + DEADLINE_S
+    if keyring_cap is None:
+        keyring_cap = KEYRING_CAP_S
+    session_id = tp = None
+
+    def remaining():
+        return deadline - time.monotonic()
+
+    def final(body):
+        return {"final": True, "session_id": session_id, "transcript_path": tp, "log": body}
+
+    def error(stage, cause, payload_masked=None, http_status=None):
+        """payload_masked only where a TypeSafe POST was actually attempted."""
+        body = {"result": "error", "fail": "open", "stage": stage, "cause": cause}
+        if http_status is not None:
+            body["http_status"] = http_status
+        body["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+        if payload_masked is not None:
+            body["payload_masked"] = payload_masked
+        return final(body)
+
     try:
-        inp = json.load(sys.stdin)
+        inp = json.loads(raw.decode("utf-8"))
         if inp.get("stop_hook_active"):
-            return 0
+            return final(None)
+        session_id = inp.get("session_id")
         tp = inp.get("transcript_path")
         msg = inp.get("last_assistant_message") or (last_assistant_text(tp) if tp else "")
-        if not msg or not CLAIM_RE.search(msg):
-            return 0
+        if not msg or not _claim_re().search(msg):
+            return final(None)
+        tc = _tc()
         calls = tool_calls(tp) if tp and os.path.exists(tp) else []
         state = {"assistant_message": redact(msg)[-MAX_MSG:], "tool_calls": calls}
-        ans = tc.post(state, QUESTIONS)
-        claim, backed = tc.noul(ans or {}, "claim"), tc.noul(ans or {}, "backed")
-        if claim is None or backed is None:
-            return 0
+        # Exactly what tc.post() transmits (it re-masks with the same _mask_tree).
+        masked_payload = tc._mask_tree(state)
+
+        emit({"stage": "keyring"})
+        budget = remaining()
+        if budget <= 0:
+            return error("keyring", "timeout")
+        # The margin comes off the budget, not off the cap: min(cap, budget) - margin
+        # would shrink the cap itself even when the cap is what binds.
+        key_timeout = max(0.05, min(keyring_cap, budget - KEYRING_MARGIN_S))
+        t0 = time.monotonic()
+        key = tc.get_key(timeout=key_timeout, die_with_parent=True)
+        if not key:
+            # A keyring that used up its timeout is logged; "no key configured" stays silent.
+            if time.monotonic() - t0 >= key_timeout * 0.9:
+                return error("keyring", "timeout")
+            return final(None)
+
+        budget = remaining()
+        if budget <= 0:
+            return error("post", "timeout")
+        emit({"stage": "post", "payload_masked": masked_payload})
+        detail = {}
+        ans = tc.post(state, QUESTIONS, timeout=max(0.05, budget - POST_MARGIN_S), key=key,
+                      detail=detail)
+        if ans is None:
+            return error("post", detail.get("reason") or "internal", masked_payload,
+                         detail.get("status"))
+
+        emit({"stage": "parse"})
+        claim, backed = tc.noul(ans, "claim"), tc.noul(ans, "backed")
+        # A non-finite noul (NaN, +-Infinity, an overflowing 1e400) is no probability:
+        # no decision, the same fail-open as a missing one.
+        if claim is None or backed is None or not (math.isfinite(claim) and math.isfinite(backed)):
+            return error("parse", "parse", masked_payload)
         block = claim >= CLAIM_MIN and (not local_evidence(calls) or backed <= BACKED_MAX)
-        log(claim, backed, "block" if block else "pass")
-        if block:
-            print(json.dumps({"decision": "block", "reason": REASON}, ensure_ascii=False))
+        return final({"claim": claim, "backed": backed, "decision": "block" if block else "pass",
+                      "payload_masked": masked_payload})
+    except Exception:
+        return error("internal", "internal")
+
+
+def _worker_entry(args):
+    """`--worker <start> <deadline> <keyring_cap>`: stdin from the supervisor, JSON lines
+    to stdout. No deadline of its own: the supervisor kills the whole process group."""
+    def emit(rec):
+        sys.stdout.write(_dumps(rec) + "\n")
+        sys.stdout.flush()
+
+    try:
+        start, deadline, keyring_cap = (float(a) for a in args[:3])
+        emit(check(sys.stdin.buffer.read(), emit, start, deadline, keyring_cap))
+    except BaseException:
+        pass  # no final record: the supervisor logs the last stage
+    os._exit(0)
+
+
+# ------------------------------------------------------------ supervisor ----
+
+def _acquire_lock_nb_bounded(lock_fd, budget_s):
+    """LOCK_NB, retried for at most budget_s (<= 0: one try). Never blocks: a
+    SIGSTOP'd holder must not hold this process past its own deadline."""
+    end = time.monotonic() + max(budget_s, 0.0)
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            left = end - time.monotonic()
+            if left <= 0:
+                return False
+            time.sleep(min(_LOCK_POLL_S, left))
+
+
+def _write_log_line(rec):
+    """One O_APPEND write of one line, file created at 0600 and tightened to 0600 if
+    found looser (it carries masked text, session IDs and paths)."""
+    fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        st = os.fstat(f.fileno())
+        if st.st_uid == os.getuid() and (st.st_mode & 0o777) != 0o600:
+            os.fchmod(f.fileno(), 0o600)
+        f.write(_dumps(rec) + "\n")
+
+
+def _append_log(rec, lock_budget_s=LOCK_WAIT_MAX_S):
+    """Bounded, never-raising append. Several sessions' Stop hooks can write at the
+    same time, so check-rotate-append runs under an flock on a stable side file (the
+    size is checked again once the lock is held). Without the lock in time (e.g. a
+    stopped holder) the line is appended without the rotation check."""
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        lock_fd = os.open(LOG + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            if _acquire_lock_nb_bounded(lock_fd, lock_budget_s):
+                try:
+                    try:
+                        if os.path.getsize(LOG) > LOG_MAX_BYTES:
+                            os.replace(LOG, LOG + ".1")
+                    except FileNotFoundError:
+                        pass
+                    _write_log_line(rec)
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            else:
+                _write_log_line(rec)
+        finally:
+            os.close(lock_fd)
     except Exception:
         pass
+
+
+def _envelope(session_id, transcript_path):
+    return {"ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "log_version": LOG_VERSION, "session_id": session_id,
+            "transcript_path": transcript_path}
+
+
+def _read_stdin(deadline):
+    """Up to STDIN_CAP bytes from fd 0 until EOF; None if the deadline passes first.
+    An unreadable fd 0 counts as empty input."""
+    chunks, total = [], 0
+    try:
+        while total < STDIN_CAP:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            if not select.select([0], [], [], left)[0]:
+                return None
+            chunk = os.read(0, min(1 << 16, STDIN_CAP - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except (OSError, ValueError):
+        pass
+    return b"".join(chunks)
+
+
+def _pump(proc, data, deadline, st):
+    """Feeds `data` to the worker's stdin and reads its JSON lines. Returns
+    (final record, None), or (None, cause) on a failure: "timeout" (the deadline),
+    "crash" (EOF without a final record) or "bad_record" (a line that isn't a JSON
+    object, a malformed final record, a line over WORKER_LINE_MAX). Progress lines
+    update st."""
+    out_fd = proc.stdout.fileno()
+    in_fd = proc.stdin.fileno()
+    view, off = memoryview(data), 0
+    writing = True
+    if not data:
+        proc.stdin.close()
+        writing = False
+    else:
+        os.set_blocking(in_fd, False)
+    buf = bytearray()
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None, "timeout"
+        readable, writable, _ = select.select([out_fd], [in_fd] if writing else [], [], left)
+        if writable:
+            try:
+                off += os.write(in_fd, view[off:off + (1 << 16)])
+            except BlockingIOError:
+                pass
+            except OSError:  # the worker closed its stdin or is gone
+                off = len(data)
+            if off >= len(data):
+                proc.stdin.close()
+                writing = False
+        if readable:
+            chunk = os.read(out_fd, 1 << 16)
+            if not chunk:
+                return None, "crash"
+            buf += chunk
+            while True:
+                nl = buf.find(b"\n")
+                if nl < 0:
+                    break
+                line = bytes(buf[:nl])
+                del buf[:nl + 1]
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    return None, "bad_record"
+                if not isinstance(rec, dict):
+                    return None, "bad_record"
+                if rec.get("final") is True:
+                    body = rec.get("log")
+                    if body is None or isinstance(body, dict):
+                        return rec, None
+                    return None, "bad_record"
+                if rec.get("stage") in _STAGES:
+                    st["stage"] = rec["stage"]
+                if "payload_masked" in rec:
+                    st["payload"] = rec["payload_masked"]
+            if len(buf) > WORKER_LINE_MAX:
+                return None, "bad_record"
+
+
+def _worker_preexec():
+    """preexec_fn for the worker (runs in the forked child before exec; safe because
+    the supervisor has no threads). Kernel-side backstops for a supervisor that dies
+    before the deadline: PR_SET_PDEATHSIG=SIGKILL, and RLIMIT_CPU. libc is looked up
+    here in the parent; the returned function never raises (an exception there would
+    make Popen fail, i.e. every run would fail open)."""
+    parent = os.getpid()
+    try:
+        import ctypes
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+        args = (ctypes.c_int(_PR_SET_PDEATHSIG), ctypes.c_ulong(int(signal.SIGKILL)),
+                ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0))
+    except Exception:
+        prctl = None
+
+    def preexec():
+        try:
+            if prctl is not None:
+                prctl(*args)
+                if os.getppid() != parent:  # the supervisor died before prctl took effect
+                    os._exit(0)
+        except BaseException:
+            pass
+        try:
+            resource.setrlimit(resource.RLIMIT_CPU, (WORKER_CPU_LIMIT_S, WORKER_CPU_LIMIT_S + 1))
+        except BaseException:
+            pass
+    return preexec
+
+
+def _kill_group(proc):
+    """SIGKILL the worker's whole process group (a secret-tool grandchild too). Called
+    before anything reaps the worker, so its pid, hence the pgid, can't be reused."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _reap(proc):
+    try:
+        proc.wait(timeout=REAP_WAIT_S)
+    except BaseException:
+        pass
+    for f in (proc.stdin, proc.stdout):
+        try:
+            f.close()
+        except BaseException:
+            pass
+
+
+def _lock_budget(deadline):
+    return max(0.0, min(LOCK_WAIT_MAX_S, deadline - time.monotonic()))
+
+
+def _log_error(st, deadline, cause):
+    body = {"result": "error", "fail": "open", "stage": st["stage"], "cause": cause,
+            "elapsed_ms": int((time.monotonic() - _PROCESS_START) * 1000)}
+    if st["stage"] in ("post", "parse") and st["payload"] is not None:
+        body["payload_masked"] = st["payload"]
+    rec = _envelope(st["sid"], st["tp"])
+    rec.update(body)
+    st["logged"] = True
+    _append_log(rec, _lock_budget(deadline))
+
+
+def _supervise(st):
+    deadline = _PROCESS_START + DEADLINE_S
+    raw = _read_stdin(deadline)
+    if raw is None:
+        _log_error(st, deadline, "timeout")
+        return
+    if len(raw) <= ENVELOPE_PARSE_MAX:
+        try:
+            inp = json.loads(raw.decode("utf-8"))
+            if isinstance(inp, dict):
+                st["sid"], st["tp"] = inp.get("session_id"), inp.get("transcript_path")
+        except Exception:
+            pass
+    st["proc"] = proc = subprocess.Popen(
+        [sys.executable, os.path.realpath(__file__), "--worker",
+         repr(_PROCESS_START), repr(deadline), repr(KEYRING_CAP_S)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        start_new_session=True, preexec_fn=_worker_preexec())
+    fin, cause = _pump(proc, raw, deadline, st)
+    _kill_group(proc)
+    if fin is None:
+        _log_error(st, deadline, cause)
+        return
+    for key, field in (("session_id", "sid"), ("transcript_path", "tp")):
+        if st[field] is None:  # the worker's value only where this process had none (large input)
+            st[field] = fin.get(key)
+    body = fin.get("log")
+    if body is None:
+        return  # a silent path: no line, no output
+    rec = _envelope(st["sid"], st["tp"])
+    rec.update(body)
+    st["logged"] = True
+    _append_log(rec, _lock_budget(deadline))
+    if body.get("decision") == "block":
+        print(json.dumps({"decision": "block", "reason": REASON}, ensure_ascii=False))
+        sys.stdout.flush()
+
+
+def main():
+    """The hook. Always returns 0; at most one log line; prints the block JSON iff the
+    logged decision is block."""
+    st = {"stage": "startup", "payload": None, "sid": None, "tp": None,
+          "logged": False, "proc": None}
+    try:
+        _supervise(st)
+    except BaseException:
+        if not st["logged"]:
+            _log_error(st, _PROCESS_START + DEADLINE_S, "internal")
+    finally:
+        if st["proc"] is not None:
+            _kill_group(st["proc"])
+            _reap(st["proc"])
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        _worker_entry(sys.argv[2:])
+    try:
+        main()
+    except BaseException:
+        pass
+    try:
+        sys.stdout.flush()
+    except BaseException:
+        pass
+    os._exit(0)
